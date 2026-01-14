@@ -33,6 +33,8 @@ function App() {
     const [secretWord, setSecretWord] = useState<string>("");
     const [showSecret, setShowSecret] = useState<boolean>(false);
     const [hasGenerated, setHasGenerated] = useState<boolean>(false);
+    const [addressCopied, setAddressCopied] = useState<boolean>(false);
+    const [secretCopied, setSecretCopied] = useState<boolean>(false);
 
     const handleGenerateClick = () => {
         const newAddress = generateRandomAddress();
@@ -40,6 +42,25 @@ function App() {
         setAddress(newAddress);
         setSecretWord(newSecret);
         setHasGenerated(true);
+        setAddressCopied(false);
+        setSecretCopied(false);
+    };
+
+    const copyToClipboard = async (text: string, type: 'address' | 'secret') => {
+        if (!text) return;
+        
+        try {
+            await navigator.clipboard.writeText(text);
+            if (type === 'address') {
+                setAddressCopied(true);
+                setTimeout(() => setAddressCopied(false), 2000);
+            } else {
+                setSecretCopied(true);
+                setTimeout(() => setSecretCopied(false), 2000);
+            }
+        } catch (err) {
+            console.error('Failed to copy:', err);
+        }
     };
 
     return (
@@ -62,10 +83,23 @@ function App() {
                         <p className="card-subtitle">Create a random proxy address instantly</p>
                     </div>
 
-                    {/* Address Display */}
+                    {/* Address Display - Click to Copy */}
                     <div className="address-container">
-                        <div className={`address-display ${hasGenerated ? 'has-address' : ''}`}>
-                            {address || "Click below to generate an address"}
+                        <div 
+                            className={`address-display ${hasGenerated ? 'has-address' : ''} ${addressCopied ? 'copied' : ''}`}
+                            onClick={() => copyToClipboard(address, 'address')}
+                            title={hasGenerated ? "Click to copy" : ""}
+                        >
+                            <div className="address-wrapper">
+                                <span className="address-text">
+                                    {address || "Click below to generate an address"}
+                                </span>
+                                {hasGenerated && (
+                                    <span className={`copy-hint ${addressCopied ? 'copied' : ''}`}>
+                                        {addressCopied ? '✓ Copied!' : 'Click to copy'}
+                                    </span>
+                                )}
+                            </div>
                         </div>
                     </div>
 
@@ -82,9 +116,18 @@ function App() {
                         </label>
 
                         {showSecret && hasGenerated && (
-                            <div className="secret-display">
-                                <div className="secret-label">Your Secret</div>
+                            <div 
+                                className={`secret-display ${secretCopied ? 'copied' : ''}`}
+                                onClick={() => copyToClipboard(secretWord, 'secret')}
+                                title="Click to copy"
+                            >
+                                <div className="secret-label">
+                                    {secretCopied ? '✓ Copied!' : 'Your Secret'}
+                                </div>
                                 <div className="secret-word">{secretWord}</div>
+                                <div className={`secret-copy-hint ${secretCopied ? 'copied' : ''}`}>
+                                    {secretCopied ? '✓ Copied!' : 'Click to copy'}
+                                </div>
                             </div>
                         )}
                     </div>
