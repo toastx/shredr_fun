@@ -49,12 +49,12 @@ export interface DerivedKeys {
 // ============ ERROR TYPES ============
 
 export class DecryptionError extends Error {
-    readonly cause: 'wrong_key' | 'corrupted' | 'unknown';
+    readonly reason: 'wrong_key' | 'corrupted' | 'unknown';
     
-    constructor(cause: 'wrong_key' | 'corrupted' | 'unknown', message: string) {
+    constructor(reason: 'wrong_key' | 'corrupted' | 'unknown', message: string) {
         super(message);
         this.name = 'DecryptionError';
-        this.cause = cause;
+        this.reason = reason;
     }
 }
 
