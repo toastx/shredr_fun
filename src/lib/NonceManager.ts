@@ -13,35 +13,27 @@
  * Note: Burner wallet derivation is handled by EncryptionClient
  */
 
+import { SecureStorage, DecryptionError, type NonceState } from './SecureStorage';
 import { 
-    SecureStorage, 
     ALGORITHM, 
-    IV_LENGTH,
-    uint8ArrayToBase64,
-    base64ToUint8Array,
-    uint8ArrayToBase58,
+    IV_LENGTH, 
+    WALLET_HASH_LENGTH, 
+    MAX_NONCE_INDEX,
+    DOMAIN_NONCE_SEED,
+    DOMAIN_ENCRYPT_KEY
+} from './constants';
+import { 
+    uint8ArrayToBase64, 
+    base64ToUint8Array, 
+    uint8ArrayToBase58, 
     zeroMemory,
-    DecryptionError,
-    type NonceState
-} from './SecureStorage';
+    getArrayBuffer
+} from './utils';
 
 // Re-export for backward compatibility
 export { DecryptionError, type NonceState };
-
-// ============ CONSTANTS ============
-
-/** Wallet hash length for collision resistance (16 chars = ~96 bits) */
-export const WALLET_HASH_LENGTH = 16;
-
-/** Maximum valid nonce index (2^32 - 1) */
-export const MAX_NONCE_INDEX = 0xFFFFFFFF;
-
-/** Message prefix for wallet signature - change for your own deployment */
-export const MASTER_MESSAGE = 'SHREDR_V1';
-
-/** Domain separation suffixes for key derivation */
-export const DOMAIN_NONCE_SEED = 'SHREDR_NONCE_SEED';
-export const DOMAIN_ENCRYPT_KEY = 'SHREDR_ENCRYPT_KEY';
+export { WALLET_HASH_LENGTH, MAX_NONCE_INDEX, DOMAIN_NONCE_SEED, DOMAIN_ENCRYPT_KEY } from './constants';
+export { MASTER_MESSAGE } from './constants';
 
 // ============ TYPES ============
 
@@ -168,10 +160,7 @@ export class NonceManager {
         this._currentIndex = 0;
         
         // Base nonce is just the master seed hashed
-        const nonceBuffer = await crypto.subtle.digest('SHA-256', this._masterSeed.buffer.slice(
-            this._masterSeed.byteOffset,
-            this._masterSeed.byteOffset + this._masterSeed.byteLength
-        ) as ArrayBuffer);
+        const nonceBuffer = await crypto.subtle.digest('SHA-256', getArrayBuffer(this._masterSeed));
         this._currentNonce = new Uint8Array(nonceBuffer);
         
         // Persist to storage
@@ -197,10 +186,7 @@ export class NonceManager {
         }
         
         // New nonce = SHA256(current nonce)
-        const newNonceBuffer = await crypto.subtle.digest('SHA-256', this._currentNonce.buffer.slice(
-            this._currentNonce.byteOffset,
-            this._currentNonce.byteOffset + this._currentNonce.byteLength
-        ) as ArrayBuffer);
+        const newNonceBuffer = await crypto.subtle.digest('SHA-256', getArrayBuffer(this._currentNonce));
         this._currentNonce = new Uint8Array(newNonceBuffer);
         this._currentIndex++;
         
@@ -276,9 +262,9 @@ export class NonceManager {
         let decrypted: ArrayBuffer;
         try {
             decrypted = await crypto.subtle.decrypt(
-                { name: ALGORITHM, iv: iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength) as ArrayBuffer },
+                { name: ALGORITHM, iv: getArrayBuffer(iv) },
                 encryptionKey,
-                ciphertext.buffer.slice(ciphertext.byteOffset, ciphertext.byteOffset + ciphertext.byteLength) as ArrayBuffer
+                getArrayBuffer(ciphertext)
             );
         } catch (e) {
             // AES-GCM auth failure = wrong key or tampered data

@@ -5,22 +5,8 @@
  * Used by NonceManager for secure nonce state persistence.
  */
 
-// ============ CONSTANTS ============
-
-/** AES-GCM encryption algorithm */
-export const ALGORITHM = 'AES-GCM';
-
-/** IV length for AES-GCM (12 bytes recommended) */
-export const IV_LENGTH = 12;
-
-/** IndexedDB database name */
-export const DB_NAME = 'shredr_secure_storage';
-
-/** IndexedDB database version */
-export const DB_VERSION = 1;
-
-/** IndexedDB object store name */
-export const STORE_NAME = 'nonce_state';
+import { ALGORITHM, IV_LENGTH, DB_NAME, DB_VERSION, STORE_NAME } from './constants';
+import { uint8ArrayToBase64, base64ToUint8Array } from './utils';
 
 // ============ TYPES ============
 
@@ -40,47 +26,6 @@ export class DecryptionError extends Error {
         this.name = 'DecryptionError';
         this.reason = reason;
     }
-}
-
-// ============ UTILITY FUNCTIONS ============
-
-export function uint8ArrayToBase64(bytes: Uint8Array): string {
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-}
-
-export function base64ToUint8Array(base64: string): Uint8Array {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-}
-
-export function uint8ArrayToBase58(bytes: Uint8Array): string {
-    const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-    if (bytes.length === 0) return '';
-    
-    let result = '';
-    let num = BigInt('0x' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''));
-    while (num > 0) {
-        result = ALPHABET[Number(num % 58n)] + result;
-        num = num / 58n;
-    }
-    for (const byte of bytes) {
-        if (byte === 0) result = '1' + result;
-        else break;
-    }
-    return result || '1';
-}
-
-export function zeroMemory(arr: Uint8Array): void {
-    crypto.getRandomValues(arr); // Overwrite with random
-    arr.fill(0); // Then zero
 }
 
 // ============ SECURE STORAGE CLASS ============
@@ -117,7 +62,6 @@ export class SecureStorage {
     }
 
     private async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-        // Queue-based mutex to prevent race conditions
         const previousLock = this.lockQueue.get(key) ?? Promise.resolve();
         
         let releaseLock: () => void;
@@ -129,7 +73,6 @@ export class SecureStorage {
             return await fn();
         } finally {
             releaseLock!();
-            // Clean up if this is the last lock in the queue
             if (this.lockQueue.get(key) === currentLock) {
                 this.lockQueue.delete(key);
             }
