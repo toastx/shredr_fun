@@ -1,0 +1,65 @@
+/* ========== NAVBAR ========== */
+.navbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1000;
+    padding: 1.5rem 2rem;
+    background-color: #0a0a0a;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #1a1a1a;
+}
+
+.navbar-brand {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #ff1a1a;
+    letter-spacing: -0.02em;
+    text-shadow: 0 0 30px rgba(255, 26, 26, 0.3);
+}
+
+.navbar-links {
+    display: flex;
+    gap: 2rem;
+    list-style: none;
+}
+
+.navbar-links a {
+    color: #666666;
+    text-decoration: none;
+    font-size: 0.875rem;
+    font-weight: 400;
+    letter-spacing: 0.05em;
+    transition: color 0.2s ease;
+    text-transform: lowercase;
+}
+
+.navbar-links a:hover {
+    color: #e0e0e0;
+}
+
+.navbar-links a.active {
+    color: #ff1a1a;
+}
+
+/* ========== RESPONSIVE ========== */
+@media (max-width: 640px) {
+    .navbar {
+        padding: 1rem;
+    }
+
+    .navbar-brand {
+        font-size: 1rem;
+    }
+
+    .navbar-links {
+        gap: 1rem;
+    }
+
+    .navbar-links a {
+        font-size: 0.75rem;
+    }
+}

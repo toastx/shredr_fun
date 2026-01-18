@@ -1,73 +1,62 @@
-# React + TypeScript + Vite
+# ✂️ shredr.fun
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+### **The Solana Address Alternative to TempMail**
 
-Currently, two official plugins are available:
+**shredr.fun** is a privacy-first utility that allows users to generate disposable, zero-link burner addresses to receive funds. Operating on a **Commitment-Claim architecture**, it ensures that the transaction history of the burner is cryptographically isolated from your main wallet until the moment of the claim—at which point the link is broken through **Multi-Party Computation (MPC)**.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+---
 
-## React Compiler
+## 🔄 User Flow
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+The "shredding" process occurs through four distinct stages:
 
-## Expanding the ESLint configuration
+1.  **Generation:**
+    *   The user clicks **"Generate"** on the frontend.
+    *   A **12-word BIP39 mnemonic** is generated locally in the browser (client-side only).
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+2.  **Commitment:**
+    *   The mnemonic is hashed into a **Commitment ($C$)**:
+        $$C = \text{Hash}(\text{mnemonic} + \text{nullifier})$$
+    *   This commitment is stored on-chain, serving as the cryptographic lock.
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+3.  **Receive:**
+    *   A **burner PDA (Program Derived Address)** is initialized.
+    *   The payer sends SOL or SPL tokens to this address. The funds sit in this PDA, publicly visible but cryptographically claimed by the commitment.
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+4.  **Shred & Claim:**
+    *   To withdraw, the user enters the 12-word note.
+    *   An **Arcium MPC cluster** verifies the note against the on-chain commitment.
+    *   **Critical:** No single node (nor the blockchain) ever sees the plaintext words.
+    *   Once verified, the funds are "shredded" (transferred) to the user's main wallet.
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+---
+
+## 🛠 The Tech Stack
+
+*   **Solana:** The high-speed settlement layer where commitments and PDAs live.
+*   **Arcium (MPC):** The **"Encrypted Supercomputer"** that handles the private verification of your 12-word note. It ensures the link between the burner and your main wallet is never exposed.
+*   **C-SPL (Confidential SPL):** A Token-2022 extension used to hide the transaction amount. This prevents observers from linking accounts via "amount matching" (e.g., seeing 4.20 SOL leave one wallet and enter another).
+
+---
+
+## 📦 Getting Started
+
+### Prerequisites
+* [Solana CLI](https://docs.solana.com/cli/install-solana-cli-tools)
+* [Anchor Framework](https://www.anchor-lang.com/)
+* [Arcium SDK](https://docs.arcium.com/)
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/your-username/shredr-fun.git
+
+# Install dependencies
+cd shredr-fun
+npm install
+
+# Deploy Anchor program
+anchor deploy
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```

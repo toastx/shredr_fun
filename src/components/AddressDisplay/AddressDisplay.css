@@ -1,0 +1,86 @@
+/* ========== ADDRESS DISPLAY ========== */
+.address-container {
+    margin-bottom: 1.5rem;
+}
+
+.address-label {
+    font-size: 0.625rem;
+    color: #666666;
+    text-transform: lowercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 0.5rem;
+}
+
+.address-display {
+    background-color: #0f0f0f;
+    border: 1px solid #1a1a1a;
+    padding: 1rem;
+    font-size: 0.75rem;
+    color: #ff1a1a;
+    text-align: center;
+    word-break: break-all;
+    line-height: 1.6;
+    min-height: 50px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    cursor: pointer;
+}
+
+.address-display:hover {
+    border-color: #333333;
+    background-color: #111111;
+}
+
+.address-display.has-address {
+    border-color: #1a1a1a;
+}
+
+.address-display.copied {
+    border-color: #22c55e;
+    background-color: rgba(34, 197, 94, 0.05);
+}
+
+.address-display.copied .address-text {
+    color: #22c55e;
+}
+
+.address-wrapper {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+}
+
+.address-text {
+    transition: color 0.2s ease;
+    letter-spacing: 0.02em;
+}
+
+.copy-hint {
+    font-size: 0.625rem;
+    color: #666666;
+    text-transform: lowercase;
+    letter-spacing: 0.1em;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.address-display:hover .copy-hint {
+    opacity: 1;
+}
+
+.copy-hint.copied {
+    color: #22c55e;
+    opacity: 1;
+}
+
+/* ========== RESPONSIVE ========== */
+@media (max-width: 640px) {
+    .address-display {
+        font-size: 0.625rem;
+        padding: 0.875rem;
+    }
+}

@@ -1,0 +1,66 @@
+/* ========== HASH DISPLAY ========== */
+.hash-section {
+    margin-bottom: 1.5rem;
+    animation: fadeIn 0.2s ease;
+}
+
+.hash-label {
+    font-size: 0.625rem;
+    color: #666666;
+    text-transform: lowercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 0.5rem;
+}
+
+.hash-display {
+    background-color: #0f0f0f;
+    border: 1px solid #1a1a1a;
+    padding: 1rem;
+    font-size: 0.5rem;
+    color: #e0e0e0;
+    text-align: center;
+    word-break: break-all;
+    line-height: 1.8;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    letter-spacing: 0.05em;
+}
+
+.hash-display:hover {
+    border-color: #333333;
+    background-color: #111111;
+}
+
+.hash-display.copied {
+    border-color: #22c55e;
+    background-color: rgba(34, 197, 94, 0.05);
+    color: #22c55e;
+}
+
+.hash-copy-hint {
+    font-size: 0.5rem;
+    color: #666666;
+    text-transform: lowercase;
+    letter-spacing: 0.1em;
+    margin-top: 0.5rem;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.hash-display:hover .hash-copy-hint {
+    opacity: 1;
+}
+
+.hash-copy-hint.copied {
+    color: #22c55e;
+    opacity: 1;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
