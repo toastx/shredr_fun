@@ -231,52 +231,10 @@ class SecureStorage {
         };
         await this.saveState(walletHash, state);
     }
-
-    private async getStateUnsafe(walletHash: string): Promise<NonceState | null> {
-        if (!this.db) throw new Error('Storage not initialized');
-        
-        return new Promise((resolve, reject) => {
-            const tx = this.db!.transaction(STORE_NAME, 'readonly');
-            const store = tx.objectStore(STORE_NAME);
-            const request = store.get(walletHash);
-            
-            request.onerror = () => reject(new Error('Failed to read state'));
-            request.onsuccess = async () => {
-                if (!request.result) {
-                    resolve(null);
-                    return;
-                }
-                try {
-                    const decrypted = await this.decrypt(request.result.data);
-                    resolve(JSON.parse(decrypted));
-                } catch (e) {
-                    if (e instanceof DecryptionError) {
-                        reject(e);
-                    } else {
-                        reject(new DecryptionError('corrupted', `Failed to parse state: ${e}`));
-                    }
-                }
-            };
-            
-            tx.onerror = () => reject(new Error('Transaction failed'));
-        });
+    getEncryptionKey(): CryptoKey | null {
+        return this.encryptionKey;
     }
 
-    private async saveStateUnsafe(walletHash: string, state: NonceState): Promise<void> {
-        if (!this.db) throw new Error('Storage not initialized');
-        
-        const encrypted = await this.encrypt(JSON.stringify(state));
-        
-        return new Promise((resolve, reject) => {
-            const tx = this.db!.transaction(STORE_NAME, 'readwrite');
-            const store = tx.objectStore(STORE_NAME);
-            const request = store.put({ id: walletHash, data: encrypted });
-            
-            request.onerror = () => reject(new Error('Failed to save state'));
-            request.onsuccess = () => resolve();
-            tx.onerror = () => reject(new Error('Transaction failed'));
-        });
-    }
 }
 
 // ============ MEMORY CLEARING UTILITIES ============
@@ -553,6 +511,9 @@ export class NonceManager {
             throw new DecryptionError('corrupted', 'Decrypted data is not valid JSON');
         }
         
+        if (typeof payload.nonce !== 'string' || typeof payload.index !== 'number') {
+    throw new DecryptionError('corrupted', 'Invalid payload structure');
+}
         return {
             nonce: base64ToUint8Array(payload.nonce),
             index: payload.index,
