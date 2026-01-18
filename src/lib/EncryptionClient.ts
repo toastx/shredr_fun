@@ -1,12 +1,29 @@
 /**
  * EncryptionClient - Handles wallet-based encryption/decryption for privacy-preserving burner addresses
- * 
+ *
  * Flow:
  * 1. Derive encryption key from main wallet signature
  * 2. Generate burner nonces and encrypt them
  * 3. Store encrypted nonces on backend (backend doesn't know ownership)
  * 4. Recovery: fetch all nonces, try decrypt each, success = your nonce
  */
+
+import { Keypair } from '@solana/web3.js';
+import type { GeneratedNonce } from './NonceManager';
+
+// ============ CONSTANTS ============
+
+/** Domain separation for burner seed derivation */
+const DOMAIN_BURNER_SEED = 'BURNER_SEED';
+
+/** Domain separation for burner derivation */
+const DOMAIN_BURNER = 'BURNER';
+
+/** Number of consecutive empty addresses before stopping recovery scan */
+const CONSECUTIVE_EMPTY_THRESHOLD = 10;
+
+/** Message prefix for wallet signature */
+const SIGN_MESSAGE_PREFIX = 'SHREDR_V1';
 
 // ============ TYPES ============
 
@@ -29,8 +46,9 @@ export interface DecryptedNonce {
 export interface BurnerKeyPair {
     publicKey: Uint8Array;
     secretKey: Uint8Array;
+    address: string;
     nonce: Uint8Array;
-    index: number;
+    nonceIndex: number;
 }
 
 export interface EncryptionKeyMaterial {
@@ -71,91 +89,118 @@ export class EncryptionClient {
     private static readonly KEY_LENGTH = 256;
     private static readonly SALT_LENGTH = 16;
     private static readonly IV_LENGTH = 12;
-    private static readonly SIGN_MESSAGE = 'SHREDR_ENCRYPTION_KEY_DERIVATION_V1';
+
+    private _burnerSeed: Uint8Array | null = null;
 
     /**
-     * Derive encryption key from wallet signature
-     * User signs a deterministic message, signature becomes key material
+     * Initialize EncryptionClient with wallet signature
+     * Derives burner seed from signature with domain separation
      */
-    async deriveKeyFromWallet(
-        signMessage: (message: Uint8Array) => Promise<Uint8Array>
-    ): Promise<EncryptionKeyMaterial> {
-        // TODO: Implement
-        // 1. Sign deterministic message with wallet
-        // 2. Hash signature to get key material
-        // 3. Derive AES key using PBKDF2/HKDF
-        throw new Error('Not implemented');
+    async initFromSignature(signature: Uint8Array): Promise<void> {
+        const suffix = new TextEncoder().encode(DOMAIN_BURNER_SEED);
+        const input = new Uint8Array(signature.length + suffix.length);
+        input.set(signature, 0);
+        input.set(suffix, signature.length);
+        
+        const seedBuffer = await crypto.subtle.digest('SHA-256', input);
+        this.zeroMemory(input);
+        
+        this._burnerSeed = new Uint8Array(seedBuffer);
     }
 
     /**
-     * Generate a new burner nonce
+     * Check if client is initialized
      */
-    generateNonce(): Uint8Array {
-        // TODO: Implement - generate cryptographically random nonce
-        throw new Error('Not implemented');
+    get isInitialized(): boolean {
+        return this._burnerSeed !== null;
     }
 
     /**
-     * Encrypt a nonce with the derived key
+     * Derive burner keypair from nonce (DETERMINISTIC)
+     * IMPORTANT: Call clearBurner() when done to zero the secretKey from memory
      */
-    async encryptNonce(
-        nonce: DecryptedNonce,
-        keyMaterial: EncryptionKeyMaterial
-    ): Promise<EncryptedNonce> {
-        // TODO: Implement
-        // 1. Generate random IV
-        // 2. Serialize nonce data
-        // 3. Encrypt with AES-GCM
-        // 4. Return base64 encoded result
-        throw new Error('Not implemented');
+    async deriveBurnerFromNonce(nonce: GeneratedNonce): Promise<BurnerKeyPair> {
+        if (!this._burnerSeed) {
+            throw new Error('EncryptionClient not initialized. Call initFromSignature first.');
+        }
+        
+        const burnerMarker = new TextEncoder().encode(DOMAIN_BURNER);
+        
+        const combined = new Uint8Array(this._burnerSeed.length + nonce.nonce.length + burnerMarker.length);
+        combined.set(this._burnerSeed, 0);
+        combined.set(nonce.nonce, this._burnerSeed.length);
+        combined.set(burnerMarker, this._burnerSeed.length + nonce.nonce.length);
+        
+        const seedBuffer = await crypto.subtle.digest('SHA-256', combined);
+        const seed = new Uint8Array(seedBuffer);
+        
+        // Zero intermediate
+        this.zeroMemory(combined);
+        
+        // Generate ed25519 keypair from seed
+        const keypair = Keypair.fromSeed(seed);
+        
+        // Zero seed after use
+        this.zeroMemory(seed);
+        
+        // Copy secretKey to ensure caller owns the memory for clearing
+        const secretKeyCopy = new Uint8Array(keypair.secretKey);
+        
+        return {
+            publicKey: keypair.publicKey.toBytes(),
+            secretKey: secretKeyCopy,
+            address: keypair.publicKey.toBase58(),
+            nonce: nonce.nonce,
+            nonceIndex: nonce.index
+        };
     }
 
     /**
-     * Try to decrypt an encrypted nonce with the given key
-     * Returns null if decryption fails (not our nonce)
+     * Clear burner secret key from memory when no longer needed
      */
-    async tryDecryptNonce(
-        encrypted: EncryptedNonce,
-        keyMaterial: EncryptionKeyMaterial
-    ): Promise<DecryptedNonce | null> {
-        // TODO: Implement
-        // 1. Decode base64 values
-        // 2. Try AES-GCM decryption
-        // 3. Return null on failure (wrong key)
-        // 4. Return parsed nonce on success
-        throw new Error('Not implemented');
+    clearBurner(burner: BurnerKeyPair): void {
+        this.zeroMemory(burner.secretKey);
     }
 
     /**
-     * Batch decrypt - try to decrypt all encrypted nonces
-     * Used for recovery: fetch all from backend, find ours
+     * Recover burners with early termination on consecutive empty addresses
      */
-    async recoverNonces(
-        encryptedNonces: EncryptedNonce[],
-        keyMaterial: EncryptionKeyMaterial
-    ): Promise<RecoveryResult> {
-        // TODO: Implement
-        // 1. Iterate all encrypted nonces
-        // 2. Try decrypt each
-        // 3. Collect successful decryptions
-        // 4. Derive burner keypairs from recovered nonces
-        throw new Error('Not implemented');
-    }
-
-    /**
-     * Derive burner keypair from main wallet and nonce
-     * Uses KDF to deterministically generate burner from nonce + wallet
-     */
-    async deriveBurnerFromNonce(
-        mainWalletPublicKey: Uint8Array,
-        nonce: DecryptedNonce,
-        signMessage: (message: Uint8Array) => Promise<Uint8Array>
-    ): Promise<BurnerKeyPair> {
-        // TODO: Implement
-        // 1. Combine wallet pubkey + nonce
-        // 2. Sign to get deterministic seed
-        // 3. Derive ed25519 keypair from seed
-        throw new Error('Not implemented');
+    async recoverBurners(
+        generateNonceAtIndex: (index: number) => Promise<GeneratedNonce>,
+        checkOnChainActivity: (address: string) => Promise<boolean>,
+        maxIndex: number = 1000
+    ): Promise<{ burners: BurnerKeyPair[]; recoveredIndices: number[] }> {
+        if (!this._burnerSeed) {
+            throw new Error('EncryptionClient not initialized. Call initFromSignature first.');
+        }
+        
+        const burners: BurnerKeyPair[] = [];
+        const recoveredIndices: number[] = [];
+        let consecutiveEmpty = 0;
+        
+        for (let i = 0; i < maxIndex; i++) {
+            const nonce = await generateNonceAtIndex(i);
+            const burner = await this.deriveBurnerFromNonce(nonce);
+            
+            const hasActivity = await checkOnChainActivity(burner.address);
+            
+            if (hasActivity) {
+                burners.push(burner);
+                recoveredIndices.push(i);
+                consecutiveEmpty = 0;
+            } else {
+                // Clean up unused burner
+                this.clearBurner(burner);
+                consecutiveEmpty++;
+                
+                // Stop after N consecutive empty addresses
+                if (consecutiveEmpty >= CONSECUTIVE_EMPTY_THRESHOLD) {
+                    break;
+                }
+            }
+        }
+        
+        return { burners, recoveredIndices };
     }
 
     /**
@@ -313,6 +358,44 @@ export class EncryptionClient {
      */
     private generateRandomBytes(length: number): Uint8Array {
         return crypto.getRandomValues(new Uint8Array(length));
+    }
+
+    /**
+     * Zero memory for security
+     */
+    private zeroMemory(arr: Uint8Array): void {
+        crypto.getRandomValues(arr); // Overwrite with random
+        arr.fill(0); // Then zero
+    }
+
+    /**
+     * Clear burner seed from memory
+     */
+    clearBurnerSeed(): void {
+        if (this._burnerSeed) {
+            this.zeroMemory(this._burnerSeed);
+            this._burnerSeed = null;
+        }
+    }
+
+    /**
+     * Convert Uint8Array to Base58
+     */
+    private uint8ArrayToBase58(bytes: Uint8Array): string {
+        const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+        if (bytes.length === 0) return '';
+        
+        let result = '';
+        let num = BigInt('0x' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''));
+        while (num > 0) {
+            result = ALPHABET[Number(num % 58n)] + result;
+            num = num / 58n;
+        }
+        for (const byte of bytes) {
+            if (byte === 0) result = '1' + result;
+            else break;
+        }
+        return result || '1';
     }
 
     /**

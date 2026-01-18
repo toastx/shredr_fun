@@ -1,107 +1,364 @@
 /**
- * NonceManager - Handles DETERMINISTIC nonce generation for burner wallets
- * 
+ * NonceManager - Handles DETERMINISTIC nonce generation and state management
+ *
  * Key Insight: Nonces must be fully deterministic from (wallet signature + index)
  * This enables wallet recovery - re-derive any nonce by signing same message
- * 
- * Nonce Generation (DETERMINISTIC):
- * 1. Sign deterministic message to get master seed
- * 2. nonce[index] = SHA-256(seed || index)
- * 3. Same wallet + same index = same nonce ALWAYS
- * 
- * State Management:
- * - localStorage tracks: nextIndex (next unused index)
- * - consumedIndices: set of used indices
- * - Recovery: iterate indices 0..N, derive each burner, check on-chain
+ *
+ * Security Features:
+ * - IndexedDB with encryption for state storage (XSS resistant)
+ * - Atomic operations with mutex for race condition prevention
+ * - Sensitive memory zeroing after use
+ * - Proper error handling with typed exceptions
+ *
+ * Note: Burner wallet derivation is handled by EncryptionClient
  */
+
+// ============ CONSTANTS ============
+
+/** Wallet hash length for collision resistance (16 chars = ~96 bits) */
+export const WALLET_HASH_LENGTH = 16;
+
+/** Maximum valid nonce index (2^32 - 1) */
+export const MAX_NONCE_INDEX = 0xFFFFFFFF;
 
 // ============ TYPES ============
 
 export interface NonceState {
-    nextIndex: number;           // Next index to use
-    consumedIndices: number[];   // List of used indices (for tracking)
-    walletPubkeyHash: string;    // First 8 chars to identify wallet
+    currentNonce: string;  // Base64 encoded current nonce
+    currentIndex: number;
+    walletPubkeyHash: string;
 }
 
 export interface GeneratedNonce {
-    nonce: Uint8Array;          // 32 bytes raw nonce (deterministic!)
+    nonce: Uint8Array;
     index: number;
     walletPubkeyHash: string;
 }
 
 export interface EncryptedNoncePayload {
-    ciphertext: string;         // Base64
-    iv: string;                 // Base64  
-    version: number;            // For future upgrades
+    ciphertext: string;
+    iv: string;
+    version: number;
 }
 
-export interface BurnerDerivationParams {
-    nonce: GeneratedNonce;
-    walletPublicKey: Uint8Array;
-    signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+export interface DerivedKeys {
+    masterSeed: Uint8Array;
+    encryptionKey: CryptoKey;
 }
 
-export interface DerivedBurner {
-    publicKey: Uint8Array;
-    secretKey: Uint8Array;      // 64 bytes ed25519 keypair
-    address: string;            // Base58 address
-    nonceIndex: number;
+// ============ ERROR TYPES ============
+
+export class DecryptionError extends Error {
+    readonly cause: 'wrong_key' | 'corrupted' | 'unknown';
+    
+    constructor(cause: 'wrong_key' | 'corrupted' | 'unknown', message: string) {
+        super(message);
+        this.name = 'DecryptionError';
+        this.cause = cause;
+    }
 }
 
 // ============ CONSTANTS ============
+// Exported for configurability in open-source deployments
 
-const MASTER_MESSAGE = 'SHREDR_V1'; // Single message, derive everything from this
-const ALGORITHM = 'AES-GCM';
-const IV_LENGTH = 12;
+/** Message prefix for wallet signature - change for your own deployment */
+export const MASTER_MESSAGE = 'SHREDR_V1';
 
-// ============ DERIVED KEYS ============
+/** AES-GCM encryption algorithm */
+export const ALGORITHM = 'AES-GCM';
 
-export interface DerivedKeys {
-    masterSeed: Uint8Array;      // For nonce generation
-    encryptionKey: CryptoKey;    // For encrypting nonces
+/** IV length for AES-GCM (12 bytes recommended) */
+export const IV_LENGTH = 12;
+
+/** IndexedDB database name */
+export const DB_NAME = 'shredr_secure_storage';
+
+/** IndexedDB database version */
+export const DB_VERSION = 1;
+
+/** IndexedDB object store name */
+export const STORE_NAME = 'nonce_state';
+
+/** Domain separation suffixes for key derivation */
+export const DOMAIN_NONCE_SEED = 'SHREDR_NONCE_SEED';
+export const DOMAIN_ENCRYPT_KEY = 'SHREDR_ENCRYPT_KEY';
+
+// ============ SECURE STORAGE (IndexedDB + Encryption) ============
+
+class SecureStorage {
+    private db: IDBDatabase | null = null;
+    private encryptionKey: CryptoKey | null = null;
+    private lockQueue = new Map<string, Promise<void>>();
+
+    async init(encryptionKey: CryptoKey): Promise<void> {
+        this.encryptionKey = encryptionKey;
+        
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(DB_NAME, DB_VERSION);
+            
+            request.onerror = () => reject(new Error('Failed to open IndexedDB'));
+            
+            request.onsuccess = () => {
+                this.db = request.result;
+                resolve();
+            };
+            
+            request.onupgradeneeded = (event) => {
+                const db = (event.target as IDBOpenDBRequest).result;
+                if (!db.objectStoreNames.contains(STORE_NAME)) {
+                    db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+                }
+            };
+        });
+    }
+
+    private async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+        // Queue-based mutex to prevent race conditions
+        const previousLock = this.lockQueue.get(key) ?? Promise.resolve();
+        
+        let releaseLock: () => void;
+        const currentLock = new Promise<void>(resolve => { releaseLock = resolve; });
+        this.lockQueue.set(key, currentLock);
+        
+        try {
+            await previousLock;
+            return await fn();
+        } finally {
+            releaseLock!();
+            // Clean up if this is the last lock in the queue
+            if (this.lockQueue.get(key) === currentLock) {
+                this.lockQueue.delete(key);
+            }
+        }
+    }
+
+    private async encrypt(data: string): Promise<{ ciphertext: string; iv: string }> {
+        if (!this.encryptionKey) throw new Error('Storage not initialized');
+        
+        const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+        const encoded = new TextEncoder().encode(data);
+        
+        const ciphertext = await crypto.subtle.encrypt(
+            { name: ALGORITHM, iv: iv.buffer as ArrayBuffer },
+            this.encryptionKey,
+            encoded
+        );
+        
+        return {
+            ciphertext: uint8ArrayToBase64(new Uint8Array(ciphertext)),
+            iv: uint8ArrayToBase64(iv)
+        };
+    }
+
+    private async decrypt(encrypted: { ciphertext: string; iv: string }): Promise<string> {
+        if (!this.encryptionKey) throw new Error('Storage not initialized');
+        
+        const ciphertext = base64ToUint8Array(encrypted.ciphertext);
+        const iv = base64ToUint8Array(encrypted.iv);
+        
+        const decrypted = await crypto.subtle.decrypt(
+            { name: ALGORITHM, iv: iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength) as ArrayBuffer },
+            this.encryptionKey,
+            ciphertext.buffer.slice(ciphertext.byteOffset, ciphertext.byteOffset + ciphertext.byteLength) as ArrayBuffer
+        );
+        
+        return new TextDecoder().decode(decrypted);
+    }
+
+    async getState(walletHash: string): Promise<NonceState | null> {
+        return this.withLock(walletHash, async () => {
+            if (!this.db) throw new Error('Storage not initialized');
+            
+            return new Promise((resolve, reject) => {
+                const tx = this.db!.transaction(STORE_NAME, 'readonly');
+                const store = tx.objectStore(STORE_NAME);
+                const request = store.get(walletHash);
+                
+                request.onerror = () => reject(new Error('Failed to read state'));
+                request.onsuccess = async () => {
+                    if (!request.result) {
+                        resolve(null);
+                        return;
+                    }
+                    try {
+                        const decrypted = await this.decrypt(request.result.data);
+                        resolve(JSON.parse(decrypted));
+                    } catch (e) {
+                        if (e instanceof DecryptionError) {
+                            reject(e);
+                        } else {
+                            reject(new DecryptionError('corrupted', `Failed to parse state: ${e}`));
+                        }
+                    }
+                };
+                
+                tx.onerror = () => reject(new Error('Transaction failed'));
+            });
+        });
+    }
+
+    async saveState(walletHash: string, state: NonceState): Promise<void> {
+        return this.withLock(walletHash, async () => {
+            if (!this.db) throw new Error('Storage not initialized');
+            
+            const encrypted = await this.encrypt(JSON.stringify(state));
+            
+            return new Promise((resolve, reject) => {
+                const tx = this.db!.transaction(STORE_NAME, 'readwrite');
+                const store = tx.objectStore(STORE_NAME);
+                const request = store.put({ id: walletHash, data: encrypted });
+                
+                request.onerror = () => reject(new Error('Failed to save state'));
+                request.onsuccess = () => resolve();
+            });
+        });
+    }
+
+    async getCurrentNonce(walletHash: string): Promise<{ nonce: Uint8Array; index: number } | null> {
+        const state = await this.getState(walletHash);
+        if (!state) return null;
+        return {
+            nonce: base64ToUint8Array(state.currentNonce),
+            index: state.currentIndex
+        };
+    }
+
+    async saveCurrentNonce(walletHash: string, nonce: Uint8Array, index: number): Promise<void> {
+        const state: NonceState = {
+            currentNonce: uint8ArrayToBase64(nonce),
+            currentIndex: index,
+            walletPubkeyHash: walletHash
+        };
+        await this.saveState(walletHash, state);
+    }
+
+    private async getStateUnsafe(walletHash: string): Promise<NonceState | null> {
+        if (!this.db) throw new Error('Storage not initialized');
+        
+        return new Promise((resolve, reject) => {
+            const tx = this.db!.transaction(STORE_NAME, 'readonly');
+            const store = tx.objectStore(STORE_NAME);
+            const request = store.get(walletHash);
+            
+            request.onerror = () => reject(new Error('Failed to read state'));
+            request.onsuccess = async () => {
+                if (!request.result) {
+                    resolve(null);
+                    return;
+                }
+                try {
+                    const decrypted = await this.decrypt(request.result.data);
+                    resolve(JSON.parse(decrypted));
+                } catch (e) {
+                    if (e instanceof DecryptionError) {
+                        reject(e);
+                    } else {
+                        reject(new DecryptionError('corrupted', `Failed to parse state: ${e}`));
+                    }
+                }
+            };
+            
+            tx.onerror = () => reject(new Error('Transaction failed'));
+        });
+    }
+
+    private async saveStateUnsafe(walletHash: string, state: NonceState): Promise<void> {
+        if (!this.db) throw new Error('Storage not initialized');
+        
+        const encrypted = await this.encrypt(JSON.stringify(state));
+        
+        return new Promise((resolve, reject) => {
+            const tx = this.db!.transaction(STORE_NAME, 'readwrite');
+            const store = tx.objectStore(STORE_NAME);
+            const request = store.put({ id: walletHash, data: encrypted });
+            
+            request.onerror = () => reject(new Error('Failed to save state'));
+            request.onsuccess = () => resolve();
+            tx.onerror = () => reject(new Error('Transaction failed'));
+        });
+    }
+}
+
+// ============ MEMORY CLEARING UTILITIES ============
+
+function zeroMemory(arr: Uint8Array): void {
+    crypto.getRandomValues(arr); // Overwrite with random
+    arr.fill(0); // Then zero
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+}
+
+function base64ToUint8Array(base64: string): Uint8Array {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+}
+
+function uint8ArrayToBase58(bytes: Uint8Array): string {
+    const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    if (bytes.length === 0) return '';
+    
+    let result = '';
+    let num = BigInt('0x' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''));
+    while (num > 0) {
+        result = ALPHABET[Number(num % 58n)] + result;
+        num = num / 58n;
+    }
+    for (const byte of bytes) {
+        if (byte === 0) result = '1' + result;
+        else break;
+    }
+    return result || '1';
 }
 
 // ============ NONCE MANAGER CLASS ============
 
 export class NonceManager {
-    
-    // ========== SINGLE SIGNATURE → MULTIPLE KEYS ==========
+    private storage = new SecureStorage();
+    private initialized = false;
+    private _masterSeed: Uint8Array | null = null;
+    private _currentNonce: Uint8Array | null = null;
+    private _currentIndex: number = 0;
+    private _walletHash: string | null = null;
+
+    async init(encryptionKey: CryptoKey): Promise<void> {
+        await this.storage.init(encryptionKey);
+        this.initialized = true;
+    }
 
     /**
-     * Derive ALL keys from ONE signature (SAFE via domain separation)
-     * 
-     * User signs: "SHREDR_V1:{pubkey_base58}"
-     * Then derive:
-     *   - masterSeed = SHA-256(signature || "NONCE_SEED")
-     *   - encryptionKey = SHA-256(signature || "ENCRYPT_KEY")
-     * 
-     * This is safe because:
-     * 1. Different suffixes = cryptographically independent outputs
-     * 2. Same as HKDF domain separation principle
-     * 3. Pubkey in message makes it wallet-specific (extra safety)
+     * Initialize NonceManager with wallet signature
+     * Derives master seed and encryption key from signature
+     * @param signature - Signature from wallet.signMessage()
      */
-    async deriveAllKeys(
-        walletPublicKey: Uint8Array,
-        signMessage: (message: Uint8Array) => Promise<Uint8Array>
-    ): Promise<DerivedKeys> {
-        // Single signature with pubkey in message
-        const pubkeyBase58 = this.uint8ArrayToBase58(walletPublicKey);
-        const message = new TextEncoder().encode(`${MASTER_MESSAGE}:${pubkeyBase58}`);
-        const signature = await signMessage(message);
-        
-        // Derive master seed (for nonces)
-        const nonceSuffix = new TextEncoder().encode('NONCE_SEED');
+    async initFromSignature(signature: Uint8Array): Promise<void> {
+        // Derive master seed for nonce generation
+        const nonceSuffix = new TextEncoder().encode(DOMAIN_NONCE_SEED);
         const nonceInput = new Uint8Array(signature.length + nonceSuffix.length);
         nonceInput.set(signature, 0);
         nonceInput.set(nonceSuffix, signature.length);
         const masterSeedBuffer = await crypto.subtle.digest('SHA-256', nonceInput);
+        this._masterSeed = new Uint8Array(masterSeedBuffer);
         
-        // Derive encryption key (for backend storage)
-        const encryptSuffix = new TextEncoder().encode('ENCRYPT_KEY');
+        // Derive encryption key for IndexedDB storage
+        const encryptSuffix = new TextEncoder().encode(DOMAIN_ENCRYPT_KEY);
         const encryptInput = new Uint8Array(signature.length + encryptSuffix.length);
         encryptInput.set(signature, 0);
         encryptInput.set(encryptSuffix, signature.length);
         const encryptKeyBuffer = await crypto.subtle.digest('SHA-256', encryptInput);
+        
+        // Zero intermediate buffers
+        zeroMemory(nonceInput);
+        zeroMemory(encryptInput);
         
         const encryptionKey = await crypto.subtle.importKey(
             'raw',
@@ -111,113 +368,123 @@ export class NonceManager {
             ['encrypt', 'decrypt']
         );
         
-        return {
-            masterSeed: new Uint8Array(masterSeedBuffer),
-            encryptionKey
-        };
-    }
-
-    // ========== DETERMINISTIC NONCE GENERATION ==========
-
-    /**
-     * Generate nonce for a specific index (DETERMINISTIC)
-     * nonce = SHA-256(masterSeed || index)
-     * 
-     * Same masterSeed + same index = SAME nonce every time
-     * This enables recovery!
-     */
-    async generateNonceAtIndex(
-        masterSeed: Uint8Array,
-        index: number,
-        walletPublicKey: Uint8Array
-    ): Promise<GeneratedNonce> {
-        // Combine seed with index
-        const indexBytes = new Uint8Array(4);
-        new DataView(indexBytes.buffer).setUint32(0, index, true);
-        
-        const combined = new Uint8Array(masterSeed.length + indexBytes.length);
-        combined.set(masterSeed, 0);
-        combined.set(indexBytes, masterSeed.length);
-        
-        const nonceBuffer = await crypto.subtle.digest('SHA-256', combined);
-        
-        return {
-            nonce: new Uint8Array(nonceBuffer),
-            index,
-            walletPubkeyHash: this.uint8ArrayToBase58(walletPublicKey).slice(0, 8)
-        };
+        // Initialize secure storage with derived key
+        await this.init(encryptionKey);
     }
 
     /**
-     * Generate the next available nonce and increment state
+     * Get the encryption key (for use by EncryptionClient if needed)
      */
-    async generateNextNonce(
-        masterSeed: Uint8Array,
-        walletPublicKey: Uint8Array
-    ): Promise<GeneratedNonce> {
-        const state = this.getState(walletPublicKey);
-        const nonce = await this.generateNonceAtIndex(masterSeed, state.nextIndex, walletPublicKey);
-        
-        // Increment for next use
-        state.nextIndex++;
-        this.saveState(state);
-        
-        return nonce;
-    }
-
-    // ========== STATE MANAGEMENT ==========
-
-    private static readonly STATE_KEY = 'shredr_nonce_state';
-
-    /**
-     * Get current nonce state for wallet
-     */
-    getState(walletPublicKey: Uint8Array): NonceState {
-        const pubkeyHash = this.uint8ArrayToBase58(walletPublicKey).slice(0, 8);
-        const stored = localStorage.getItem(NonceManager.STATE_KEY);
-        const allStates: Record<string, NonceState> = stored ? JSON.parse(stored) : {};
-        
-        return allStates[pubkeyHash] || {
-            nextIndex: 0,
-            consumedIndices: [],
-            walletPubkeyHash: pubkeyHash
-        };
+    getEncryptionKey(): CryptoKey | null {
+        return this.initialized ? this.storage['encryptionKey'] : null;
     }
 
     /**
-     * Save nonce state
+     * Clear master seed from memory when done
      */
-    saveState(state: NonceState): void {
-        const stored = localStorage.getItem(NonceManager.STATE_KEY);
-        const allStates: Record<string, NonceState> = stored ? JSON.parse(stored) : {};
-        allStates[state.walletPubkeyHash] = state;
-        localStorage.setItem(NonceManager.STATE_KEY, JSON.stringify(allStates));
-    }
-
-    /**
-     * Mark a nonce index as consumed (used for generation)
-     */
-    consumeNonceIndex(walletPublicKey: Uint8Array, index: number): void {
-        const state = this.getState(walletPublicKey);
-        if (!state.consumedIndices.includes(index)) {
-            state.consumedIndices.push(index);
-            this.saveState(state);
+    clearMasterSeed(): void {
+        if (this._masterSeed) {
+            zeroMemory(this._masterSeed);
+            this._masterSeed = null;
         }
     }
 
     /**
-     * Check if a nonce index has been consumed
+     * Load current nonce from storage (for returning users)
+     * Call after initFromSignature
      */
-    isIndexConsumed(walletPublicKey: Uint8Array, index: number): boolean {
-        const state = this.getState(walletPublicKey);
-        return state.consumedIndices.includes(index);
+    async loadCurrentNonce(walletPublicKey: Uint8Array): Promise<GeneratedNonce | null> {
+        if (!this.initialized) {
+            throw new Error('NonceManager not initialized. Call initFromSignature first.');
+        }
+        
+        this._walletHash = uint8ArrayToBase58(walletPublicKey).slice(0, WALLET_HASH_LENGTH);
+        const stored = await this.storage.getCurrentNonce(this._walletHash);
+        
+        if (stored) {
+            this._currentNonce = stored.nonce;
+            this._currentIndex = stored.index;
+            return {
+                nonce: stored.nonce,
+                index: stored.index,
+                walletPubkeyHash: this._walletHash
+            };
+        }
+        
+        return null;
     }
 
-    // ========== ENCRYPTION (for backend storage) ==========
+    /**
+     * Generate the base nonce (index 0) - only for new users
+     */
+    async generateBaseNonce(walletPublicKey: Uint8Array): Promise<GeneratedNonce> {
+        if (!this._masterSeed) {
+            throw new Error('NonceManager not initialized. Call initFromSignature first.');
+        }
+        
+        this._walletHash = uint8ArrayToBase58(walletPublicKey).slice(0, WALLET_HASH_LENGTH);
+        this._currentIndex = 0;
+        
+        // Base nonce is just the master seed hashed
+        const nonceBuffer = await crypto.subtle.digest('SHA-256', this._masterSeed.buffer.slice(
+            this._masterSeed.byteOffset,
+            this._masterSeed.byteOffset + this._masterSeed.byteLength
+        ) as ArrayBuffer);
+        this._currentNonce = new Uint8Array(nonceBuffer);
+        
+        // Persist to storage
+        await this.storage.saveCurrentNonce(this._walletHash, this._currentNonce, this._currentIndex);
+        
+        return {
+            nonce: this._currentNonce,
+            index: this._currentIndex,
+            walletPubkeyHash: this._walletHash
+        };
+    }
+
+    /**
+     * Increment the current nonce - hash(currentNonce) becomes the new nonce
+     */
+    async incrementNonce(): Promise<GeneratedNonce> {
+        if (!this._currentNonce || !this._walletHash) {
+            throw new Error('No current nonce. Call loadCurrentNonce or generateBaseNonce first.');
+        }
+        
+        // New nonce = SHA256(current nonce)
+        const newNonceBuffer = await crypto.subtle.digest('SHA-256', this._currentNonce.buffer.slice(
+            this._currentNonce.byteOffset,
+            this._currentNonce.byteOffset + this._currentNonce.byteLength
+        ) as ArrayBuffer);
+        this._currentNonce = new Uint8Array(newNonceBuffer);
+        this._currentIndex++;
+        
+        // Persist to storage
+        await this.storage.saveCurrentNonce(this._walletHash, this._currentNonce, this._currentIndex);
+        
+        return {
+            nonce: this._currentNonce,
+            index: this._currentIndex,
+            walletPubkeyHash: this._walletHash
+        };
+    }
+
+    /**
+     * Get current nonce without incrementing
+     */
+    getCurrentNonce(): GeneratedNonce | null {
+        if (!this._currentNonce || !this._walletHash) {
+            return null;
+        }
+        return {
+            nonce: this._currentNonce,
+            index: this._currentIndex,
+            walletPubkeyHash: this._walletHash
+        };
+    }
+
 
     /**
      * Encrypt nonce for backend storage
-     * Backend stores encrypted nonces but can't read them
      */
     async encryptNonce(
         nonce: GeneratedNonce,
@@ -226,143 +493,68 @@ export class NonceManager {
         const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
         
         const payload = JSON.stringify({
-            nonce: this.uint8ArrayToBase64(nonce.nonce),
+            nonce: uint8ArrayToBase64(nonce.nonce),
             index: nonce.index,
             walletPubkeyHash: nonce.walletPubkeyHash
         });
         
         const ciphertext = await crypto.subtle.encrypt(
-            { name: ALGORITHM, iv },
+            { name: ALGORITHM, iv: iv.buffer as ArrayBuffer },
             encryptionKey,
             new TextEncoder().encode(payload)
         );
         
         return {
-            ciphertext: this.uint8ArrayToBase64(new Uint8Array(ciphertext)),
-            iv: this.uint8ArrayToBase64(iv),
+            ciphertext: uint8ArrayToBase64(new Uint8Array(ciphertext)),
+            iv: uint8ArrayToBase64(iv),
             version: 1
         };
     }
 
     /**
-     * Decrypt nonce from backend
-     * Returns null if wrong key (not our nonce)
+     * Decrypt nonce from backend with proper error classification
      */
     async decryptNonce(
         encrypted: EncryptedNoncePayload,
         encryptionKey: CryptoKey
-    ): Promise<GeneratedNonce | null> {
+    ): Promise<GeneratedNonce> {
+        let ciphertext: Uint8Array;
+        let iv: Uint8Array;
+        
         try {
-            const ciphertext = this.base64ToUint8Array(encrypted.ciphertext);
-            const iv = this.base64ToUint8Array(encrypted.iv);
-            
-            const decrypted = await crypto.subtle.decrypt(
+            ciphertext = base64ToUint8Array(encrypted.ciphertext);
+            iv = base64ToUint8Array(encrypted.iv);
+        } catch (e) {
+            throw new DecryptionError('corrupted', 'Invalid base64 encoding in encrypted payload');
+        }
+        
+        let decrypted: ArrayBuffer;
+        try {
+            decrypted = await crypto.subtle.decrypt(
                 { name: ALGORITHM, iv: iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength) as ArrayBuffer },
                 encryptionKey,
                 ciphertext.buffer.slice(ciphertext.byteOffset, ciphertext.byteOffset + ciphertext.byteLength) as ArrayBuffer
             );
-            
-            const payload = JSON.parse(new TextDecoder().decode(decrypted));
-            
-            return {
-                nonce: this.base64ToUint8Array(payload.nonce),
-                index: payload.index,
-                walletPubkeyHash: payload.walletPubkeyHash
-            };
+        } catch (e) {
+            // AES-GCM auth failure = wrong key or tampered data
+            if (e instanceof DOMException && e.name === 'OperationError') {
+                throw new DecryptionError('wrong_key', 'Decryption failed - wrong key or corrupted data');
+            }
+            throw new DecryptionError('unknown', `Decryption failed: ${e}`);
+        }
+        
+        let payload: { nonce: string; index: number; walletPubkeyHash: string };
+        try {
+            payload = JSON.parse(new TextDecoder().decode(decrypted));
         } catch {
-            return null;
-        }
-    }
-
-    // ========== BURNER DERIVATION ==========
-
-    /**
-     * Derive burner keypair from nonce (DETERMINISTIC)
-     * seed = SHA-256(masterSeed || nonce || "BURNER")
-     * keypair = ed25519_from_seed(seed)
-     */
-    async deriveBurner(
-        masterSeed: Uint8Array,
-        nonce: GeneratedNonce
-    ): Promise<DerivedBurner> {
-        const burnerMarker = new TextEncoder().encode('BURNER');
-        
-        const combined = new Uint8Array(masterSeed.length + nonce.nonce.length + burnerMarker.length);
-        combined.set(masterSeed, 0);
-        combined.set(nonce.nonce, masterSeed.length);
-        combined.set(burnerMarker, masterSeed.length + nonce.nonce.length);
-        
-        const seedBuffer = await crypto.subtle.digest('SHA-256', combined);
-        const seed = new Uint8Array(seedBuffer);
-        
-        // TODO: Use @solana/web3.js Keypair.fromSeed(seed) 
-        // or tweetnacl: nacl.sign.keyPair.fromSeed(seed)
-        throw new Error('Implement with ed25519 library - use Keypair.fromSeed(seed)');
-    }
-
-    // ========== RECOVERY ==========
-
-    /**
-     * Recover all burners by iterating through indices
-     * For each index 0..maxIndex:
-     *   1. Derive nonce[i]
-     *   2. Derive burner[i]
-     *   3. Check if burner has any on-chain activity
-     */
-    async recoverBurners(
-        masterSeed: Uint8Array,
-        walletPublicKey: Uint8Array,
-        maxIndex: number = 100
-    ): Promise<{ burners: GeneratedNonce[]; recoveredIndices: number[] }> {
-        const burners: GeneratedNonce[] = [];
-        const recoveredIndices: number[] = [];
-        
-        for (let i = 0; i < maxIndex; i++) {
-            const nonce = await this.generateNonceAtIndex(masterSeed, i, walletPublicKey);
-            burners.push(nonce);
-            recoveredIndices.push(i);
-            
-            // TODO: Actually derive burner and check on-chain
-            // const burner = await this.deriveBurner(masterSeed, nonce);
-            // const hasActivity = await checkOnChainActivity(burner.address);
-            // if (hasActivity) { ... }
+            throw new DecryptionError('corrupted', 'Decrypted data is not valid JSON');
         }
         
-        return { burners, recoveredIndices };
-    }
-
-    // ========== HELPER METHODS ==========
-
-    private uint8ArrayToBase64(bytes: Uint8Array): string {
-        let binary = '';
-        for (let i = 0; i < bytes.length; i++) {
-            binary += String.fromCharCode(bytes[i]);
-        }
-        return btoa(binary);
-    }
-
-    private base64ToUint8Array(base64: string): Uint8Array {
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
-        }
-        return bytes;
-    }
-
-    private uint8ArrayToBase58(bytes: Uint8Array): string {
-        const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-        let result = '';
-        let num = BigInt('0x' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''));
-        while (num > 0) {
-            result = ALPHABET[Number(num % 58n)] + result;
-            num = num / 58n;
-        }
-        for (const byte of bytes) {
-            if (byte === 0) result = '1' + result;
-            else break;
-        }
-        return result || '1';
+        return {
+            nonce: base64ToUint8Array(payload.nonce),
+            index: payload.index,
+            walletPubkeyHash: payload.walletPubkeyHash
+        };
     }
 }
 
