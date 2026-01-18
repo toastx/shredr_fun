@@ -1,0 +1,99 @@
+.wallet-button-container {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.connect-wallet-button {
+    padding: 0.875rem 1.5rem;
+    font-size: 0.875rem;
+    font-weight: 700;
+    font-family: "Space Mono", monospace;
+    color: #0a0a0a;
+    background-color: #ff1a1a;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    letter-spacing: 0.05em;
+    text-transform: lowercase;
+    box-shadow: 0 0 40px rgba(255, 26, 26, 0.3);
+}
+
+.connect-wallet-button:hover {
+    background-color: #ff4444;
+    box-shadow: 0 0 60px rgba(255, 26, 26, 0.5);
+    transform: translateY(-1px);
+}
+
+.connect-wallet-button:active {
+    background-color: #cc0000;
+    transform: translateY(0);
+}
+
+.wallet-connected {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.wallet-address-display {
+    display: flex;
+    align-items: center;
+    padding: 0.6rem 1rem;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 10px;
+    border: 1px solid rgba(220, 38, 38, 0.3);
+}
+
+.wallet-address {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.disconnect-button {
+    background: transparent;
+    border: 1px solid rgba(220, 38, 38, 0.5);
+    border-radius: 10px;
+    padding: 0.6rem 1rem;
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 500;
+    font-size: 0.85rem;
+    color: #dc2626;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.disconnect-button:hover {
+    background: rgba(220, 38, 38, 0.1);
+    border-color: #dc2626;
+}
+
+/* Override wallet adapter modal styles */
+.wallet-adapter-modal-wrapper {
+    background: rgba(0, 0, 0, 0.9) !important;
+}
+
+.wallet-adapter-modal-container {
+    background: #1a1a1a !important;
+    border: 1px solid rgba(220, 38, 38, 0.3) !important;
+    border-radius: 16px !important;
+}
+
+.wallet-adapter-modal-title {
+    color: white !important;
+    font-family: 'Space Grotesk', sans-serif !important;
+}
+
+.wallet-adapter-modal-list li {
+    background: transparent !important;
+}
+
+.wallet-adapter-modal-list li:hover {
+    background: rgba(220, 38, 38, 0.1) !important;
+}
+
+.wallet-adapter-button {
+    color: white !important;
+    font-family: 'Space Grotesk', sans-serif !important;
+}

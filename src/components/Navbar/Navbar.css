@@ -13,6 +13,22 @@
     border-bottom: 1px solid #1a1a1a;
 }
 
+.navbar-left {
+    display: flex;
+    align-items: center;
+}
+
+.navbar-center {
+    display: flex;
+    justify-content: center;
+    flex: 1;
+}
+
+.navbar-right {
+    display: flex;
+    align-items: center;
+}
+
 .navbar-brand {
     font-size: 1.25rem;
     font-weight: 700;
