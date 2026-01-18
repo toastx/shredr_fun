@@ -456,6 +456,9 @@ export class NonceManager {
             this._currentNonce.byteOffset + this._currentNonce.byteLength
         ) as ArrayBuffer);
         this._currentNonce = new Uint8Array(newNonceBuffer);
+        if (this._currentIndex >= MAX_NONCE_INDEX) {
+            throw new Error('Nonce index overflow');
+        }
         this._currentIndex++;
         
         // Persist to storage
