@@ -24,7 +24,7 @@ dist-ssr
 *.sln
 *.sw?
 .kilocodemodes
-/target
+shredr-backend/target
 .shuttle*
 Secrets*.toml
 
