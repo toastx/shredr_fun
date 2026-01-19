@@ -34,7 +34,8 @@ import {
     type NonceState, 
     type GeneratedNonce, 
     type EncryptedNoncePayload,
-    type DerivedKeys
+    type NonceBlob,
+    type CreateBlobRequest
 } from './types';
 
 // ============ NONCE SERVICE CLASS ============
@@ -272,6 +273,115 @@ export class NonceService {
             nonce: base64ToUint8Array(payload.nonce),
             index: payload.index,
             walletPubkeyHash: payload.walletPubkeyHash
+        };
+    }
+
+    // ============ HELPER METHODS ============
+
+    /**
+     * Try to decrypt blobs to find user's blob
+     * Returns decrypted nonce if found
+     */
+    async tryDecryptBlobs(blobs: NonceBlob[]): Promise<{
+        found: boolean;
+        blobId?: string;
+        nonce?: GeneratedNonce;
+    }> {
+        const encKey = this.storage.getEncryptionKey();
+        if (!encKey) {
+            throw new Error('Encryption key not available');
+        }
+
+        for (const blob of blobs) {
+            try {
+                const encrypted: EncryptedNoncePayload = {
+                    ciphertext: blob.encryptedData,
+                    iv: blob.iv,
+                    version: 1
+                };
+                const decrypted = await this.decryptNonce(encrypted, encKey);
+                
+                // Successfully decrypted = this is our blob!
+                return {
+                    found: true,
+                    blobId: blob.id,
+                    nonce: decrypted
+                };
+            } catch {
+                // Couldn't decrypt - not our blob, try next
+                continue;
+            }
+        }
+
+        return { found: false };
+    }
+
+    /**
+     * Create encrypted blob data for backend storage
+     */
+    async createBlobData(nonce: GeneratedNonce): Promise<CreateBlobRequest> {
+        const encKey = this.storage.getEncryptionKey();
+        if (!encKey) {
+            throw new Error('Encryption key not available');
+        }
+
+        const encrypted = await this.encryptNonce(nonce, encKey);
+        return {
+            encryptedData: encrypted.ciphertext,
+            iv: encrypted.iv
+        };
+    }
+
+    /**
+     * Set current state from external source (e.g., from decrypted remote blob)
+     * Use when syncing from remote to local
+     */
+    async setCurrentState(nonce: GeneratedNonce): Promise<void> {
+        if (!this.initialized) {
+            throw new Error('NonceService not initialized');
+        }
+        
+        this._currentNonce = nonce.nonce;
+        this._currentIndex = nonce.index;
+        this._walletHash = nonce.walletPubkeyHash;
+        
+        // Persist to local storage
+        await this.storage.saveCurrentNonce(this._walletHash, this._currentNonce, this._currentIndex);
+    }
+
+    /**
+     * Consume current nonce and move to next
+     * Does local increment and prepares data for app to sync with backend
+     * 
+     * @returns Data for app to sync:
+     *  - consumedNonce: The old nonce that was consumed
+     *  - newNonce: The new current nonce
+     *  - newBlobData: Encrypted data to upload to backend
+     * 
+     * App should then:
+     *  1. Upload newBlobData to backend
+     *  2. Delete old blob from backend
+     */
+    async consumeNonce(): Promise<{
+        consumedNonce: GeneratedNonce;
+        newNonce: GeneratedNonce;
+        newBlobData: CreateBlobRequest;
+    }> {
+        const currentNonce = this.getCurrentNonce();
+        if (!currentNonce) {
+            throw new Error('No current nonce to consume');
+        }
+
+        // 1. Increment to new nonce (also updates local IndexedDB)
+        const newNonce = await this.incrementNonce();
+
+        // 2. Prepare encrypted blob for new nonce
+        const newBlobData = await this.createBlobData(newNonce);
+
+        return {
+            consumedNonce: currentNonce,
+            newNonce,
+            newBlobData
         };
     }
 

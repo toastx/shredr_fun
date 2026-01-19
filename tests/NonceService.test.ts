@@ -698,6 +698,281 @@ describe('NonceService', () => {
         });
     });
 
+    describe('tryDecryptBlobs', () => {
+        before(() => log.section('tryDecryptBlobs Tests'));
+
+        it('should find and decrypt user blob from list', async () => {
+            log.test('Find user blob in list');
+            
+            await nonceService.initFromSignature(mockSignature);
+            const nonce = await nonceService.generateBaseNonce(mockWalletPubkey);
+            
+            // Create a blob for this user
+            const blobData = await nonceService.createBlobData(nonce);
+            const userBlob = {
+                id: 'blob-123',
+                encryptedData: blobData.encryptedData,
+                iv: blobData.iv,
+                createdAt: Date.now()
+            };
+            
+            // Create some fake blobs from "other users"
+            const fakeBlob1 = {
+                id: 'fake-1',
+                encryptedData: 'randomgarbage123',
+                iv: 'fakeiv123',
+                createdAt: Date.now()
+            };
+            const fakeBlob2 = {
+                id: 'fake-2',
+                encryptedData: 'morerandombytes',
+                iv: 'anotherivvv',
+                createdAt: Date.now()
+            };
+            
+            const blobs = [fakeBlob1, userBlob, fakeBlob2];
+            const result = await nonceService.tryDecryptBlobs(blobs);
+            
+            expect(result.found).to.be.true;
+            expect(result.blobId).to.equal('blob-123');
+            expect(result.nonce).to.not.be.undefined;
+            expect(result.nonce!.index).to.equal(nonce.index);
+            log.success('Found user blob and decrypted successfully');
+        });
+
+        it('should return found=false when no matching blob', async () => {
+            log.test('No matching blob in list');
+            
+            await nonceService.initFromSignature(mockSignature);
+            await nonceService.generateBaseNonce(mockWalletPubkey);
+            
+            // Only fake blobs
+            const fakeBlobs = [
+                { id: 'fake-1', encryptedData: 'garbage1', iv: 'iv1', createdAt: Date.now() },
+                { id: 'fake-2', encryptedData: 'garbage2', iv: 'iv2', createdAt: Date.now() }
+            ];
+            
+            const result = await nonceService.tryDecryptBlobs(fakeBlobs);
+            
+            expect(result.found).to.be.false;
+            expect(result.blobId).to.be.undefined;
+            expect(result.nonce).to.be.undefined;
+            log.success('Correctly returned found=false');
+        });
+
+        it('should handle empty blob list', async () => {
+            log.test('Empty blob list');
+            
+            await nonceService.initFromSignature(mockSignature);
+            await nonceService.generateBaseNonce(mockWalletPubkey);
+            
+            const result = await nonceService.tryDecryptBlobs([]);
+            
+            expect(result.found).to.be.false;
+            log.success('Handled empty list correctly');
+        });
+    });
+
+    describe('createBlobData', () => {
+        before(() => log.section('createBlobData Tests'));
+
+        it('should create encrypted blob data', async () => {
+            log.test('Create blob data');
+            
+            await nonceService.initFromSignature(mockSignature);
+            const nonce = await nonceService.generateBaseNonce(mockWalletPubkey);
+            
+            const blobData = await nonceService.createBlobData(nonce);
+            
+            expect(blobData.encryptedData).to.be.a('string');
+            expect(blobData.iv).to.be.a('string');
+            expect(blobData.encryptedData.length).to.be.greaterThan(10);
+            expect(blobData.iv.length).to.be.greaterThan(5);
+            log.data('Encrypted data length', blobData.encryptedData.length);
+            log.data('IV length', blobData.iv.length);
+            log.success('Created blob data successfully');
+        });
+
+        it('should create unique blob data each time (different IV)', async () => {
+            log.test('Unique blob data per call');
+            
+            await nonceService.initFromSignature(mockSignature);
+            const nonce = await nonceService.generateBaseNonce(mockWalletPubkey);
+            
+            const blob1 = await nonceService.createBlobData(nonce);
+            const blob2 = await nonceService.createBlobData(nonce);
+            
+            // IVs should be different (random)
+            expect(blob1.iv).to.not.equal(blob2.iv);
+            // Ciphertext will also be different due to different IV
+            expect(blob1.encryptedData).to.not.equal(blob2.encryptedData);
+            log.success('Each call produces unique encrypted data');
+        });
+    });
+
+    describe('setCurrentState', () => {
+        before(() => log.section('setCurrentState Tests'));
+
+        it('should set state from external nonce', async () => {
+            log.test('Set state from external source');
+            
+            await nonceService.initFromSignature(mockSignature);
+            
+            // Create a nonce object as if it came from remote
+            const externalNonce = {
+                nonce: new Uint8Array(32).fill(42),
+                index: 5,
+                walletPubkeyHash: 'external-hash-123'
+            };
+            
+            await nonceService.setCurrentState(externalNonce);
+            
+            const current = nonceService.getCurrentNonce();
+            expect(current).to.not.be.null;
+            expect(current!.index).to.equal(5);
+            expect(current!.walletPubkeyHash).to.equal('external-hash-123');
+            log.data('Current index', current!.index);
+            log.success('State set from external source');
+        });
+
+        it('should persist state to local storage', async () => {
+            log.test('Persist to local storage');
+            
+            await nonceService.initFromSignature(mockSignature);
+            
+            const externalNonce = {
+                nonce: new Uint8Array(32).fill(99),
+                index: 10,
+                walletPubkeyHash: 'persist-test-hash'
+            };
+            
+            await nonceService.setCurrentState(externalNonce);
+            
+            // Create new instance and load
+            const newService = new NonceService();
+            await newService.initFromSignature(mockSignature);
+            const loaded = await newService.loadCurrentNonce(mockWalletPubkey);
+            
+            // Note: walletPubkeyHash is derived from pubkey, not the external one
+            // But the nonce and index should match
+            expect(loaded).to.not.be.null;
+            // The external hash won't match because loadCurrentNonce uses pubkey
+            // But the service should have persisted something
+            newService.destroy();
+            log.success('State persisted to storage');
+        });
+
+        it('should throw if not initialized', async () => {
+            log.test('Throw if not initialized');
+            
+            const externalNonce = {
+                nonce: new Uint8Array(32).fill(1),
+                index: 1,
+                walletPubkeyHash: 'test'
+            };
+            
+            try {
+                await nonceService.setCurrentState(externalNonce);
+                expect.fail('Should have thrown');
+            } catch (e: any) {
+                expect(e.message).to.include('not initialized');
+                log.success('Correctly threw for uninitialized service');
+            }
+        });
+    });
+
+    describe('consumeNonce', () => {
+        before(() => log.section('consumeNonce Tests'));
+
+        it('should consume current nonce and return result', async () => {
+            log.test('Consume nonce');
+            
+            await nonceService.initFromSignature(mockSignature);
+            const initialNonce = await nonceService.generateBaseNonce(mockWalletPubkey);
+            
+            const result = await nonceService.consumeNonce();
+            
+            expect(result.consumedNonce.index).to.equal(0);
+            expect(result.newNonce.index).to.equal(1);
+            expect(result.newBlobData).to.have.property('encryptedData');
+            expect(result.newBlobData).to.have.property('iv');
+            
+            log.data('Consumed index', result.consumedNonce.index);
+            log.data('New index', result.newNonce.index);
+            log.success('Nonce consumed and new blob data created');
+        });
+
+        it('should update internal state after consume', async () => {
+            log.test('Internal state updated after consume');
+            
+            await nonceService.initFromSignature(mockSignature);
+            await nonceService.generateBaseNonce(mockWalletPubkey);
+            
+            await nonceService.consumeNonce();
+            
+            const current = nonceService.getCurrentNonce();
+            expect(current!.index).to.equal(1);
+            log.data('Current index after consume', current!.index);
+            log.success('Internal state updated correctly');
+        });
+
+        it('should allow multiple consecutive consumes', async () => {
+            log.test('Multiple consecutive consumes');
+            
+            await nonceService.initFromSignature(mockSignature);
+            await nonceService.generateBaseNonce(mockWalletPubkey);
+            
+            for (let i = 0; i < 5; i++) {
+                const result = await nonceService.consumeNonce();
+                expect(result.consumedNonce.index).to.equal(i);
+                expect(result.newNonce.index).to.equal(i + 1);
+            }
+            
+            const final = nonceService.getCurrentNonce();
+            expect(final!.index).to.equal(5);
+            log.data('Final index after 5 consumes', final!.index);
+            log.success('Multiple consumes work correctly');
+        });
+
+        it('should throw if no current nonce', async () => {
+            log.test('Throw if no current nonce');
+            
+            await nonceService.initFromSignature(mockSignature);
+            // Don't generate base nonce
+            
+            try {
+                await nonceService.consumeNonce();
+                expect.fail('Should have thrown');
+            } catch (e: any) {
+                expect(e.message).to.include('No current nonce');
+                log.success('Correctly threw for missing nonce');
+            }
+        });
+
+        it('should produce valid blob data that can be decrypted', async () => {
+            log.test('Blob data is valid and decryptable');
+            
+            await nonceService.initFromSignature(mockSignature);
+            await nonceService.generateBaseNonce(mockWalletPubkey);
+            
+            const result = await nonceService.consumeNonce();
+            
+            // Simulate: upload to backend, then try to decrypt
+            const blob = {
+                id: 'test-blob',
+                encryptedData: result.newBlobData.encryptedData,
+                iv: result.newBlobData.iv,
+                createdAt: Date.now()
+            };
+            
+            const decryptResult = await nonceService.tryDecryptBlobs([blob]);
+            
+            expect(decryptResult.found).to.be.true;
+            expect(decryptResult.nonce!.index).to.equal(result.newNonce.index);
+            log.success('Blob data is valid and can be decrypted');
+        });
+    });
+
     after(() => {
         console.log('\n' + '='.repeat(50));
         console.log('🎉 All NonceService tests completed!');

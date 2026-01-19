@@ -1,8 +1,11 @@
 // Services
 export { ShadowWireClient, TokenUtils } from './ShadowWireClient';
-export { EncryptionService, encryptionService } from './EncryptionService';
+export { BurnerService, burnerService } from './BurnerService';
 export { NonceService, nonceService } from './NonceService';
 export { StorageService } from './StorageService';
+
+// Legacy alias for backward compatibility
+export { BurnerService as EncryptionService, burnerService as encryptionService } from './BurnerService';
 
 // Types
 export { DecryptionError } from './types';
@@ -13,15 +16,14 @@ export type {
     GeneratedNonce,
     EncryptedNoncePayload,
     DerivedKeys,
-    // Encryption types
-    EncryptedNonce, 
-    DecryptedNonce, 
+    // Burner types
     BurnerKeyPair, 
-    EncryptionKeyMaterial, 
-    RecoveryResult, 
-    ConsumeNonceResult, 
-    LocalNonceData, 
-    NonceDestructionProof 
+    // API types
+    NonceBlob,
+    CreateBlobRequest,
+    DecryptBlobsResult,
+    ConsumeResult,
+    NonceBlobAPI
 } from './types';
 
 // Constants and utils
