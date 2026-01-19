@@ -1,8 +1,29 @@
+// Services
 export { ShadowWireClient, TokenUtils } from './ShadowWireClient';
-export { EncryptionClient, encryptionClient } from './EncryptionClient';
-export type { EncryptedNonce, DecryptedNonce, BurnerKeyPair, EncryptionKeyMaterial, RecoveryResult, ConsumeNonceResult, LocalNonceData, NonceDestructionProof } from './EncryptionClient';
-export { NonceManager, nonceManager, DecryptionError } from './NonceManager';
-export type { NonceState, GeneratedNonce, EncryptedNoncePayload } from './NonceManager';
-export { SecureStorage } from './SecureStorage';
+export { EncryptionService, encryptionService } from './EncryptionService';
+export { NonceService, nonceService } from './NonceService';
+export { StorageService } from './StorageService';
+
+// Types
+export { DecryptionError } from './types';
+export type { 
+    // Storage types
+    NonceState,
+    // Nonce types
+    GeneratedNonce,
+    EncryptedNoncePayload,
+    DerivedKeys,
+    // Encryption types
+    EncryptedNonce, 
+    DecryptedNonce, 
+    BurnerKeyPair, 
+    EncryptionKeyMaterial, 
+    RecoveryResult, 
+    ConsumeNonceResult, 
+    LocalNonceData, 
+    NonceDestructionProof 
+} from './types';
+
+// Constants and utils
 export * from './constants';
 export * from './utils';

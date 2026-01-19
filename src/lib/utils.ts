@@ -60,3 +60,10 @@ export function uint8ArrayToBase58(bytes: Uint8Array): string {
 export function getArrayBuffer(arr: Uint8Array): ArrayBuffer {
     return arr.buffer.slice(arr.byteOffset, arr.byteOffset + arr.byteLength) as ArrayBuffer;
 }
+
+/**
+ * Generate cryptographically secure random bytes
+ */
+export function generateRandomBytes(length: number): Uint8Array {
+    return crypto.getRandomValues(new Uint8Array(length));
+}

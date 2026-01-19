@@ -1,5 +1,5 @@
 /**
- * NonceManager - Handles DETERMINISTIC nonce generation and state management
+ * NonceService - Handles DETERMINISTIC nonce generation and state management
  *
  * Key Insight: Nonces must be fully deterministic from (wallet signature + index)
  * This enables wallet recovery - re-derive any nonce by signing same message
@@ -10,10 +10,10 @@
  * - Sensitive memory zeroing after use
  * - Proper error handling with typed exceptions
  *
- * Note: Burner wallet derivation is handled by EncryptionClient
+ * Note: Burner wallet derivation is handled by EncryptionService
  */
 
-import { SecureStorage, DecryptionError, type NonceState } from './SecureStorage';
+import { StorageService } from './StorageService';
 import { 
     ALGORITHM, 
     IV_LENGTH, 
@@ -29,35 +29,18 @@ import {
     zeroMemory,
     getArrayBuffer
 } from './utils';
+import { 
+    DecryptionError, 
+    type NonceState, 
+    type GeneratedNonce, 
+    type EncryptedNoncePayload,
+    type DerivedKeys
+} from './types';
 
-// Re-export for backward compatibility
-export { DecryptionError, type NonceState };
-export { WALLET_HASH_LENGTH, MAX_NONCE_INDEX, DOMAIN_NONCE_SEED, DOMAIN_ENCRYPT_KEY } from './constants';
-export { MASTER_MESSAGE } from './constants';
+// ============ NONCE SERVICE CLASS ============
 
-// ============ TYPES ============
-
-export interface GeneratedNonce {
-    nonce: Uint8Array;
-    index: number;
-    walletPubkeyHash: string;
-}
-
-export interface EncryptedNoncePayload {
-    ciphertext: string;
-    iv: string;
-    version: number;
-}
-
-export interface DerivedKeys {
-    masterSeed: Uint8Array;
-    encryptionKey: CryptoKey;
-}
-
-// ============ NONCE MANAGER CLASS ============
-
-export class NonceManager {
-    private storage = new SecureStorage();
+export class NonceService {
+    private storage = new StorageService();
     private initialized = false;
     private _masterSeed: Uint8Array | null = null;
     private _currentNonce: Uint8Array | null = null;
@@ -70,7 +53,7 @@ export class NonceManager {
     }
 
     /**
-     * Initialize NonceManager with wallet signature
+     * Initialize NonceService with wallet signature
      * Derives master seed and encryption key from signature
      * @param signature - Signature from wallet.signMessage()
      */
@@ -107,7 +90,7 @@ export class NonceManager {
     }
 
     /**
-     * Get the encryption key (for use by EncryptionClient if needed)
+     * Get the encryption key (for use by EncryptionService if needed)
      */
     getEncryptionKey(): CryptoKey | null {
         return this.initialized ? this.storage.getEncryptionKey() : null;
@@ -129,7 +112,7 @@ export class NonceManager {
      */
     async loadCurrentNonce(walletPublicKey: Uint8Array): Promise<GeneratedNonce | null> {
         if (!this.initialized) {
-            throw new Error('NonceManager not initialized. Call initFromSignature first.');
+            throw new Error('NonceService not initialized. Call initFromSignature first.');
         }
         
         this._walletHash = uint8ArrayToBase58(walletPublicKey).slice(0, WALLET_HASH_LENGTH);
@@ -153,7 +136,7 @@ export class NonceManager {
      */
     async generateBaseNonce(walletPublicKey: Uint8Array): Promise<GeneratedNonce> {
         if (!this._masterSeed) {
-            throw new Error('NonceManager not initialized. Call initFromSignature first.');
+            throw new Error('NonceService not initialized. Call initFromSignature first.');
         }
         
         this._walletHash = uint8ArrayToBase58(walletPublicKey).slice(0, WALLET_HASH_LENGTH);
@@ -310,4 +293,4 @@ export class NonceManager {
 
 // ============ SINGLETON EXPORT ============
 
-export const nonceManager = new NonceManager();
+export const nonceService = new NonceService();

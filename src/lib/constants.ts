@@ -35,3 +35,26 @@ export const MASTER_MESSAGE = 'SHREDR_V1';
 /** Domain separation suffixes for key derivation */
 export const DOMAIN_NONCE_SEED = 'SHREDR_NONCE_SEED';
 export const DOMAIN_ENCRYPT_KEY = 'SHREDR_ENCRYPT_KEY';
+
+// ============ ENCRYPTION SERVICE CONSTANTS ============
+
+/** Domain separation for burner seed derivation */
+export const DOMAIN_BURNER_SEED = 'BURNER_SEED';
+
+/** Domain separation for burner derivation */
+export const DOMAIN_BURNER = 'BURNER';
+
+/** Number of consecutive empty addresses before stopping recovery scan */
+export const CONSECUTIVE_EMPTY_THRESHOLD = 10;
+
+/** LocalStorage key for nonces */
+export const LOCAL_STORAGE_NONCES_KEY = 'shredr_nonces';
+
+/** Key length for AES encryption (256 bits) */
+export const KEY_LENGTH = 256;
+
+/** Salt length for key derivation (16 bytes) */
+export const SALT_LENGTH = 16;
+
+/** PBKDF2 iteration count */
+export const PBKDF2_ITERATIONS = 100000;

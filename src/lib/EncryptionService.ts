@@ -1,5 +1,5 @@
 /**
- * EncryptionClient - Handles wallet-based encryption/decryption for privacy-preserving burner addresses
+ * EncryptionService - Handles wallet-based encryption/decryption for privacy-preserving burner addresses
  *
  * Flow:
  * 1. Derive encryption key from main wallet signature
@@ -9,91 +9,40 @@
  */
 
 import { Keypair } from '@solana/web3.js';
-import type { GeneratedNonce } from './NonceManager';
+import { 
+    zeroMemory, 
+    uint8ArrayToBase64, 
+    base64ToUint8Array, 
+    getArrayBuffer,
+    generateRandomBytes 
+} from './utils';
+import { 
+    ALGORITHM, 
+    IV_LENGTH,
+    KEY_LENGTH,
+    PBKDF2_ITERATIONS,
+    DOMAIN_BURNER_SEED, 
+    DOMAIN_BURNER, 
+    CONSECUTIVE_EMPTY_THRESHOLD,
+    LOCAL_STORAGE_NONCES_KEY
+} from './constants';
+import type { 
+    GeneratedNonce,
+    BurnerKeyPair,
+    EncryptionKeyMaterial,
+    ConsumeNonceResult,
+    EncryptedNonce,
+    LocalNonceData,
+    NonceDestructionProof
+} from './types';
 
-// ============ CONSTANTS ============
+// ============ ENCRYPTION SERVICE ============
 
-/** Domain separation for burner seed derivation */
-const DOMAIN_BURNER_SEED = 'BURNER_SEED';
-
-/** Domain separation for burner derivation */
-const DOMAIN_BURNER = 'BURNER';
-
-/** Number of consecutive empty addresses before stopping recovery scan */
-const CONSECUTIVE_EMPTY_THRESHOLD = 10;
-
-/** Message prefix for wallet signature */
-const SIGN_MESSAGE_PREFIX = 'SHREDR_V1';
-
-// ============ TYPES ============
-
-export interface EncryptedNonce {
-    id: string;
-    ciphertext: string;      // Base64 encoded encrypted data
-    iv: string;              // Base64 encoded initialization vector
-    salt: string;            // Base64 encoded salt for key derivation
-    createdAt: number;
-    consumed: boolean;       // True if nonce has been used (one-time use)
-    consumedAt?: number;     // Timestamp when consumed
-}
-
-export interface DecryptedNonce {
-    nonce: Uint8Array;
-    index: number;           // Burner index for HD derivation
-    timestamp: number;
-}
-
-export interface BurnerKeyPair {
-    publicKey: Uint8Array;
-    secretKey: Uint8Array;
-    address: string;
-    nonce: Uint8Array;
-    nonceIndex: number;
-}
-
-export interface EncryptionKeyMaterial {
-    key: CryptoKey;
-    salt: Uint8Array;
-}
-
-export interface RecoveryResult {
-    success: boolean;
-    burners: BurnerKeyPair[];
-    failedAttempts: number;
-}
-
-export interface ConsumeNonceResult {
-    success: boolean;
-    nonceId: string;
-    consumedAt: number;
-    error?: string;
-}
-
-export interface LocalNonceData {
-    nonce: string;           // Base64 encoded nonce
-    index: number;
-    createdAt: number;
-    burnerPublicKey: string; // For reference
-}
-
-export interface NonceDestructionProof {
-    nonceId: string;
-    destructionSignature: string;  // Signed by wallet to prove ownership
-    timestamp: number;
-}
-
-// ============ ENCRYPTION CLIENT ============
-
-export class EncryptionClient {
-    private static readonly ALGORITHM = 'AES-GCM';
-    private static readonly KEY_LENGTH = 256;
-    private static readonly SALT_LENGTH = 16;
-    private static readonly IV_LENGTH = 12;
-
+export class EncryptionService {
     private _burnerSeed: Uint8Array | null = null;
 
     /**
-     * Initialize EncryptionClient with wallet signature
+     * Initialize EncryptionService with wallet signature
      * Derives burner seed from signature with domain separation
      */
     async initFromSignature(signature: Uint8Array): Promise<void> {
@@ -103,13 +52,13 @@ export class EncryptionClient {
         input.set(suffix, signature.length);
         
         const seedBuffer = await crypto.subtle.digest('SHA-256', input);
-        this.zeroMemory(input);
+        zeroMemory(input);
         
         this._burnerSeed = new Uint8Array(seedBuffer);
     }
 
     /**
-     * Check if client is initialized
+     * Check if service is initialized
      */
     get isInitialized(): boolean {
         return this._burnerSeed !== null;
@@ -121,7 +70,7 @@ export class EncryptionClient {
      */
     async deriveBurnerFromNonce(nonce: GeneratedNonce): Promise<BurnerKeyPair> {
         if (!this._burnerSeed) {
-            throw new Error('EncryptionClient not initialized. Call initFromSignature first.');
+            throw new Error('EncryptionService not initialized. Call initFromSignature first.');
         }
         
         const burnerMarker = new TextEncoder().encode(DOMAIN_BURNER);
@@ -135,13 +84,13 @@ export class EncryptionClient {
         const seed = new Uint8Array(seedBuffer);
         
         // Zero intermediate
-        this.zeroMemory(combined);
+        zeroMemory(combined);
         
         // Generate ed25519 keypair from seed
         const keypair = Keypair.fromSeed(seed);
         
         // Zero seed after use
-        this.zeroMemory(seed);
+        zeroMemory(seed);
         
         // Copy secretKey to ensure caller owns the memory for clearing
         const secretKeyCopy = new Uint8Array(keypair.secretKey);
@@ -159,7 +108,7 @@ export class EncryptionClient {
      * Clear burner secret key from memory when no longer needed
      */
     clearBurner(burner: BurnerKeyPair): void {
-        this.zeroMemory(burner.secretKey);
+        zeroMemory(burner.secretKey);
     }
 
     /**
@@ -171,7 +120,7 @@ export class EncryptionClient {
         maxIndex: number = 1000
     ): Promise<{ burners: BurnerKeyPair[]; recoveredIndices: number[] }> {
         if (!this._burnerSeed) {
-            throw new Error('EncryptionClient not initialized. Call initFromSignature first.');
+            throw new Error('EncryptionService not initialized. Call initFromSignature first.');
         }
         
         const burners: BurnerKeyPair[] = [];
@@ -244,22 +193,20 @@ export class EncryptionClient {
 
     // ============ LOCAL STORAGE METHODS ============
 
-    private static readonly STORAGE_KEY = 'shredr_nonces';
-
     /**
      * Save nonce to localStorage (client-side storage)
      */
     saveNonceToLocal(data: LocalNonceData): void {
         const existing = this.getLocalNonces();
         existing.push(data);
-        localStorage.setItem(EncryptionClient.STORAGE_KEY, JSON.stringify(existing));
+        localStorage.setItem(LOCAL_STORAGE_NONCES_KEY, JSON.stringify(existing));
     }
 
     /**
      * Get all local nonces
      */
     getLocalNonces(): LocalNonceData[] {
-        const stored = localStorage.getItem(EncryptionClient.STORAGE_KEY);
+        const stored = localStorage.getItem(LOCAL_STORAGE_NONCES_KEY);
         return stored ? JSON.parse(stored) : [];
     }
 
@@ -269,14 +216,14 @@ export class EncryptionClient {
     removeLocalNonce(index: number): void {
         const existing = this.getLocalNonces();
         const filtered = existing.filter(n => n.index !== index);
-        localStorage.setItem(EncryptionClient.STORAGE_KEY, JSON.stringify(filtered));
+        localStorage.setItem(LOCAL_STORAGE_NONCES_KEY, JSON.stringify(filtered));
     }
 
     /**
      * Clear all local nonces
      */
     clearLocalNonces(): void {
-        localStorage.removeItem(EncryptionClient.STORAGE_KEY);
+        localStorage.removeItem(LOCAL_STORAGE_NONCES_KEY);
     }
 
     // ============ BACKEND DESTRUCTION METHODS ============
@@ -289,11 +236,15 @@ export class EncryptionClient {
         nonceId: string,
         signMessage: (message: Uint8Array) => Promise<Uint8Array>
     ): Promise<NonceDestructionProof> {
-        // TODO: Implement
-        // 1. Create message: "DESTROY_NONCE:{nonceId}:{timestamp}"
-        // 2. Sign with wallet
-        // 3. Return proof
-        throw new Error('Not implemented');
+        const timestamp = Date.now();
+        const message = new TextEncoder().encode(`DESTROY_NONCE:${nonceId}:${timestamp}`);
+        const signature = await signMessage(message);
+        
+        return {
+            nonceId,
+            destructionSignature: uint8ArrayToBase64(signature),
+            timestamp
+        };
     }
 
     /**
@@ -319,53 +270,18 @@ export class EncryptionClient {
         localIndex: number,
         signMessage: (message: Uint8Array) => Promise<Uint8Array>
     ): Promise<{ success: boolean; error?: string }> {
-        // TODO: Implement
-        // 1. Create destruction proof
-        // 2. Request backend destruction
-        // 3. Remove from localStorage
-        // 4. Return result
-        throw new Error('Not implemented');
-    }
-
-    // ============ HELPER METHODS ============
-
-    /**
-     * Convert ArrayBuffer to base64 string
-     */
-    private arrayBufferToBase64(buffer: ArrayBuffer): string {
-        const bytes = new Uint8Array(buffer);
-        let binary = '';
-        for (let i = 0; i < bytes.byteLength; i++) {
-            binary += String.fromCharCode(bytes[i]);
+        try {
+            const proof = await this.createDestructionProof(nonceId, signMessage);
+            const result = await this.requestNonceDestruction(proof);
+            
+            if (result.success) {
+                this.removeLocalNonce(localIndex);
+            }
+            
+            return result;
+        } catch (e) {
+            return { success: false, error: String(e) };
         }
-        return btoa(binary);
-    }
-
-    /**
-     * Convert base64 string to Uint8Array
-     */
-    private base64ToUint8Array(base64: string): Uint8Array {
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
-        }
-        return bytes;
-    }
-
-    /**
-     * Generate cryptographically secure random bytes
-     */
-    private generateRandomBytes(length: number): Uint8Array {
-        return crypto.getRandomValues(new Uint8Array(length));
-    }
-
-    /**
-     * Zero memory for security
-     */
-    private zeroMemory(arr: Uint8Array): void {
-        crypto.getRandomValues(arr); // Overwrite with random
-        arr.fill(0); // Then zero
     }
 
     /**
@@ -373,39 +289,19 @@ export class EncryptionClient {
      */
     clearBurnerSeed(): void {
         if (this._burnerSeed) {
-            this.zeroMemory(this._burnerSeed);
+            zeroMemory(this._burnerSeed);
             this._burnerSeed = null;
         }
     }
 
     /**
-     * Convert Uint8Array to Base58
-     */
-    private uint8ArrayToBase58(bytes: Uint8Array): string {
-        const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-        if (bytes.length === 0) return '';
-        
-        let result = '';
-        let num = BigInt('0x' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''));
-        while (num > 0) {
-            result = ALPHABET[Number(num % 58n)] + result;
-            num = num / 58n;
-        }
-        for (const byte of bytes) {
-            if (byte === 0) result = '1' + result;
-            else break;
-        }
-        return result || '1';
-    }
-
-    /**
      * Import raw key bytes as CryptoKey
      */
-    private async importKey(keyBytes: Uint8Array): Promise<CryptoKey> {
+    async importKey(keyBytes: Uint8Array): Promise<CryptoKey> {
         return crypto.subtle.importKey(
             'raw',
-            keyBytes.buffer.slice(keyBytes.byteOffset, keyBytes.byteOffset + keyBytes.byteLength) as ArrayBuffer,
-            { name: EncryptionClient.ALGORITHM },
+            getArrayBuffer(keyBytes),
+            { name: ALGORITHM },
             false,
             ['encrypt', 'decrypt']
         );
@@ -414,14 +310,14 @@ export class EncryptionClient {
     /**
      * Derive key using PBKDF2
      */
-    private async deriveKeyPBKDF2(
+    async deriveKeyPBKDF2(
         password: Uint8Array,
         salt: Uint8Array,
-        iterations: number = 100000
+        iterations: number = PBKDF2_ITERATIONS
     ): Promise<CryptoKey> {
         const baseKey = await crypto.subtle.importKey(
             'raw',
-            password.buffer.slice(password.byteOffset, password.byteOffset + password.byteLength) as ArrayBuffer,
+            getArrayBuffer(password),
             'PBKDF2',
             false,
             ['deriveBits', 'deriveKey']
@@ -430,18 +326,43 @@ export class EncryptionClient {
         return crypto.subtle.deriveKey(
             {
                 name: 'PBKDF2',
-                salt: salt.buffer.slice(salt.byteOffset, salt.byteOffset + salt.byteLength) as ArrayBuffer,
+                salt: getArrayBuffer(salt),
                 iterations,
                 hash: 'SHA-256'
             },
             baseKey,
-            { name: EncryptionClient.ALGORITHM, length: EncryptionClient.KEY_LENGTH },
+            { name: ALGORITHM, length: KEY_LENGTH },
             false,
             ['encrypt', 'decrypt']
         );
+    }
+
+    /**
+     * Encrypt data with AES-GCM
+     */
+    async encrypt(data: Uint8Array, key: CryptoKey): Promise<{ ciphertext: Uint8Array; iv: Uint8Array }> {
+        const iv = generateRandomBytes(IV_LENGTH);
+        const ciphertext = await crypto.subtle.encrypt(
+            { name: ALGORITHM, iv: iv.buffer as ArrayBuffer },
+            key,
+            getArrayBuffer(data)
+        );
+        return { ciphertext: new Uint8Array(ciphertext), iv };
+    }
+
+    /**
+     * Decrypt data with AES-GCM
+     */
+    async decrypt(ciphertext: Uint8Array, iv: Uint8Array, key: CryptoKey): Promise<Uint8Array> {
+        const decrypted = await crypto.subtle.decrypt(
+            { name: ALGORITHM, iv: getArrayBuffer(iv) },
+            key,
+            getArrayBuffer(ciphertext)
+        );
+        return new Uint8Array(decrypted);
     }
 }
 
 // ============ SINGLETON EXPORT ============
 
-export const encryptionClient = new EncryptionClient();
+export const encryptionService = new EncryptionService();

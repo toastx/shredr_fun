@@ -1,36 +1,17 @@
 /**
- * SecureStorage - IndexedDB with AES-GCM encryption
+ * StorageService - IndexedDB with AES-GCM encryption
  * 
  * Provides encrypted persistent storage with mutex-based concurrency control.
- * Used by NonceManager for secure nonce state persistence.
+ * Used by NonceService for secure nonce state persistence.
  */
 
 import { ALGORITHM, IV_LENGTH, DB_NAME, DB_VERSION, STORE_NAME } from './constants';
 import { uint8ArrayToBase64, base64ToUint8Array } from './utils';
+import { DecryptionError, type NonceState } from './types';
 
-// ============ TYPES ============
+// ============ STORAGE SERVICE CLASS ============
 
-export interface NonceState {
-    currentNonce: string;  // Base64 encoded current nonce
-    currentIndex: number;
-    walletPubkeyHash: string;
-}
-
-// ============ ERROR TYPES ============
-
-export class DecryptionError extends Error {
-    readonly reason: 'wrong_key' | 'corrupted' | 'unknown';
-    
-    constructor(reason: 'wrong_key' | 'corrupted' | 'unknown', message: string) {
-        super(message);
-        this.name = 'DecryptionError';
-        this.reason = reason;
-    }
-}
-
-// ============ SECURE STORAGE CLASS ============
-
-export class SecureStorage {
+export class StorageService {
     private db: IDBDatabase | null = null;
     private encryptionKey: CryptoKey | null = null;
     private lockQueue = new Map<string, Promise<void>>();
