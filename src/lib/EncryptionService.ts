@@ -17,14 +17,8 @@ import {
     generateRandomBytes 
 } from './utils';
 import { 
-    ALGORITHM, 
-    IV_LENGTH,
-    KEY_LENGTH,
-    PBKDF2_ITERATIONS,
-    DOMAIN_BURNER_SEED, 
-    DOMAIN_BURNER, 
+    DOMAIN_BURNER_MASTER, 
     CONSECUTIVE_EMPTY_THRESHOLD,
-    LOCAL_STORAGE_NONCES_KEY
 } from './constants';
 import type { 
     GeneratedNonce,
@@ -32,7 +26,6 @@ import type {
     EncryptionKeyMaterial,
     ConsumeNonceResult,
     EncryptedNonce,
-    LocalNonceData,
     NonceDestructionProof
 } from './types';
 
@@ -46,7 +39,7 @@ export class EncryptionService {
      * Derives burner seed from signature with domain separation
      */
     async initFromSignature(signature: Uint8Array): Promise<void> {
-        const suffix = new TextEncoder().encode(DOMAIN_BURNER_SEED);
+        const suffix = new TextEncoder().encode(DOMAIN_BURNER_MASTER);
         const input = new Uint8Array(signature.length + suffix.length);
         input.set(signature, 0);
         input.set(suffix, signature.length);
@@ -73,12 +66,10 @@ export class EncryptionService {
             throw new Error('EncryptionService not initialized. Call initFromSignature first.');
         }
         
-        const burnerMarker = new TextEncoder().encode(DOMAIN_BURNER);
-        
-        const combined = new Uint8Array(this._burnerSeed.length + nonce.nonce.length + burnerMarker.length);
+        // Combine burnerSeed + nonce for unique keypair derivation
+        const combined = new Uint8Array(this._burnerSeed.length + nonce.nonce.length);
         combined.set(this._burnerSeed, 0);
         combined.set(nonce.nonce, this._burnerSeed.length);
-        combined.set(burnerMarker, this._burnerSeed.length + nonce.nonce.length);
         
         const seedBuffer = await crypto.subtle.digest('SHA-256', combined);
         const seed = new Uint8Array(seedBuffer);
@@ -191,41 +182,6 @@ export class EncryptionService {
         throw new Error('Not implemented');
     }
 
-    // ============ LOCAL STORAGE METHODS ============
-
-    /**
-     * Save nonce to localStorage (client-side storage)
-     */
-    saveNonceToLocal(data: LocalNonceData): void {
-        const existing = this.getLocalNonces();
-        existing.push(data);
-        localStorage.setItem(LOCAL_STORAGE_NONCES_KEY, JSON.stringify(existing));
-    }
-
-    /**
-     * Get all local nonces
-     */
-    getLocalNonces(): LocalNonceData[] {
-        const stored = localStorage.getItem(LOCAL_STORAGE_NONCES_KEY);
-        return stored ? JSON.parse(stored) : [];
-    }
-
-    /**
-     * Remove nonce from local storage
-     */
-    removeLocalNonce(index: number): void {
-        const existing = this.getLocalNonces();
-        const filtered = existing.filter(n => n.index !== index);
-        localStorage.setItem(LOCAL_STORAGE_NONCES_KEY, JSON.stringify(filtered));
-    }
-
-    /**
-     * Clear all local nonces
-     */
-    clearLocalNonces(): void {
-        localStorage.removeItem(LOCAL_STORAGE_NONCES_KEY);
-    }
-
     // ============ BACKEND DESTRUCTION METHODS ============
 
     /**
@@ -274,9 +230,7 @@ export class EncryptionService {
             const proof = await this.createDestructionProof(nonceId, signMessage);
             const result = await this.requestNonceDestruction(proof);
             
-            if (result.success) {
-                this.removeLocalNonce(localIndex);
-            }
+            //use secure sotrage
             
             return result;
         } catch (e) {
@@ -294,73 +248,6 @@ export class EncryptionService {
         }
     }
 
-    /**
-     * Import raw key bytes as CryptoKey
-     */
-    async importKey(keyBytes: Uint8Array): Promise<CryptoKey> {
-        return crypto.subtle.importKey(
-            'raw',
-            getArrayBuffer(keyBytes),
-            { name: ALGORITHM },
-            false,
-            ['encrypt', 'decrypt']
-        );
-    }
-
-    /**
-     * Derive key using PBKDF2
-     */
-    async deriveKeyPBKDF2(
-        password: Uint8Array,
-        salt: Uint8Array,
-        iterations: number = PBKDF2_ITERATIONS
-    ): Promise<CryptoKey> {
-        const baseKey = await crypto.subtle.importKey(
-            'raw',
-            getArrayBuffer(password),
-            'PBKDF2',
-            false,
-            ['deriveBits', 'deriveKey']
-        );
-
-        return crypto.subtle.deriveKey(
-            {
-                name: 'PBKDF2',
-                salt: getArrayBuffer(salt),
-                iterations,
-                hash: 'SHA-256'
-            },
-            baseKey,
-            { name: ALGORITHM, length: KEY_LENGTH },
-            false,
-            ['encrypt', 'decrypt']
-        );
-    }
-
-    /**
-     * Encrypt data with AES-GCM
-     */
-    async encrypt(data: Uint8Array, key: CryptoKey): Promise<{ ciphertext: Uint8Array; iv: Uint8Array }> {
-        const iv = generateRandomBytes(IV_LENGTH);
-        const ciphertext = await crypto.subtle.encrypt(
-            { name: ALGORITHM, iv: iv.buffer as ArrayBuffer },
-            key,
-            getArrayBuffer(data)
-        );
-        return { ciphertext: new Uint8Array(ciphertext), iv };
-    }
-
-    /**
-     * Decrypt data with AES-GCM
-     */
-    async decrypt(ciphertext: Uint8Array, iv: Uint8Array, key: CryptoKey): Promise<Uint8Array> {
-        const decrypted = await crypto.subtle.decrypt(
-            { name: ALGORITHM, iv: getArrayBuffer(iv) },
-            key,
-            getArrayBuffer(ciphertext)
-        );
-        return new Uint8Array(decrypted);
-    }
 }
 
 // ============ SINGLETON EXPORT ============

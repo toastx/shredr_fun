@@ -6,7 +6,7 @@
  */
 
 import { ALGORITHM, IV_LENGTH, DB_NAME, DB_VERSION, STORE_NAME } from './constants';
-import { uint8ArrayToBase64, base64ToUint8Array } from './utils';
+import { uint8ArrayToBase64, base64ToUint8Array, getArrayBuffer } from './utils';
 import { DecryptionError, type NonceState } from './types';
 
 // ============ STORAGE SERVICE CLASS ============
@@ -85,9 +85,9 @@ export class StorageService {
         const iv = base64ToUint8Array(encrypted.iv);
         
         const decrypted = await crypto.subtle.decrypt(
-            { name: ALGORITHM, iv: iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength) as ArrayBuffer },
+            { name: ALGORITHM, iv: getArrayBuffer(iv) },
             this.encryptionKey,
-            ciphertext.buffer.slice(ciphertext.byteOffset, ciphertext.byteOffset + ciphertext.byteLength) as ArrayBuffer
+            getArrayBuffer(ciphertext)
         );
         
         return new TextDecoder().decode(decrypted);

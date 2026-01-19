@@ -33,16 +33,13 @@ export const MAX_NONCE_INDEX = 0xFFFFFFFF;
 export const MASTER_MESSAGE = 'SHREDR_V1';
 
 /** Domain separation suffixes for key derivation */
-export const DOMAIN_NONCE_SEED = 'SHREDR_NONCE_SEED';
-export const DOMAIN_ENCRYPT_KEY = 'SHREDR_ENCRYPT_KEY';
+export const DOMAIN_NONCE_MASTER = 'SHREDR_NONCE_MASTER';     // Master seed for nonce chain
+export const DOMAIN_STORAGE_KEY = 'SHREDR_STORAGE_KEY';       // IndexedDB encryption key
 
 // ============ ENCRYPTION SERVICE CONSTANTS ============
 
-/** Domain separation for burner seed derivation */
-export const DOMAIN_BURNER_SEED = 'BURNER_SEED';
-
-/** Domain separation for burner derivation */
-export const DOMAIN_BURNER = 'BURNER';
+/** Domain separation for burner master seed derivation */
+export const DOMAIN_BURNER_MASTER = 'SHREDR_BURNER_MASTER';   // Master seed for burner derivation
 
 /** Number of consecutive empty addresses before stopping recovery scan */
 export const CONSECUTIVE_EMPTY_THRESHOLD = 10;

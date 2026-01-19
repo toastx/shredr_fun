@@ -19,8 +19,8 @@ import {
     IV_LENGTH, 
     WALLET_HASH_LENGTH, 
     MAX_NONCE_INDEX,
-    DOMAIN_NONCE_SEED,
-    DOMAIN_ENCRYPT_KEY
+    DOMAIN_NONCE_MASTER,
+    DOMAIN_STORAGE_KEY
 } from './constants';
 import { 
     uint8ArrayToBase64, 
@@ -59,7 +59,7 @@ export class NonceService {
      */
     async initFromSignature(signature: Uint8Array): Promise<void> {
         // Derive master seed for nonce generation
-        const nonceSuffix = new TextEncoder().encode(DOMAIN_NONCE_SEED);
+        const nonceSuffix = new TextEncoder().encode(DOMAIN_NONCE_MASTER);
         const nonceInput = new Uint8Array(signature.length + nonceSuffix.length);
         nonceInput.set(signature, 0);
         nonceInput.set(nonceSuffix, signature.length);
@@ -67,7 +67,7 @@ export class NonceService {
         this._masterSeed = new Uint8Array(masterSeedBuffer);
         
         // Derive encryption key for IndexedDB storage
-        const encryptSuffix = new TextEncoder().encode(DOMAIN_ENCRYPT_KEY);
+        const encryptSuffix = new TextEncoder().encode(DOMAIN_STORAGE_KEY);
         const encryptInput = new Uint8Array(signature.length + encryptSuffix.length);
         encryptInput.set(signature, 0);
         encryptInput.set(encryptSuffix, signature.length);
