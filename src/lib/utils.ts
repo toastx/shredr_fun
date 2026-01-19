@@ -67,3 +67,20 @@ export function getArrayBuffer(arr: Uint8Array): ArrayBuffer {
 export function generateRandomBytes(length: number): Uint8Array {
     return crypto.getRandomValues(new Uint8Array(length));
 }
+
+/**
+ * Derive a privacy-preserving wallet hash for IndexedDB keys
+ * Hashes the FULL pubkey first, then truncates the hash output
+ * This prevents identification of the wallet from the stored key
+ */
+export async function deriveWalletHash(
+    walletPublicKey: Uint8Array, 
+    length: number
+): Promise<string> {
+    // Hash the full pubkey - can't be reversed
+    const hashBuffer = await crypto.subtle.digest('SHA-256', getArrayBuffer(walletPublicKey));
+    const hashArray = new Uint8Array(hashBuffer);
+    
+    // Convert to base58 and truncate the HASH (not the pubkey)
+    return uint8ArrayToBase58(hashArray).slice(0, length);
+}

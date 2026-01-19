@@ -24,7 +24,14 @@ dist-ssr
 *.sln
 *.sw?
 .kilocodemodes
+
+
+# Rust
 shredr-backend/target
 .shuttle*
 Secrets*.toml
+*.rs.bk
+*.pdb
+shredr-backend/Cargo.lock
+shredr-backend/.env
 

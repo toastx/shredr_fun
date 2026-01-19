@@ -25,9 +25,9 @@ import {
 import { 
     uint8ArrayToBase64, 
     base64ToUint8Array, 
-    uint8ArrayToBase58, 
     zeroMemory,
-    getArrayBuffer
+    getArrayBuffer,
+    deriveWalletHash
 } from './utils';
 import { 
     DecryptionError, 
@@ -115,7 +115,7 @@ export class NonceService {
             throw new Error('NonceService not initialized. Call initFromSignature first.');
         }
         
-        this._walletHash = uint8ArrayToBase58(walletPublicKey).slice(0, WALLET_HASH_LENGTH);
+        this._walletHash = await deriveWalletHash(walletPublicKey, WALLET_HASH_LENGTH);
         const stored = await this.storage.getCurrentNonce(this._walletHash);
         
         if (stored) {
@@ -139,7 +139,7 @@ export class NonceService {
             throw new Error('NonceService not initialized. Call initFromSignature first.');
         }
         
-        this._walletHash = uint8ArrayToBase58(walletPublicKey).slice(0, WALLET_HASH_LENGTH);
+        this._walletHash = await deriveWalletHash(walletPublicKey, WALLET_HASH_LENGTH);
         this._currentIndex = 0;
         
         // Base nonce is just the master seed hashed

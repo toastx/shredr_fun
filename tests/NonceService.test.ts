@@ -611,8 +611,8 @@ describe('NonceService', () => {
             await nonceService.initFromSignature(mockSignature);
             await nonceService.generateBaseNonce(mockWalletPubkey);
             
-            // Directly set index near MAX to test overflow
-            (nonceService as any)._currentIndex = 2147483647; // MAX_NONCE_INDEX
+            // Directly set index to MAX to test overflow
+            (nonceService as any)._currentIndex = 0xFFFFFFFF; // MAX_NONCE_INDEX
             
             try {
                 await nonceService.incrementNonce();
