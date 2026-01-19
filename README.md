@@ -1,62 +1,216 @@
-# ✂️ shredr.fun
+<p align="center">
+  <img src="public/banner_readme.png" alt="Shredr Banner" />
+</p>
 
-### **The Solana Address Alternative to TempMail**
+# shredr.fun
 
-**shredr.fun** is a privacy-first utility that allows users to generate disposable, zero-link burner addresses to receive funds. Operating on a **Commitment-Claim architecture**, it ensures that the transaction history of the burner is cryptographically isolated from your main wallet until the moment of the claim—at which point the link is broken through **Multi-Party Computation (MPC)**.
+### **Shred Your Money Trail - Privacy-First Burner Wallets on Solana**
 
----
-
-## 🔄 User Flow
-
-The "shredding" process occurs through four distinct stages:
-
-1.  **Generation:**
-    *   The user clicks **"Generate"** on the frontend.
-    *   A **12-word BIP39 mnemonic** is generated locally in the browser (client-side only).
-
-2.  **Commitment:**
-    *   The mnemonic is hashed into a **Commitment ($C$)**:
-        $$C = \text{Hash}(\text{mnemonic} + \text{nullifier})$$
-    *   This commitment is stored on-chain, serving as the cryptographic lock.
-
-3.  **Receive:**
-    *   A **burner PDA (Program Derived Address)** is initialized.
-    *   The payer sends SOL or SPL tokens to this address. The funds sit in this PDA, publicly visible but cryptographically claimed by the commitment.
-
-4.  **Shred & Claim:**
-    *   To withdraw, the user enters the 12-word note.
-    *   An **Arcium MPC cluster** verifies the note against the on-chain commitment.
-    *   **Critical:** No single node (nor the blockchain) ever sees the plaintext words.
-    *   Once verified, the funds are "shredded" (transferred) to the user's main wallet.
+**shredr.fun** is a privacy utility that generates disposable, unlinkable burner addresses to receive funds on Solana. Using deterministic key derivation and encrypted state management, it ensures your main wallet is never linked to incoming transactions.
 
 ---
 
-## 🛠 The Tech Stack
+## 🔄 How It Works
 
-*   **Solana:** The high-speed settlement layer where commitments and PDAs live.
-*   **Arcium (MPC):** The **"Encrypted Supercomputer"** that handles the private verification of your 12-word note. It ensures the link between the burner and your main wallet is never exposed.
-*   **C-SPL (Confidential SPL):** A Token-2022 extension used to hide the transaction amount. This prevents observers from linking accounts via "amount matching" (e.g., seeing 4.20 SOL leave one wallet and enter another).
+1. **Connect Wallet** → Sign a message to derive your encryption keys
+2. **Generate Burner** → Get a fresh burner address (deterministic, recoverable)
+3. **Receive Funds** → Share the burner address with sender
+4. **Shred** → Deposit funds to ShadowWire pool for private transfer to your destination
+
+---
+
+## 🏗 Architecture
+
+### Services
+
+| Service | Purpose |
+|---------|---------|
+| **NonceService** | Manages nonce generation, chaining, and encrypted storage |
+| **BurnerService** | Derives burner keypairs from nonces |
+| **StorageService** | Encrypted IndexedDB wrapper for local state |
+| **ShadowWireClient** | Integration with ShadowWire privacy pool |
+
+### Flow
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Wallet Sign    │ ──▶ │  NonceService   │ ──▶ │  BurnerService  │
+│  (Auth)         │     │  (Nonce Chain)  │     │  (Keypair)      │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+                               │
+                               ▼
+                        ┌─────────────────┐
+                        │  Backend API    │
+                        │  (Blob Sync)    │
+                        └─────────────────┘
+```
+
+### State Management
+
+- **Local State** (IndexedDB): Encrypted cache for fast access
+- **Remote State** (Backend): Source of truth for cross-device recovery
+- **Sync Logic**: Higher index wins, automatic sync on init
+
+---
+
+## 🛠 Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| **Frontend** | TypeScript, Vite, React |
+| **Crypto** | Web Crypto API (AES-GCM, SHA-256) |
+| **Storage** | IndexedDB (encrypted) |
+| **Backend** | Rust (Axum) |
+| **Privacy** | ShadowWire (@radr/shadowwire) |
+| **Blockchain** | Solana |
 
 ---
 
 ## 📦 Getting Started
 
 ### Prerequisites
-* [Solana CLI](https://docs.solana.com/cli/install-solana-cli-tools)
-* [Anchor Framework](https://www.anchor-lang.com/)
-* [Arcium SDK](https://docs.arcium.com/)
+
+- Node.js 18+
+- npm or pnpm
 
 ### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/shredr-fun.git
+git clone https://github.com/your-username/shredr.git
+cd shredr
 
 # Install dependencies
-cd shredr-fun
 npm install
 
-# Deploy Anchor program
-anchor deploy
+# Run development server
+npm run dev
 ```
 
+### Running Tests
+
+```bash
+npm test
+```
+
+See [tests/README.md](tests/README.md) for test coverage details.
+
+---
+
+## 📁 Project Structure
+
+```
+shredr/
+├── src/
+│   ├── lib/
+│   │   ├── NonceService.ts    # Nonce management
+│   │   ├── BurnerService.ts   # Burner derivation
+│   │   ├── StorageService.ts  # Encrypted IndexedDB
+│   │   ├── ShadowWireClient.ts # Privacy pool integration
+│   │   ├── constants.ts       # Shared constants
+│   │   ├── types.ts           # TypeScript types
+│   │   ├── utils.ts           # Crypto utilities
+│   │   └── index.ts           # Exports
+│   └── ...
+├── tests/
+│   ├── NonceService.test.ts   # 41 unit tests
+│   ├── setup.ts               # Test environment
+│   └── README.md              # Test documentation
+├── shredr-backend/            # Rust backend (separate)
+└── ...
+```
+
+---
+
+## 🔐 Security Features
+
+- **Non-Custodial**: Private keys never leave the browser
+- **Deterministic Recovery**: Burners recoverable from wallet signature
+- **Encrypted Storage**: Local state encrypted with derived keys
+- **Memory Zeroing**: Sensitive data cleared after use
+- **Privacy-Preserving Keys**: Wallet hash derived via SHA-256
+
+---
+
+## 📄 API Reference
+
+### NonceService
+
+```typescript
+// Initialize
+await nonceService.initFromSignature(signature);
+
+// Load or generate nonce
+const nonce = await nonceService.loadCurrentNonce(pubkey);
+if (!nonce) {
+    await nonceService.generateBaseNonce(pubkey);
+}
+
+// Consume (after burner used)
+const result = await nonceService.consumeNonce();
+// result.newBlobData → upload to backend
+```
+
+### BurnerService
+
+```typescript
+// Initialize
+await burnerService.initFromSignature(signature);
+
+// Derive burner from nonce
+const burner = await burnerService.deriveBurnerFromNonce(nonce);
+console.log(burner.address); // Burner Solana address
+
+// Clear when done
+burnerService.clearBurner(burner);
+```
+
+---
+
+## 🚀 Roadmap
+
+### Core Library
+- [x] NonceService with encrypted storage
+- [x] BurnerService for keypair derivation
+- [x] StorageService (encrypted IndexedDB)
+- [x] Local/Remote state sync logic
+- [x] Privacy-preserving wallet hash
+
+### Testing
+- [x] NonceService tests (41 passing)
+- [ ] BurnerService tests
+- [ ] StorageService tests
+- [ ] Integration tests
+
+### Backend
+- [x] Project setup (Rust/Axum)
+- [ ] Blob API endpoints (CRUD)
+- [ ] WebSocket for real-time notifications
+- [ ] Helius webhook integration
+- [ ] Database (PostgreSQL/SQLite)
+
+### Frontend
+- [x] Vite + React setup
+- [x] Wallet adapter integration
+- [ ] User init flow UI
+- [ ] Burner generation UI
+- [ ] Deposit tracking UI
+- [ ] Shred/sweep UI
+
+### Privacy Integration
+- [x] ShadowWire SDK integration
+- [x] Deposit to pool flow
+- [x] Private transfer implementation
+- [ ] Fee collection
+
+### Production
+- [ ] Error handling & recovery
+- [ ] Mobile responsive
+- [ ] Deployment
+- [ ] Documentation
+
+---
+
+## 📜 License
+
+MIT
