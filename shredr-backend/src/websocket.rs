@@ -65,7 +65,7 @@ async fn websocket(stream: WebSocket, state: Arc<WebSocketState>) {
             let msg = rx.borrow().clone();
             let text = msg.to_text();
 
-            if sender.send(Message::Text(text)).await.is_err() {
+            if sender.send(Message::Text(text.into())).await.is_err() {
                 break;
             }
         }
@@ -78,11 +78,19 @@ async fn websocket(stream: WebSocket, state: Arc<WebSocketState>) {
                 Message::Text(text) => {
                     tracing::debug!("Received message from client: {}", text);
                 }
+                Message::Binary(data) => {
+                    tracing::debug!("Received binary message: {} bytes", data.len());
+                }
                 Message::Close(_) => {
                     tracing::info!("Client requested close");
                     break;
                 }
-                _ => {}
+                Message::Ping(_) => {
+                    tracing::trace!("Received ping");
+                }
+                Message::Pong(_) => {
+                    tracing::trace!("Received pong");
+                }
             }
         }
     });
