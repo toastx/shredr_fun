@@ -13,6 +13,7 @@ impl DbHandler {
 
     /// Initialize the database schema
     pub async fn init_schema(&self) -> Result<(), String> {
+        // Create the table
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS nonce_blobs (
@@ -20,25 +21,29 @@ impl DbHandler {
                 encrypted_data TEXT NOT NULL,
                 iv TEXT NOT NULL,
                 created_at BIGINT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_nonce_blobs_created_at ON nonce_blobs(created_at);
+            )
             "#,
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| format!("Failed to initialize schema: {}", e))?;
+        .map_err(|e| format!("Failed to create table: {}", e))?;
+
+        // Create the index
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_nonce_blobs_created_at ON nonce_blobs(created_at)
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| format!("Failed to create index: {}", e))?;
 
         Ok(())
     }
 
     /// Create a new nonce blob
     /// Returns the created blob with its ID
-    pub async fn create_blob(
-        &self,
-        encrypted_data: &str,
-        iv: &str,
-    ) -> Result<NonceBlob, String> {
+    pub async fn create_blob(&self, encrypted_data: &str, iv: &str) -> Result<NonceBlob, String> {
         let id = Uuid::new_v4();
         let created_at = chrono::Utc::now().timestamp_millis();
 
@@ -66,8 +71,7 @@ impl DbHandler {
 
     /// Delete a blob by ID
     pub async fn delete_blob(&self, id: &str) -> Result<bool, String> {
-        let uuid = Uuid::parse_str(id)
-            .map_err(|e| format!("Invalid UUID: {}", e))?;
+        let uuid = Uuid::parse_str(id).map_err(|e| format!("Invalid UUID: {}", e))?;
 
         let result = sqlx::query(
             r#"
@@ -84,8 +88,7 @@ impl DbHandler {
 
     /// Get a blob by ID
     pub async fn get_blob(&self, id: &str) -> Result<NonceBlob, String> {
-        let uuid = Uuid::parse_str(id)
-            .map_err(|e| format!("Invalid UUID: {}", e))?;
+        let uuid = Uuid::parse_str(id).map_err(|e| format!("Invalid UUID: {}", e))?;
 
         let row = sqlx::query(
             r#"
@@ -118,11 +121,7 @@ impl DbHandler {
     }
 
     /// List all blobs (for frontend to try decrypting each)
-    pub async fn list_blobs(
-        &self,
-        limit: i64,
-        offset: i64,
-    ) -> Result<Vec<NonceBlob>, String> {
+    pub async fn list_blobs(&self, limit: i64, offset: i64) -> Result<Vec<NonceBlob>, String> {
         let rows = sqlx::query(
             r#"
             SELECT id, encrypted_data, iv, created_at

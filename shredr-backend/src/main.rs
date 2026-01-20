@@ -13,7 +13,6 @@ use shuttle_axum::ShuttleAxum;
 use sqlx::PgPool;
 use tokio::sync::{watch, Mutex};
 use tower_http::cors::{Any, CorsLayer};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use db::DbHandler;
 use routes::AppState;
@@ -22,15 +21,8 @@ use websocket::{WebSocketMessage, WebSocketState};
 
 #[shuttle_runtime::main]
 async fn main(#[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore) -> ShuttleAxum {
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "shredr_backend=debug,tower_http=debug,sqlx=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
+    // Note: Shuttle automatically sets up tracing, don't initialize it again
+    
     tracing::info!("Starting Shredr Backend...");
 
     // Get database URL from secrets or environment
