@@ -10,6 +10,7 @@ use axum::{
     Router,
 };
 use shuttle_axum::ShuttleAxum;
+use sqlx::PgPool;
 use tokio::sync::{watch, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -20,30 +21,41 @@ use webhook::WebhookState;
 use websocket::{WebSocketMessage, WebSocketState};
 
 #[shuttle_runtime::main]
-async fn main() -> ShuttleAxum {
+async fn main(#[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore) -> ShuttleAxum {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "shredr_backend=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "shredr_backend=debug,tower_http=debug,sqlx=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     tracing::info!("Starting Shredr Backend...");
 
-    // Initialize AWS S3 client
-    let aws_config = aws_config::load_from_env().await;
-    let s3_client = aws_sdk_s3::Client::new(&aws_config);
+    // Get database URL from secrets or environment
+    let database_url = secrets.get("DATABASE_URL").unwrap_or_else(|| {
+        std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set in Secrets.toml or environment")
+    });
 
-    // Get bucket name from environment or use default
-    let bucket_name =
-        std::env::var("S3_BUCKET_NAME").unwrap_or_else(|_| "shredr-blobs".to_string());
+    // Create database connection pool
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("Failed to connect to database");
 
-    tracing::info!("Using S3 bucket: {}", bucket_name);
+    tracing::info!("Connected to database");
 
     // Initialize database handler
-    let db_handler = DbHandler::new(s3_client, bucket_name);
+    let db_handler = DbHandler::new(pool);
+
+    // Initialize database schema
+    if let Err(e) = db_handler.init_schema().await {
+        tracing::error!("Failed to initialize database schema: {}", e);
+        panic!("Database initialization failed");
+    }
+
+    tracing::info!("Database initialized successfully");
 
     // Create WebSocket broadcast channel
     let initial_message = WebSocketMessage::Status {
@@ -70,11 +82,19 @@ async fn main() -> ShuttleAxum {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    // Build router
+    // Build router with API endpoints matching frontend expectations:
+    // 
+    // Frontend API (from SKILL.md):
+    //   fetchAllBlobs(): Promise<NonceBlob[]>  -> GET  /api/blobs
+    //   createBlob(data): Promise<NonceBlob>   -> POST /api/blobs
+    //   deleteBlob(id): Promise<boolean>       -> DELETE /api/blobs/:id
+    //
     let router = Router::new()
-        // Blob endpoints
-        .route("/api/blob/upload", post(routes::upload_blob_handler))
-        .route("/api/blob/:key", delete(routes::delete_blob_handler))
+        // Blob endpoints (matching NonceBlobAPI interface)
+        .route("/api/blobs", post(routes::create_blob_handler))
+        .route("/api/blobs", get(routes::list_blobs_handler))
+        .route("/api/blobs/{id}", get(routes::get_blob_handler))
+        .route("/api/blobs/{id}", delete(routes::delete_blob_handler))
         .with_state(app_state)
         // WebSocket endpoint
         .route("/ws", get(websocket::websocket_handler))
@@ -88,11 +108,13 @@ async fn main() -> ShuttleAxum {
 
     tracing::info!("Server configured successfully");
     tracing::info!("Endpoints:");
-    tracing::info!("  POST   /api/blob/upload");
-    tracing::info!("  DELETE /api/blob/:key");
-    tracing::info!("  GET    /ws (WebSocket)");
-    tracing::info!("  POST   /webhook/helius");
-    tracing::info!("  GET    /health");
+    tracing::info!("  POST   /api/blobs       - Create blob");
+    tracing::info!("  GET    /api/blobs       - List all blobs");
+    tracing::info!("  GET    /api/blobs/:id   - Get blob by ID");
+    tracing::info!("  DELETE /api/blobs/:id   - Delete blob by ID");
+    tracing::info!("  GET    /ws              - WebSocket");
+    tracing::info!("  POST   /webhook/helius  - Helius webhook");
+    tracing::info!("  GET    /health          - Health check");
 
     Ok(router.into())
 }
