@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
