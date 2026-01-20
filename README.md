@@ -6,7 +6,7 @@
 
 ### **Shred Your Money Trail - Privacy-First Burner Wallets on Solana**
 
-**shredr.fun** is a privacy utility that generates disposable, unlinkable burner addresses to receive funds on Solana. Using deterministic key derivation and encrypted state management, it ensures your main wallet is never linked to incoming transactions.
+**shredr.fun** is a privacy utility that generates disposable, unlinkable burner addresses to receive funds on Solana. Using deterministic key derivation and private transfers by shadowwire, it ensures your main wallet is never linked to incoming transactions.
 
 ---
 
