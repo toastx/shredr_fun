@@ -178,16 +178,16 @@ burnerService.clearBurner(burner);
 
 ### Testing
 - [x] NonceService tests (41 passing)
-- [ ] BurnerService tests
+- [x] BurnerService tests (25+ passing)
+- [x] Integration flow tests (complete 5-phase flow)
 - [ ] StorageService tests
-- [ ] Integration tests
 
 ### Backend
 - [x] Project setup (Rust/Axum)
-- [ ] Blob API endpoints (CRUD)
+- [x] Blob API endpoints (CRUD)
 - [ ] WebSocket for real-time notifications
 - [ ] Helius webhook integration
-- [ ] Database (PostgreSQL/SQLite)
+- [ ] Database (PostgreSQL)
 
 ### Frontend
 - [x] Vite + React setup
