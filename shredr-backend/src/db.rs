@@ -18,8 +18,7 @@ impl DbHandler {
             r#"
             CREATE TABLE IF NOT EXISTS nonce_blobs (
                 id UUID PRIMARY KEY,
-                encrypted_data TEXT NOT NULL,
-                iv TEXT NOT NULL,
+                encrypted_blob TEXT NOT NULL,
                 created_at BIGINT NOT NULL
             )
             "#,
@@ -43,19 +42,18 @@ impl DbHandler {
 
     /// Create a new nonce blob
     /// Returns the created blob with its ID
-    pub async fn create_blob(&self, encrypted_data: &str, iv: &str) -> Result<NonceBlob, String> {
+    pub async fn create_blob(&self, encrypted_blob: &str) -> Result<NonceBlob, String> {
         let id = Uuid::new_v4();
         let created_at = chrono::Utc::now().timestamp_millis();
 
         sqlx::query(
             r#"
-            INSERT INTO nonce_blobs (id, encrypted_data, iv, created_at)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO nonce_blobs (id, encrypted_blob, created_at)
+            VALUES ($1, $2, $3)
             "#,
         )
         .bind(id)
-        .bind(encrypted_data)
-        .bind(iv)
+        .bind(encrypted_blob)
         .bind(created_at)
         .execute(&self.pool)
         .await
@@ -63,8 +61,7 @@ impl DbHandler {
 
         Ok(NonceBlob {
             id: id.to_string(),
-            encrypted_data: encrypted_data.to_string(),
-            iv: iv.to_string(),
+            encrypted_blob: encrypted_blob.to_string(),
             created_at,
         })
     }
@@ -92,8 +89,8 @@ impl DbHandler {
 
         let row = sqlx::query(
             r#"
-            SELECT id, encrypted_data, iv, created_at 
-            FROM nonce_blobs 
+            SELECT id, encrypted_blob, created_at
+            FROM nonce_blobs
             WHERE id = $1
             "#,
         )
@@ -105,14 +102,12 @@ impl DbHandler {
         match row {
             Some(row) => {
                 let id: Uuid = row.get("id");
-                let encrypted_data: String = row.get("encrypted_data");
-                let iv: String = row.get("iv");
+                let encrypted_blob: String = row.get("encrypted_blob");
                 let created_at: i64 = row.get("created_at");
 
                 Ok(NonceBlob {
                     id: id.to_string(),
-                    encrypted_data,
-                    iv,
+                    encrypted_blob,
                     created_at,
                 })
             }
@@ -124,7 +119,7 @@ impl DbHandler {
     pub async fn list_blobs(&self, limit: i64, offset: i64) -> Result<Vec<NonceBlob>, String> {
         let rows = sqlx::query(
             r#"
-            SELECT id, encrypted_data, iv, created_at
+            SELECT id, encrypted_blob, created_at
             FROM nonce_blobs
             ORDER BY created_at DESC
             LIMIT $1 OFFSET $2
@@ -140,14 +135,12 @@ impl DbHandler {
             .iter()
             .map(|row| {
                 let id: Uuid = row.get("id");
-                let encrypted_data: String = row.get("encrypted_data");
-                let iv: String = row.get("iv");
+                let encrypted_blob: String = row.get("encrypted_blob");
                 let created_at: i64 = row.get("created_at");
 
                 NonceBlob {
                     id: id.to_string(),
-                    encrypted_data,
-                    iv,
+                    encrypted_blob,
                     created_at,
                 }
             })
@@ -162,8 +155,7 @@ impl DbHandler {
 #[serde(rename_all = "camelCase")]
 pub struct NonceBlob {
     pub id: String,
-    pub encrypted_data: String,
-    pub iv: String,
+    pub encrypted_blob: String,
     pub created_at: i64,
 }
 
@@ -171,6 +163,5 @@ pub struct NonceBlob {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateBlobRequest {
-    pub encrypted_data: String,
-    pub iv: String,
+    pub encrypted_blob: String,
 }

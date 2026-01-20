@@ -206,22 +206,26 @@ export class NonceService {
         encryptionKey: CryptoKey
     ): Promise<EncryptedNoncePayload> {
         const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-        
+
         const payload = JSON.stringify({
             nonce: uint8ArrayToBase64(nonce.nonce),
             index: nonce.index,
             walletPubkeyHash: nonce.walletPubkeyHash
         });
-        
+
         const ciphertext = await crypto.subtle.encrypt(
             { name: ALGORITHM, iv: iv.buffer as ArrayBuffer },
             encryptionKey,
             new TextEncoder().encode(payload)
         );
-        
+
+        // Prepend IV to ciphertext for single blob storage
+        const encryptedBlob = new Uint8Array(iv.length + ciphertext.byteLength);
+        encryptedBlob.set(iv, 0);
+        encryptedBlob.set(new Uint8Array(ciphertext), iv.length);
+
         return {
-            ciphertext: uint8ArrayToBase64(new Uint8Array(ciphertext)),
-            iv: uint8ArrayToBase64(iv),
+            encryptedBlob: uint8ArrayToBase64(encryptedBlob),
             version: 1
         };
     }
@@ -233,16 +237,22 @@ export class NonceService {
         encrypted: EncryptedNoncePayload,
         encryptionKey: CryptoKey
     ): Promise<GeneratedNonce> {
-        let ciphertext: Uint8Array;
-        let iv: Uint8Array;
-        
+        let encryptedBlob: Uint8Array;
+
         try {
-            ciphertext = base64ToUint8Array(encrypted.ciphertext);
-            iv = base64ToUint8Array(encrypted.iv);
+            encryptedBlob = base64ToUint8Array(encrypted.encryptedBlob);
         } catch {
-            throw new DecryptionError('corrupted', 'Invalid base64 encoding in encrypted payload');
+            throw new DecryptionError('corrupted', 'Invalid base64 encoding in encrypted blob');
         }
-        
+
+        if (encryptedBlob.length < IV_LENGTH) {
+            throw new DecryptionError('corrupted', 'Encrypted blob too short');
+        }
+
+        // Split IV and ciphertext
+        const iv = encryptedBlob.slice(0, IV_LENGTH);
+        const ciphertext = encryptedBlob.slice(IV_LENGTH);
+
         let decrypted: ArrayBuffer;
         try {
             decrypted = await crypto.subtle.decrypt(
@@ -257,18 +267,18 @@ export class NonceService {
             }
             throw new DecryptionError('unknown', `Decryption failed: ${e}`);
         }
-        
+
         let payload: { nonce: string; index: number; walletPubkeyHash: string };
         try {
             payload = JSON.parse(new TextDecoder().decode(decrypted));
         } catch {
             throw new DecryptionError('corrupted', 'Decrypted data is not valid JSON');
         }
-        
+
         if (typeof payload.nonce !== 'string' || typeof payload.index !== 'number' || typeof payload.walletPubkeyHash !== 'string') {
             throw new DecryptionError('corrupted', 'Invalid payload structure');
         }
-        
+
         return {
             nonce: base64ToUint8Array(payload.nonce),
             index: payload.index,
@@ -295,12 +305,11 @@ export class NonceService {
         for (const blob of blobs) {
             try {
                 const encrypted: EncryptedNoncePayload = {
-                    ciphertext: blob.encryptedData,
-                    iv: blob.iv,
+                    encryptedBlob: blob.encryptedBlob,
                     version: 1
                 };
                 const decrypted = await this.decryptNonce(encrypted, encKey);
-                
+
                 // Successfully decrypted = this is our blob!
                 return {
                     found: true,
@@ -327,8 +336,7 @@ export class NonceService {
 
         const encrypted = await this.encryptNonce(nonce, encKey);
         return {
-            encryptedData: encrypted.ciphertext,
-            iv: encrypted.iv
+            encryptedBlob: encrypted.encryptedBlob
         };
     }
 

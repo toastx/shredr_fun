@@ -38,12 +38,11 @@ class MockBackendAPI {
         return Array.from(this.blobs.values());
     }
 
-    async createBlob(data: { encryptedData: string; iv: string }): Promise<NonceBlob> {
+    async createBlob(data: { encryptedBlob: string }): Promise<NonceBlob> {
         const id = `blob-${++this.idCounter}`;
         const blob: NonceBlob = {
             id,
-            encryptedData: data.encryptedData,
-            iv: data.iv,
+            encryptedBlob: data.encryptedBlob,
             createdAt: Date.now()
         };
         this.blobs.set(id, blob);

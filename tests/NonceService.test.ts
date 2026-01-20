@@ -298,16 +298,14 @@ describe('NonceService', () => {
             log.data('Original index', nonce.index);
             
             const encrypted = await nonceService.encryptNonce(nonce, encryptionKey);
-            log.data('Ciphertext length', encrypted.ciphertext.length);
-            log.data('IV length', encrypted.iv.length);
+            log.data('Encrypted blob length', encrypted.encryptedBlob.length);
             log.data('Version', encrypted.version);
-            
+
             const decrypted = await nonceService.decryptNonce(encrypted, encryptionKey);
             log.hex('Decrypted nonce', decrypted.nonce);
             log.data('Decrypted index', decrypted.index);
-            
-            expect(encrypted.ciphertext).to.be.a('string');
-            expect(encrypted.iv).to.be.a('string');
+
+            expect(encrypted.encryptedBlob).to.be.a('string');
             expect(encrypted.version).to.equal(1);
             expect(decrypted.index).to.equal(nonce.index);
             expect(Buffer.from(decrypted.nonce).toString('hex'))
@@ -349,8 +347,8 @@ describe('NonceService', () => {
             const nonce = await nonceService.generateBaseNonce(mockWalletPubkey);
             const encrypted = await nonceService.encryptNonce(nonce, encryptionKey);
             
-            log.info('Corrupting ciphertext...');
-            encrypted.ciphertext = 'corrupted_base64_that_is_invalid!!!';
+            log.info('Corrupting encrypted blob...');
+            encrypted.encryptedBlob = 'corrupted_base64_that_is_invalid!!!';
             
             try {
                 await nonceService.decryptNonce(encrypted, encryptionKey);
@@ -524,7 +522,7 @@ describe('NonceService', () => {
             const nonce = await nonceService.generateBaseNonce(mockWalletPubkey);
             const encrypted = await nonceService.encryptNonce(nonce, encryptionKey);
             
-            encrypted.iv = 'invalid_base64_iv!!!';
+            encrypted.encryptedBlob = 'invalid_base64_blob!!!';
             
             try {
                 await nonceService.decryptNonce(encrypted, encryptionKey);
@@ -552,9 +550,13 @@ describe('NonceService', () => {
                 getArrayBuffer(new TextEncoder().encode(invalidPayload))
             );
             
+            // Prepend IV to ciphertext for the blob
+            const encryptedBlob = new Uint8Array(iv.length + ciphertext.byteLength);
+            encryptedBlob.set(iv, 0);
+            encryptedBlob.set(new Uint8Array(ciphertext), iv.length);
+
             const invalidEncrypted = {
-                ciphertext: Buffer.from(ciphertext).toString('base64'),
-                iv: Buffer.from(iv).toString('base64'),
+                encryptedBlob: Buffer.from(encryptedBlob).toString('base64'),
                 version: 1
             };
             
@@ -589,9 +591,13 @@ describe('NonceService', () => {
                 getArrayBuffer(new TextEncoder().encode(invalidPayload))
             );
             
+            // Prepend IV to ciphertext for the blob
+            const encryptedBlob = new Uint8Array(iv.length + ciphertext.byteLength);
+            encryptedBlob.set(iv, 0);
+            encryptedBlob.set(new Uint8Array(ciphertext), iv.length);
+
             const invalidEncrypted = {
-                ciphertext: Buffer.from(ciphertext).toString('base64'),
-                iv: Buffer.from(iv).toString('base64'),
+                encryptedBlob: Buffer.from(encryptedBlob).toString('base64'),
                 version: 1
             };
             
@@ -711,22 +717,19 @@ describe('NonceService', () => {
             const blobData = await nonceService.createBlobData(nonce);
             const userBlob = {
                 id: 'blob-123',
-                encryptedData: blobData.encryptedData,
-                iv: blobData.iv,
+                encryptedBlob: blobData.encryptedBlob,
                 createdAt: Date.now()
             };
             
             // Create some fake blobs from "other users"
             const fakeBlob1 = {
                 id: 'fake-1',
-                encryptedData: 'randomgarbage123',
-                iv: 'fakeiv123',
+                encryptedBlob: 'randomgarbage123',
                 createdAt: Date.now()
             };
             const fakeBlob2 = {
                 id: 'fake-2',
-                encryptedData: 'morerandombytes',
-                iv: 'anotherivvv',
+                encryptedBlob: 'morerandombytes',
                 createdAt: Date.now()
             };
             
@@ -748,8 +751,8 @@ describe('NonceService', () => {
             
             // Only fake blobs
             const fakeBlobs = [
-                { id: 'fake-1', encryptedData: 'garbage1', iv: 'iv1', createdAt: Date.now() },
-                { id: 'fake-2', encryptedData: 'garbage2', iv: 'iv2', createdAt: Date.now() }
+                { id: 'fake-1', encryptedBlob: 'garbage1', createdAt: Date.now() },
+                { id: 'fake-2', encryptedBlob: 'garbage2', createdAt: Date.now() }
             ];
             
             const result = await nonceService.tryDecryptBlobs(fakeBlobs);
@@ -784,12 +787,9 @@ describe('NonceService', () => {
             
             const blobData = await nonceService.createBlobData(nonce);
             
-            expect(blobData.encryptedData).to.be.a('string');
-            expect(blobData.iv).to.be.a('string');
-            expect(blobData.encryptedData.length).to.be.greaterThan(10);
-            expect(blobData.iv.length).to.be.greaterThan(5);
-            log.data('Encrypted data length', blobData.encryptedData.length);
-            log.data('IV length', blobData.iv.length);
+            expect(blobData.encryptedBlob).to.be.a('string');
+            expect(blobData.encryptedBlob.length).to.be.greaterThan(10);
+            log.data('Encrypted blob length', blobData.encryptedBlob.length);
             log.success('Created blob data successfully');
         });
 
@@ -802,10 +802,8 @@ describe('NonceService', () => {
             const blob1 = await nonceService.createBlobData(nonce);
             const blob2 = await nonceService.createBlobData(nonce);
             
-            // IVs should be different (random)
-            expect(blob1.iv).to.not.equal(blob2.iv);
-            // Ciphertext will also be different due to different IV
-            expect(blob1.encryptedData).to.not.equal(blob2.encryptedData);
+            // Encrypted blobs should be different due to random IV
+            expect(blob1.encryptedBlob).to.not.equal(blob2.encryptedBlob);
             log.success('Each call produces unique encrypted data');
         });
     });
@@ -894,8 +892,7 @@ describe('NonceService', () => {
             
             expect(result.consumedNonce.index).to.equal(0);
             expect(result.newNonce.index).to.equal(1);
-            expect(result.newBlobData).to.have.property('encryptedData');
-            expect(result.newBlobData).to.have.property('iv');
+            expect(result.newBlobData).to.have.property('encryptedBlob');
             
             log.data('Consumed index', result.consumedNonce.index);
             log.data('New index', result.newNonce.index);
@@ -960,8 +957,7 @@ describe('NonceService', () => {
             // Simulate: upload to backend, then try to decrypt
             const blob = {
                 id: 'test-blob',
-                encryptedData: result.newBlobData.encryptedData,
-                iv: result.newBlobData.iv,
+                encryptedBlob: result.newBlobData.encryptedBlob,
                 createdAt: Date.now()
             };
             

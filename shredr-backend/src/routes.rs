@@ -32,15 +32,15 @@ fn default_limit() -> i64 {
 }
 
 /// Create blob endpoint - matches frontend's createBlob(data: CreateBlobRequest): Promise<NonceBlob>
-/// 
+///
 /// POST /api/blobs
-/// Body: { "encryptedData": "base64...", "iv": "base64..." }
-/// Returns: NonceBlob { id, encryptedData, iv, createdAt }
+/// Body: { "encryptedBlob": "base64..." }
+/// Returns: NonceBlob { id, encryptedBlob, createdAt }
 pub async fn create_blob_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateBlobRequest>,
 ) -> impl IntoResponse {
-    match state.db.create_blob(&request.encrypted_data, &request.iv).await {
+    match state.db.create_blob(&request.encrypted_blob).await {
         Ok(blob) => (StatusCode::CREATED, Json(blob)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -51,7 +51,7 @@ pub async fn create_blob_handler(
 }
 
 /// Delete blob endpoint - matches frontend's deleteBlob(id: string): Promise<boolean>
-/// 
+///
 /// DELETE /api/blobs/:id
 /// Returns: { "success": true } or 404 if not found
 pub async fn delete_blob_handler(
@@ -61,11 +61,7 @@ pub async fn delete_blob_handler(
     match state.db.delete_blob(&id).await {
         Ok(deleted) => {
             if deleted {
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({ "success": true })),
-                )
-                    .into_response()
+                (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
             } else {
                 (
                     StatusCode::NOT_FOUND,
@@ -85,7 +81,7 @@ pub async fn delete_blob_handler(
 }
 
 /// Get blob endpoint - returns a single blob by ID
-/// 
+///
 /// GET /api/blobs/:id
 /// Returns: NonceBlob
 pub async fn get_blob_handler(
@@ -94,16 +90,12 @@ pub async fn get_blob_handler(
 ) -> impl IntoResponse {
     match state.db.get_blob(&id).await {
         Ok(blob) => (StatusCode::OK, Json(blob)).into_response(),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse { error: e }),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: e })).into_response(),
     }
 }
 
 /// List blobs endpoint - matches frontend's fetchAllBlobs(): Promise<NonceBlob[]>
-/// 
+///
 /// GET /api/blobs
 /// Returns: NonceBlob[]
 pub async fn list_blobs_handler(
