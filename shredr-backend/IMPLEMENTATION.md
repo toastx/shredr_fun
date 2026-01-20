@@ -3,16 +3,16 @@
 ## ✅ Completed Features
 
 ### 1. Database Handler (`src/db.rs`)
-- ✅ `DbHandler` struct with S3 client integration
-- ✅ `upload_blob()` - Uploads data to AWS S3
-- ✅ `delete_blob()` - Deletes data from AWS S3
+- ✅ `DbHandler` struct with PostgreSQL connection pool
+- ✅ `upload_blob()` - Stores blob data in PostgreSQL as BYTEA
+- ✅ `delete_blob()` - Deletes blob from database
 - ✅ Proper error handling with Result types
 
 ### 2. HTTP Server with Endpoints (`src/routes.rs`)
 - ✅ `POST /api/blob/upload` - Upload blob endpoint
   - Accepts multipart/form-data
   - Generates unique UUID-based keys
-  - Returns key and S3 URL
+  - Returns ID and key
 - ✅ `DELETE /api/blob/:key` - Delete blob endpoint
   - Path parameter for blob key
   - Proper error responses
@@ -46,7 +46,7 @@
 shredr-backend/
 ├── src/
 │   ├── main.rs          # App entry point, router setup
-│   ├── db.rs            # S3 database handler
+│   ├── db.rs            # PostgreSQL database handler
 │   ├── routes.rs        # HTTP endpoints (upload/delete)
 │   ├── websocket.rs     # WebSocket connection handling
 │   └── webhook.rs       # Helius webhook receiver
@@ -61,14 +61,14 @@ shredr-backend/
 
 ### Upload Flow
 ```
-Client → POST /api/blob/upload → DbHandler.upload_blob() → AWS S3
+Client → POST /api/blob/upload → DbHandler.upload_blob() → PostgreSQL (BYTEA)
                                                           ↓
 Client ← JSON Response (key, url) ←←←←←←←←←←←←←←←←←←←←←←←
 ```
 
 ### Delete Flow
 ```
-Client → DELETE /api/blob/:key → DbHandler.delete_blob() → AWS S3
+Client → DELETE /api/blob/:key → DbHandler.delete_blob() → PostgreSQL
                                                           ↓
 Client ← JSON Response (success) ←←←←←←←←←←←←←←←←←←←←←←←←
 ```
@@ -85,7 +85,7 @@ Helius → POST /webhook/helius → WebhookHandler
 ## 🔧 Technologies Used
 
 - **Axum** - Web framework with WebSocket support
-- **AWS SDK** - S3 integration for blob storage
+- **SQLx** - Async PostgreSQL driver with compile-time query checking
 - **Tokio** - Async runtime
 - **Serde** - Serialization/deserialization
 - **Tower-HTTP** - CORS and middleware
@@ -105,10 +105,8 @@ Helius → POST /webhook/helius → WebhookHandler
 ## 🔐 Environment Variables
 
 ```env
-AWS_ACCESS_KEY_ID=<your-key>
-AWS_SECRET_ACCESS_KEY=<your-secret>
-AWS_REGION=us-east-1
-S3_BUCKET_NAME=shredr-blobs
+DATABASE_URL=postgres://username:password@localhost:5432/shredr_db
+DATABASE_URL=postgres://username:password@localhost:5432/shredr_db
 RUST_LOG=shredr_backend=debug
 ```
 
@@ -117,7 +115,7 @@ RUST_LOG=shredr_backend=debug
 1. **Configure environment**
    ```bash
    cp .env.example .env
-   # Edit .env with your AWS credentials
+   # Edit .env with your database URL
    ```
 
 2. **Run the server**
@@ -157,7 +155,7 @@ RUST_LOG=shredr_backend=debug
 ### Scalability
 - ✅ Modular architecture for easy extension
 - ✅ Stateless HTTP endpoints
-- ✅ Cloud-native S3 storage
+- ✅ PostgreSQL database storage
 
 ### Developer Experience
 - ✅ Comprehensive documentation
