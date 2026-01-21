@@ -3,8 +3,8 @@ export { ShadowWireClient, TokenUtils } from './ShadowWireClient';
 export { BurnerService, burnerService } from './BurnerService';
 export { NonceService, nonceService } from './NonceService';
 export { StorageService } from './StorageService';
-
-// Legacy alias for backward compatibility
+export { ShredrClient, shredrClient } from './ShredrClient';
+export type { SigningMode, PendingTransaction, ShredrState } from './ShredrClient';
 export { BurnerService as EncryptionService, burnerService as encryptionService } from './BurnerService';
 
 // Types
