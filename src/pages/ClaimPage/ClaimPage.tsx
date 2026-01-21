@@ -1,7 +1,8 @@
 
 import { useState, useCallback, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
-import { SystemProgram, Transaction, PublicKey, LAMPORTS_PER_SOL, Keypair } from '@solana/web3.js';
+import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { shredrClient } from '../../lib';
 import './ClaimPage.css';
 
@@ -10,10 +11,13 @@ interface ClaimPageProps {
 }
 
 function ClaimPage({ onBack }: ClaimPageProps) {
+    const navigate = useNavigate();
     const { connected, publicKey, signMessage } = useWallet();
+    const { connection } = useConnection();
     
     // State
     const [totalBalance, setTotalBalance] = useState<number>(0);
+    const [isLoadingBalance, setIsLoadingBalance] = useState(false);
     const [isWithdrawing, setIsWithdrawing] = useState(false);
     const [withdrawError, setWithdrawError] = useState<string | null>(null);
     const [withdrawSuccess, setWithdrawSuccess] = useState<string | null>(null);
@@ -21,18 +25,34 @@ function ClaimPage({ onBack }: ClaimPageProps) {
     const [isUnlocking, setIsUnlocking] = useState<boolean>(false);
     const [isNewUser, setIsNewUser] = useState<boolean>(false);
 
-    // ============ EFFECTS ============
+    // ============ FETCH BALANCE ============
 
+    const fetchShadowireBalance = useCallback(async () => {
+        if (!shredrClient.initialized || !shredrClient.shadowireAddress) return;
+        
+        setIsLoadingBalance(true);
+        try {
+            // Get the RPC URL from the connection
+            const rpcUrl = connection.rpcEndpoint;
+            const balance = await shredrClient.getShadowireBalance(rpcUrl);
+            setTotalBalance(balance.availableLamports);
+        } catch (err) {
+            console.error('Failed to fetch balance:', err);
+            // Set to 0 if balance fetch fails (likely no account)
+            setTotalBalance(0);
+        } finally {
+            setIsLoadingBalance(false);
+        }
+    }, [connection.rpcEndpoint]);
+
+    // Fetch balance when initialized
     useEffect(() => {
-        // TODO: Fetch actual pool balance from ShadowWire
-        // For now, using placeholder
         if (connected && isInitialized && publicKey) {
-            // Simulate fetching balance
-            setTotalBalance(100_000_000); // Placeholder balance
+            fetchShadowireBalance();
         } else {
             setTotalBalance(0);
         }
-    }, [connected, isInitialized, publicKey]);
+    }, [connected, isInitialized, publicKey, fetchShadowireBalance]);
 
     // ============ ACTIONS ============
 
@@ -63,7 +83,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
     }, [publicKey, signMessage]);
 
     const handleWithdraw = useCallback(async () => {
-        if (!publicKey || !shredrClient.currentBurner) {
+        if (!publicKey || !shredrClient.shadowireBurner) {
             setWithdrawError('Wallet not initialized');
             return;
         }
@@ -78,11 +98,21 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             setWithdrawError(null);
             setWithdrawSuccess(null);
 
-            // TODO: Build Withdraw Transaction here
-            console.log("Withdraw initiated to", publicKey.toBase58());
+            // Get the RPC URL from the connection
+            const rpcUrl = connection.rpcEndpoint;
 
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            setWithdrawSuccess("Withdraw initiated");
+            // Withdraw via external transfer from Shadowire Address (burner[0]) to connected wallet
+            const result = await shredrClient.withdrawToWallet(
+                publicKey.toBase58(),
+                'all',  // Withdraw full balance
+                rpcUrl
+            );
+
+            console.log("Withdrawal successful:", result.signature);
+            setWithdrawSuccess(`Withdrawn ${result.amount.toFixed(4)} SOL! Tx: ${result.signature.slice(0, 8)}...`);
+            
+            // Refresh balance after successful withdrawal
+            await fetchShadowireBalance();
 
         } catch (err) {
             console.error('Withdrawal failed:', err);
@@ -90,7 +120,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
         } finally {
             setIsWithdrawing(false);
         }
-    }, [publicKey, totalBalance]);
+    }, [publicKey, totalBalance, connection.rpcEndpoint, fetchShadowireBalance]);
 
     // ============ HELPERS ============
 
@@ -110,11 +140,9 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                     <div className="claim-message">
                         Please connect wallet to continue
                     </div>
-                    {onBack && (
-                        <button className="back-btn" onClick={onBack}>
-                            ← back
-                        </button>
-                    )}
+                    <button className="back-btn" onClick={() => navigate('/')}>
+                        ← back
+                    </button>
                 </div>
             </div>
         );
@@ -131,11 +159,9 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                     <div className="claim-message">
                         You haven't generated a privacy address yet. Please go to the Generate page first to create your address, then come back here after receiving funds.
                     </div>
-                    {onBack && (
-                        <button className="back-btn" onClick={onBack}>
-                            ← go to generate
-                        </button>
-                    )}
+                    <button className="back-btn" onClick={() => navigate('/')}>
+                        ← go to generate
+                    </button>
                 </div>
             </div>
         );
@@ -155,21 +181,23 @@ function ClaimPage({ onBack }: ClaimPageProps) {
 
                 {/* Balance Display */}
                 <div className="balance-section">
-                    <span className="balance-label">available balance</span>
+                    <span className="balance-label">shadowire balance</span>
                     <span className="balance-amount">
-                        {isInitialized ? `${formatBalance(totalBalance)} SOL` : '---'}
+                        {isLoadingBalance ? 'loading...' :
+                         isInitialized ? `${formatBalance(totalBalance)} SOL` : '---'}
                     </span>
                 </div>
                 
-                {isInitialized && (
+                {/* Shadowire Address Display */}
+                {isInitialized && shredrClient.shadowireAddress && (
                     <div className="burner-address-display">
-                        <small>From: {shredrClient.currentBurnerAddress?.slice(0, 6)}...{shredrClient.currentBurnerAddress?.slice(-6)}</small>
+                        <small>From: {shredrClient.shadowireAddress.slice(0, 6)}...{shredrClient.shadowireAddress.slice(-6)}</small>
                     </div>
                 )}
                 
                 {/* Destination Display (Read Only) */}
                 <div className="destination-info">
-                   <div className="destination-label">Recieving Address</div>
+                   <div className="destination-label">Receiving Address</div>
                    <div className="destination-value">{publicKey?.toBase58()}</div>
                 </div>
 
@@ -187,10 +215,11 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                 <button 
                     className="withdraw-btn"
                     onClick={isInitialized ? handleWithdraw : handleUnlock}
-                    disabled={isWithdrawing || isUnlocking || (isInitialized && totalBalance <= 0)}
+                    disabled={isWithdrawing || isUnlocking || isLoadingBalance || (isInitialized && totalBalance <= 0)}
                 >
                     {isUnlocking ? 'verifying...' : 
                      !isInitialized ? 'scan for funds' :
+                     isLoadingBalance ? 'loading...' :
                      isWithdrawing ? 'withdrawing...' : 'withdraw all'}
                 </button>
 
@@ -198,7 +227,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                 <div className="claim-note">
                     {!isInitialized 
                         ? "Sign to recover your privacy keys and scan for funds." 
-                        : "Withdraw all funds to your connected wallet."}
+                        : "Withdraw all funds from your Shadowire Address to your connected wallet."}
                 </div>
             </div>
         </div>

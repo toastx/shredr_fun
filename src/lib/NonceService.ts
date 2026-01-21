@@ -199,6 +199,45 @@ export class NonceService {
     }
 
     /**
+     * Generate nonce at a specific index (for deriving any burner on-demand)
+     * Does NOT modify the current state - purely computational.
+     * 
+     * Use cases:
+     * - Index 0: Derive the "Shadowire Address" (receive-only burner)
+     * - Index N: Re-derive a historical burner for recovery
+     * 
+     * @param index - The index to derive (0 = base nonce, 1+ = chained)
+     * @param walletPublicKey - The wallet public key for hash derivation
+     */
+    async generateNonceAtIndex(index: number, walletPublicKey: Uint8Array): Promise<GeneratedNonce> {
+        if (!this._masterSeed) {
+            throw new Error('NonceService not initialized. Call initFromSignature first.');
+        }
+        
+        if (index < 0 || index > MAX_NONCE_INDEX) {
+            throw new Error(`Invalid nonce index: ${index}. Must be 0-${MAX_NONCE_INDEX}`);
+        }
+        
+        const walletHash = await deriveWalletHash(walletPublicKey, WALLET_HASH_LENGTH);
+        
+        // Start from base nonce (hash of master seed)
+        let nonceBuffer = await crypto.subtle.digest('SHA-256', getArrayBuffer(this._masterSeed));
+        let nonce = new Uint8Array(nonceBuffer);
+        
+        // Chain hash to reach target index
+        for (let i = 0; i < index; i++) {
+            nonceBuffer = await crypto.subtle.digest('SHA-256', getArrayBuffer(nonce));
+            nonce = new Uint8Array(nonceBuffer);
+        }
+        
+        return {
+            nonce,
+            index,
+            walletPubkeyHash: walletHash
+        };
+    }
+
+    /**
      * Encrypt nonce for backend storage
      */
     async encryptNonce(
