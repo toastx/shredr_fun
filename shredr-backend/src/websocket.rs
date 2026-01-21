@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 
+
 #[derive(Clone)]
 pub struct WebSocketState {
     pub clients_count: Arc<Mutex<usize>>,

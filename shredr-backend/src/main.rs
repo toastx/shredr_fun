@@ -15,6 +15,8 @@ use tokio::sync::{watch, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 
 use db::DbHandler;
+use helius::types::Cluster;
+use helius::Helius;
 use routes::AppState;
 use webhook::WebhookState;
 use websocket::{WebSocketMessage, WebSocketState};
@@ -22,13 +24,19 @@ use websocket::{WebSocketMessage, WebSocketState};
 #[shuttle_runtime::main]
 async fn main(#[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore) -> ShuttleAxum {
     // Note: Shuttle automatically sets up tracing, don't initialize it again
-    
+
     tracing::info!("Starting Shredr Backend...");
 
     // Get database URL from secrets or environment
     let database_url = secrets.get("DATABASE_URL").unwrap_or_else(|| {
         std::env::var("DATABASE_URL")
             .expect("DATABASE_URL must be set in Secrets.toml or environment")
+    });
+
+    // Get Helius API key
+    let helius_api_key = secrets.get("HELIUS_API_KEY").unwrap_or_else(|| {
+        std::env::var("HELIUS_API_KEY")
+            .expect("HELIUS_API_KEY must be set in Secrets.toml or environment")
     });
 
     // Create database connection pool
@@ -65,8 +73,13 @@ async fn main(#[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore)
         rx,
     });
 
+    // Initialize Helius client
+    let helius = Arc::new(
+        Helius::new(&helius_api_key, Cluster::MainnetBeta).expect("Failed to create Helius client"),
+    );
+
     // Create webhook state (shares the same tx channel)
-    let webhook_state = Arc::new(WebhookState { tx });
+    let webhook_state = Arc::new(WebhookState { tx, helius });
 
     // Configure CORS
     let cors = CorsLayer::new()
@@ -75,7 +88,7 @@ async fn main(#[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore)
         .allow_headers(Any);
 
     // Build router with API endpoints matching frontend expectations:
-    // 
+    //
     // Frontend API (from SKILL.md):
     //   fetchAllBlobs(): Promise<NonceBlob[]>  -> GET  /api/blobs
     //   createBlob(data): Promise<NonceBlob>   -> POST /api/blobs
@@ -91,8 +104,13 @@ async fn main(#[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore)
         // WebSocket endpoint
         .route("/ws", get(websocket::websocket_handler))
         .with_state(ws_state)
-        // Helius webhook endpoint
+        // Helius webhook endpoints
         .route("/webhook/helius", post(webhook::helius_webhook_handler))
+        .route("/webhook/create", post(webhook::create_webhook_handler))
+        .route(
+            "/webhook/address",
+            post(webhook::add_address_handler).delete(webhook::remove_address_handler),
+        )
         .with_state(webhook_state)
         // Health check
         .route("/health", get(health_check))

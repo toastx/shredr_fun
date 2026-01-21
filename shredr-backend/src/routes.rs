@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::db::{CreateBlobRequest, DbHandler, NonceBlob};
+use crate::db::{CreateBlobRequest, DbHandler};
 
 #[derive(Clone)]
 pub struct AppState {
