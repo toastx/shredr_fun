@@ -87,6 +87,23 @@ export class BurnerService {
     }
 
     /**
+     * Derive the "Shadowire Address" - burner[0] that acts as the stable receiving address.
+     * This burner is used for:
+     * - Receiving internal transfers (inflow)
+     * - Withdrawing to connected wallet via external transfer (outflow)
+     * 
+     * IMPORTANT: This is receive-only. Never use for sending to preserve privacy.
+     * 
+     * @param baseNonce - The nonce at index 0 (from NonceService.generateNonceAtIndex(0))
+     */
+    async deriveShadowireAddress(baseNonce: GeneratedNonce): Promise<BurnerKeyPair> {
+        if (baseNonce.index !== 0) {
+            console.warn('deriveShadowireAddress called with non-zero index. Expected index 0 for Shadowire Address.');
+        }
+        return this.deriveBurnerFromNonce(baseNonce);
+    }
+
+    /**
      * Clear burner secret key from memory when no longer needed
      */
     clearBurner(burner: BurnerKeyPair): void {

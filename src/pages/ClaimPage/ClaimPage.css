@@ -23,15 +23,16 @@
     margin-bottom: 2rem;
 }
 
+/* Centered header variant for empty states */
+.claim-header--centered {
+    justify-content: center;
+}
 /* Center header when it's the only content (empty states) */
 .claim-header:only-child,
 .claim-message+.back-btn~.claim-header {
     justify-content: center;
 }
 
-.claim-card>.claim-header+.claim-message {
-    /* When message follows header directly (empty states), center the header */
-}
 .claim-title {
     font-size: 1.5rem;
     font-weight: 700;
