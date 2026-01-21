@@ -1,4 +1,6 @@
+import { Routes, Route } from 'react-router-dom';
 import { Navbar, Footer, GeneratorCard } from './components';
+import { ClaimPage } from './pages';
 import './App.css';
 
 function App() {
@@ -8,9 +10,20 @@ function App() {
             <Navbar brandName="shredr.fun" />
 
             {/* Main Content */}
-            <main className="main-content">
-                <GeneratorCard />
-            </main>
+            <Routes>
+                <Route 
+                    path="/" 
+                    element={
+                        <main className="main-content">
+                            <GeneratorCard />
+                        </main>
+                    } 
+                />
+                <Route 
+                    path="/claim" 
+                    element={<ClaimPage />} 
+                />
+            </Routes>
 
             {/* Footer */}
             <Footer author="toastx" />
