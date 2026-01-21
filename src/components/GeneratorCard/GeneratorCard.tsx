@@ -70,7 +70,8 @@ function GeneratorCard() {
             setError(null);
 
             // 1. Sign the SHREDR message
-            const messageBytes = new TextEncoder().encode(MASTER_MESSAGE);
+            const message = `${MASTER_MESSAGE}:${publicKey.toBase58()}`;
+            const messageBytes = new TextEncoder().encode(message);
             const signature = await signMessage(messageBytes);
 
             setCardState('initializing');

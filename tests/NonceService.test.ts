@@ -971,7 +971,7 @@ describe('NonceService', () => {
 
     after(() => {
         console.log('\n' + '='.repeat(50));
-        console.log('🎉 All NonceService tests completed!');
+        console.log('🎉 All tests completed!');
         console.log('='.repeat(50) + '\n');
     });
 });
