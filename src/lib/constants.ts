@@ -41,6 +41,10 @@ export const DOMAIN_STORAGE_KEY = 'SHREDR_STORAGE_KEY';       // IndexedDB encry
 /** Domain separation for burner master seed derivation */
 export const DOMAIN_BURNER_MASTER = 'SHREDR_BURNER_MASTER';   // Master seed for burner derivation
 
+/** API Base URL */
+export const API_BASE_URL = 'http://localhost:8000';
+
+
 /** Number of consecutive empty addresses before stopping recovery scan */
 export const CONSECUTIVE_EMPTY_THRESHOLD = 10;
 

@@ -9,6 +9,7 @@
  */
 import { nonceService } from './NonceService';
 import { burnerService } from './BurnerService';
+import { apiClient } from './ApiClient';
 import type { GeneratedNonce, BurnerKeyPair, CreateBlobRequest } from './types';
 // ============ TYPES ============
 export type SigningMode = 'auto' | 'manual';
@@ -67,8 +68,8 @@ export class ShredrClient {
     async initFromSignature(
         signature: Uint8Array,
         walletPubkey: Uint8Array,
-        fetchBlobsFn?: () => Promise<Array<{ id: string; encryptedBlob: string; createdAt: number }>>,
-        createBlobFn?: (data: CreateBlobRequest) => Promise<{ id: string }>
+        fetchBlobsFn: () => Promise<Array<{ id: string; encryptedBlob: string; createdAt: number }>> = () => apiClient.fetchAllBlobs(),
+        createBlobFn: (data: CreateBlobRequest) => Promise<{ id: string }> = (data) => apiClient.createBlob(data)
     ): Promise<void> {
         // 1. Initialize both services
         await nonceService.initFromSignature(signature);
@@ -128,8 +129,8 @@ export class ShredrClient {
      * Call this after a burner has been used (funds swept)
      */
     async consumeAndGenerateNew(
-        createBlobFn?: (data: CreateBlobRequest) => Promise<{ id: string }>,
-        deleteBlobFn?: (id: string) => Promise<void>
+        createBlobFn: (data: CreateBlobRequest) => Promise<{ id: string }> = (data) => apiClient.createBlob(data),
+        deleteBlobFn: (id: string) => Promise<boolean> = (id) => apiClient.deleteBlob(id)
     ): Promise<BurnerKeyPair> {
         if (!this._initialized || !this._currentNonce) {
             throw new Error('ShredrClient not initialized');
