@@ -12,6 +12,7 @@
     padding: 2rem;
     max-width: 480px;
     width: 100%;
+    border: 1px solid #1a1a1a;
 }
 
 /* ========== HEADER ========== */
@@ -22,6 +23,15 @@
     margin-bottom: 2rem;
 }
 
+/* Center header when it's the only content (empty states) */
+.claim-header:only-child,
+.claim-message+.back-btn~.claim-header {
+    justify-content: center;
+}
+
+.claim-card>.claim-header+.claim-message {
+    /* When message follows header directly (empty states), center the header */
+}
 .claim-title {
     font-size: 1.5rem;
     font-weight: 700;
@@ -109,6 +119,36 @@
     opacity: 0.5;
 }
 
+/* ========== BURNER ADDRESS DISPLAY ========== */
+.burner-address-display {
+    text-align: center;
+    margin-bottom: 1.5rem;
+}
+
+.burner-address-display small {
+    color: #666666;
+    font-size: 0.75rem;
+    font-family: 'Space Mono', monospace;
+}
+
+/* ========== DESTINATION INFO (Read Only) ========== */
+.destination-info {
+    margin-bottom: 1.5rem;
+    padding: 1rem;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid #333333;
+}
+
+.destination-info .destination-label {
+    margin-bottom: 0.5rem;
+}
+
+.destination-value {
+    color: #e0e0e0;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.8rem;
+    word-break: break-all;
+}
 /* ========== WITHDRAW BUTTON ========== */
 .withdraw-btn {
     width: 100%;

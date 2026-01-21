@@ -33,6 +33,7 @@ export class ShredrClient {
     private _currentBurner: BurnerKeyPair | null = null;
     private _signingMode: SigningMode = 'auto';
     private _currentBlobId: string | null = null;
+    private _isNewUser = false;
     // ============ GETTERS ============
     get initialized(): boolean {
         return this._initialized;
@@ -46,6 +47,9 @@ export class ShredrClient {
     get signingMode(): SigningMode {
         return this._signingMode;
     }
+    get isNewUser(): boolean {
+        return this._isNewUser;
+    }
     get state(): ShredrState {
         return {
             initialized: this._initialized,
@@ -55,6 +59,42 @@ export class ShredrClient {
             currentBlobId: this._currentBlobId,
         };
     }
+    // ============ USER STATUS CHECK ============
+    /**
+     * Check if user is new without initializing the full client
+     * Returns true if no existing nonce found in local or remote storage
+     */
+    async checkIfNewUser(
+        signature: Uint8Array,
+        walletPubkey: Uint8Array,
+        fetchBlobsFn: () => Promise<Array<{ id: string; encryptedBlob: string; createdAt: number }>> = () => apiClient.fetchAllBlobs()
+    ): Promise<boolean> {
+        // Initialize nonce service to enable storage access
+        await nonceService.initFromSignature(signature);
+
+        // Try local storage first
+        let nonce = await nonceService.loadCurrentNonce(walletPubkey);
+        if (nonce) {
+            return false;
+        }
+
+        // Try remote backend if fetch function provided
+        if (fetchBlobsFn) {
+            try {
+                const blobs = await fetchBlobsFn();
+                const result = await nonceService.tryDecryptBlobs(blobs);
+                if (result.found && result.nonce) {
+                    return false;
+                }
+            } catch (err) {
+                console.warn('Failed to fetch blobs from backend:', err);
+            }
+        }
+
+        // No nonce found - new user
+        return true;
+    }
+
     // ============ INITIALIZATION ============
     /**
      * Initialize ShredrClient with wallet signature
@@ -99,6 +139,7 @@ export class ShredrClient {
         if (!nonce) {
             // 4. New user - generate base nonce
             nonce = await nonceService.generateBaseNonce(walletPubkey);
+            this._isNewUser = true;
             
             // Upload to backend if function provided
             if (createBlobFn) {
@@ -110,6 +151,8 @@ export class ShredrClient {
                     console.warn('Failed to upload blob to backend:', err);
                 }
             }
+        } else {
+            this._isNewUser = false;
         }
         this._currentNonce = nonce;
         // 5. Derive burner from nonce
