@@ -6,7 +6,7 @@
 
 ### **Shred Your Money Trail - Privacy-First Burner Wallets on Solana**
 
-**shredr.fun** is a privacy utility that generates disposable, unlinkable burner addresses to receive funds on Solana. Using deterministic key derivation and encrypted state management, it ensures your main wallet is never linked to incoming transactions.
+**shredr.fun** is a privacy utility that generates disposable, unlinkable burner addresses to receive funds on Solana. Using deterministic key derivation and private transfers by shadowwire, it ensures your main wallet is never linked to incoming transactions.
 
 ---
 
@@ -28,7 +28,7 @@
 | **NonceService** | Manages nonce generation, chaining, and encrypted storage |
 | **BurnerService** | Derives burner keypairs from nonces |
 | **StorageService** | Encrypted IndexedDB wrapper for local state |
-| **ShadowWireClient** | Integration with ShadowWire privacy pool |
+| **ShadowWireClient** | Integration with ShadowWire privacy protocol |
 
 ### Flow
 
@@ -180,14 +180,14 @@ burnerService.clearBurner(burner);
 - [x] NonceService tests (41 passing)
 - [x] BurnerService tests (25+ passing)
 - [x] Integration flow tests (complete 5-phase flow)
-- [ ] StorageService tests
+- [x] StorageService tests
 
 ### Backend
 - [x] Project setup (Rust/Axum)
 - [x] Blob API endpoints (CRUD)
-- [ ] WebSocket for real-time notifications
+- [x] WebSocket for real-time notifications
 - [ ] Helius webhook integration
-- [ ] Database (PostgreSQL)
+- [x] Database (PostgreSQL)
 
 ### Frontend
 - [x] Vite + React setup
