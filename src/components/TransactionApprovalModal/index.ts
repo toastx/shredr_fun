@@ -1,0 +1,1 @@
+export { TransactionApprovalModal } from './TransactionApprovalModal';

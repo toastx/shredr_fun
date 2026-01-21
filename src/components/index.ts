@@ -5,4 +5,6 @@ export { default as GeneratorCard } from './GeneratorCard';
 export { default as AddressDisplay } from './AddressDisplay';
 export { default as SeedDisplay } from './SeedDisplay';
 export { default as HashDisplay } from './HashDisplay';
+export { TransactionMonitor } from './TransactionMonitor';
+export { TransactionApprovalModal } from './TransactionApprovalModal';
 export { WalletButton } from './WalletButton';

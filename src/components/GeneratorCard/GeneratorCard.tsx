@@ -1,117 +1,209 @@
-import { useState, useCallback } from 'react';
-import { Keypair } from '@solana/web3.js';
-import * as bip39 from 'bip39';
+import { useState, useCallback, useEffect } from 'react';
+import { useWallet } from '@solana/wallet-adapter-react';
+import { useWalletModal } from '@solana/wallet-adapter-react-ui';
+import { shredrClient } from '../../lib';
+import { MASTER_MESSAGE } from '../../lib/constants';
 import AddressDisplay from '../AddressDisplay';
-import HashDisplay from '../HashDisplay';
+import { TransactionMonitor } from '../TransactionMonitor';
 import './GeneratorCard.css';
 
-// Types
-interface GeneratedData {
-    publicKey: string;
-    nullifierSeed: string;
-    digestCode: string;
-    seedHash: string;
-}
+// ============ STATE TYPES ============
 
-// TODO: Implement proper Solana public key generation
-// Generate a Solana public key only - private key is NEVER stored or exposed
-function generateSolanaPublicKey(): string {
-    return "fixed-public-key";
-}
+type CardState = 
+    | 'disconnected'    // Wallet not connected
+    | 'connected'       // Wallet connected, not signed
+    | 'signing'         // Signing in progress
+    | 'initializing'    // Services initializing
+    | 'ready'           // Burner ready to use
+    | 'monitoring'      // Monitoring for transactions
+    | 'error';          // Error state
 
-// TODO: Implement proper nullifier seed generation
-// Generate a 12-word mnemonic as nullifier seed
-function generateNullifierSeed(): string {
-    return "fixed nullifier seed";
-}
-
-// TODO: Implement proper digest code creation
-// Create a digest code from the mnemonic
-function createDigestCode(seed: string): string {
-    return "fixed-digest-code";
-}
-
-
-
-// TODO: Implement proper data generation
-// Generate all data at once
-function generateAllData(): GeneratedData {
-    const publicKey = generateSolanaPublicKey();
-    const nullifierSeed = generateNullifierSeed();
-    const digestCode = createDigestCode(nullifierSeed);
-    const seedHash = 'placeholder-hash-' + nullifierSeed.split(' ').slice(0, 3).join('-');
-    
-    return { publicKey, nullifierSeed, digestCode, seedHash };
-}
+// ============ COMPONENT ============
 
 function GeneratorCard() {
-    const [data, setData] = useState<GeneratedData | null>(null);
-    const [showHash, setShowHash] = useState(false);
-    const [copied, setCopied] = useState<string | null>(null);
+    const { publicKey, signMessage, connected } = useWallet();
+    const { setVisible } = useWalletModal();
+    
+    // State
+    const [cardState, setCardState] = useState<CardState>('disconnected');
+    const [burnerAddress, setBurnerAddress] = useState<string | null>(null);
+    const [copied, setCopied] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [isMonitoring, setIsMonitoring] = useState(false);
 
-    const handleGenerate = useCallback(() => {
-        setData(generateAllData());
-        setShowHash(false);
-        setCopied(null);
-    }, []);
+    // ============ EFFECTS ============
 
-    const copyToClipboard = useCallback(async (text: string, type: string) => {
+    // Handle wallet connection changes
+    useEffect(() => {
+        if (!connected) {
+            setCardState('disconnected');
+            setBurnerAddress(null);
+            setCopied(false);
+            setIsMonitoring(false);
+            setError(null);
+            shredrClient.destroy();
+        } else if (connected && cardState === 'disconnected') {
+            setCardState('connected');
+        }
+    }, [connected, cardState]);
+
+    // ============ ACTIONS ============
+
+    /**
+     * Open wallet modal
+     */
+    const handleConnect = useCallback(() => {
+        setVisible(true);
+    }, [setVisible]);
+
+    /**
+     * Sign SHREDR message and initialize services
+     */
+    const handleSign = useCallback(async () => {
+        if (!publicKey || !signMessage) {
+            setError('Wallet not connected or signMessage not available');
+            return;
+        }
+
         try {
-            await navigator.clipboard.writeText(text);
-            setCopied(type);
-            setTimeout(() => setCopied(null), 2000);
+            setCardState('signing');
+            setError(null);
+
+            // 1. Sign the SHREDR message
+            const messageBytes = new TextEncoder().encode(MASTER_MESSAGE);
+            const signature = await signMessage(messageBytes);
+
+            setCardState('initializing');
+
+            // 2. Initialize ShredrClient
+            const walletPubkeyBytes = publicKey.toBytes();
+            await shredrClient.initFromSignature(
+                signature,
+                walletPubkeyBytes
+                // TODO: Pass fetchBlobsFn and createBlobFn for backend sync
+            );
+
+            // 3. Get burner address
+            const address = shredrClient.currentBurnerAddress;
+            if (address) {
+                setBurnerAddress(address);
+                setCardState('ready');
+            } else {
+                throw new Error('Failed to derive burner address');
+            }
+
+        } catch (err) {
+            console.error('Failed to initialize:', err);
+            if (err instanceof Error && err.message.includes('User rejected')) {
+                // User cancelled signing
+                setCardState('connected');
+            } else {
+                setError(err instanceof Error ? err.message : 'Failed to initialize');
+                setCardState('error');
+            }
+        }
+    }, [publicKey, signMessage]);
+
+    /**
+     * Copy burner address and start monitoring
+     */
+    const handleCopy = useCallback(async () => {
+        if (!burnerAddress) return;
+
+        try {
+            await navigator.clipboard.writeText(burnerAddress);
+            setCopied(true);
+            setIsMonitoring(true);
+            setCardState('monitoring');
+
+            // Reset copied state after 2 seconds
+            setTimeout(() => setCopied(false), 2000);
         } catch (err) {
             console.error('Failed to copy:', err);
         }
+    }, [burnerAddress]);
+
+    /**
+     * Retry after error
+     */
+    const handleRetry = useCallback(() => {
+        setError(null);
+        setCardState('connected');
     }, []);
+
+    // ============ RENDER HELPERS ============
+
+    const renderContent = () => {
+        switch (cardState) {
+            case 'disconnected':
+                return (
+                    <button className="generate-btn" onClick={handleConnect}>
+                        connect wallet
+                    </button>
+                );
+
+            case 'connected':
+                return (
+                    <button className="generate-btn" onClick={handleSign}>
+                        sign to unlock
+                    </button>
+                );
+
+            case 'signing':
+                return (
+                    <button className="generate-btn" disabled>
+                        <span className="loading-dots">signing</span>
+                    </button>
+                );
+
+            case 'initializing':
+                return (
+                    <button className="generate-btn" disabled>
+                        <span className="loading-dots">initializing</span>
+                    </button>
+                );
+
+            case 'ready':
+            case 'monitoring':
+                return (
+                    <div className="results-section">
+                        <AddressDisplay
+                            label="burner address"
+                            value={burnerAddress || ''}
+                            placeholder=""
+                            isCopied={copied}
+                            hasValue={!!burnerAddress}
+                            onCopy={handleCopy}
+                        />
+
+                        {isMonitoring && (
+                            <TransactionMonitor 
+                                burnerAddress={burnerAddress || ''} 
+                            />
+                        )}
+                    </div>
+                );
+
+            case 'error':
+                return (
+                    <div className="error-section">
+                        <div className="error-message">{error}</div>
+                        <button className="generate-btn secondary" onClick={handleRetry}>
+                            retry
+                        </button>
+                    </div>
+                );
+
+            default:
+                return null;
+        }
+    };
+
+    // ============ RENDER ============
 
     return (
         <div className="generator-card">
-            <button className="generate-btn" onClick={handleGenerate}>
-                {data ? 'regenerate' : 'generate address'}
-            </button>
-
-            {data && (
-                <div className="results-section">
-                    <AddressDisplay
-                        label="proxy address"
-                        value={data.publicKey}
-                        placeholder=""
-                        isCopied={copied === 'address'}
-                        hasValue={true}
-                        onCopy={() => copyToClipboard(data.publicKey, 'address')}
-                    />
-
-                    <AddressDisplay
-                        label="nullifier code"
-                        value={data.digestCode}
-                        placeholder=""
-                        isCopied={copied === 'digest'}
-                        hasValue={true}
-                        onCopy={() => copyToClipboard(data.nullifierSeed, 'digest')}
-                    />
-
-                    <div className="secret-section">
-                        <label className="secret-toggle">
-                            <input
-                                type="checkbox"
-                                checked={showHash}
-                                onChange={(e) => setShowHash(e.target.checked)}
-                            />
-                            <span className="toggle-switch"></span>
-                            <span className="toggle-label">show commitment hash</span>
-                        </label>
-                    </div>
-
-                    {showHash && (
-                        <HashDisplay
-                            hash={data.seedHash}
-                            isCopied={copied === 'hash'}
-                            onCopy={() => copyToClipboard(data.seedHash, 'hash')}
-                        />
-                    )}
-                </div>
-            )}
+            {renderContent()}
         </div>
     );
 }
