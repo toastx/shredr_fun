@@ -133,7 +133,18 @@ export class NonceService {
     }
 
     /**
-     * Generate the base nonce (index 0) - only for new users
+     * Generate the base nonce (index 0) and set it as current state.
+     * 
+     * WARNING: This function has SIDE EFFECTS:
+     * - Sets _walletHash, _currentNonce, _currentIndex
+     * - Saves to IndexedDB storage
+     * 
+     * Use this for NEW USERS who don't have existing state.
+     * For side-effect-free derivation of nonce[0] (e.g., Shadowire address),
+     * use generateNonceAtIndex(0) instead.
+     * 
+     * CONSISTENCY: generateNonceAtIndex(0) produces the same nonce value.
+     * Both compute: SHA256(masterSeed)
      */
     async generateBaseNonce(walletPublicKey: Uint8Array): Promise<GeneratedNonce> {
         if (!this._masterSeed) {
@@ -200,11 +211,22 @@ export class NonceService {
 
     /**
      * Generate nonce at a specific index (for deriving any burner on-demand)
-     * Does NOT modify the current state - purely computational.
+     * 
+     * SIDE-EFFECT FREE: Does NOT modify current state or save to storage.
+     * This is purely computational.
      * 
      * Use cases:
-     * - Index 0: Derive the "Shadowire Address" (receive-only burner)
-     * - Index N: Re-derive a historical burner for recovery
+     * - Index 0: Derive the "Shadowire Address" without affecting state
+     * - Index N: Re-derive a historical burner for recovery scanning
+     * 
+     * CONSISTENCY with generateBaseNonce():
+     * - generateNonceAtIndex(0) produces: SHA256(masterSeed)
+     * - generateBaseNonce() produces: SHA256(masterSeed)
+     * Both are IDENTICAL for index 0. The difference is side effects.
+     * 
+     * Hash chain derivation:
+     * - nonce[0] = SHA256(masterSeed)
+     * - nonce[N] = SHA256(nonce[N-1]) for N > 0
      * 
      * @param index - The index to derive (0 = base nonce, 1+ = chained)
      * @param walletPublicKey - The wallet public key for hash derivation

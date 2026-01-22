@@ -83,8 +83,13 @@ function ClaimPage({ onBack }: ClaimPageProps) {
     }, [publicKey, signMessage]);
 
     const handleWithdraw = useCallback(async () => {
-        if (!publicKey || !shredrClient.shadowireBurner) {
-            setWithdrawError('Wallet not initialized');
+        if (!publicKey) {
+            setWithdrawError('Wallet not connected');
+            return;
+        }
+        
+        if (!isInitialized || !shredrClient.shadowireBurner) {
+            setWithdrawError('Shadowire address not initialized');
             return;
         }
 
@@ -120,7 +125,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
         } finally {
             setIsWithdrawing(false);
         }
-    }, [publicKey, totalBalance, connection.rpcEndpoint, fetchShadowireBalance]);
+    }, [publicKey, isInitialized, connection.rpcEndpoint, fetchShadowireBalance]);
 
     // ============ HELPERS ============
 
