@@ -1,13 +1,8 @@
 mod db;
-mod db_routes;
 mod webhook;
-mod webhook_routes;
 mod websocket;
-mod websocket_routes;
 
-use std::sync::Arc;
-use std::time::Duration;
-
+use std::{sync::Arc, time::Duration};
 use axum::{routing::get, Router};
 use helius::{types::Cluster, Helius};
 use shuttle_axum::ShuttleAxum;
@@ -16,10 +11,9 @@ use tokio::sync::{watch, Mutex};
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
-use db::DbHandler;
-use db_routes::AppState;
-use webhook::WebhookState;
-use websocket::{WebSocketMessage, WebSocketState};
+use db::{db_routes, AppState, DbHandler};
+use webhook::{webhook_routes, WebhookState};
+use websocket::{websocket_routes, WebSocketMessage, WebSocketState};
 
 #[shuttle_runtime::main]
 async fn main(#[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore) -> ShuttleAxum {

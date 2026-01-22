@@ -1,7 +1,7 @@
 use axum::{routing::get, Router};
 use std::sync::Arc;
 
-use crate::websocket::{websocket_handler, WebSocketState};
+use super::websocket::{websocket_handler, WebSocketState};
 
 /// Build WebSocket router
 pub fn router(state: Arc<WebSocketState>) -> Router {
