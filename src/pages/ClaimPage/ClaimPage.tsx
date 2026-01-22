@@ -1,7 +1,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useWallet, useConnection } from '@solana/wallet-adapter-react';
+import { useWallet } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { shredrClient } from '../../lib';
 import './ClaimPage.css';
@@ -13,7 +13,6 @@ interface ClaimPageProps {
 function ClaimPage({ onBack }: ClaimPageProps) {
     const navigate = useNavigate();
     const { connected, publicKey, signMessage } = useWallet();
-    const { connection } = useConnection();
     
     // State
     const [totalBalance, setTotalBalance] = useState<number>(0);
@@ -32,9 +31,8 @@ function ClaimPage({ onBack }: ClaimPageProps) {
         
         setIsLoadingBalance(true);
         try {
-            // Get the RPC URL from the connection
-            const rpcUrl = connection.rpcEndpoint;
-            const balance = await shredrClient.getShadowireBalance(rpcUrl);
+            // Uses VITE_RPC_URL from env by default
+            const balance = await shredrClient.getShadowireBalance();
             setTotalBalance(balance.availableLamports);
         } catch (err) {
             console.error('Failed to fetch balance:', err);
@@ -43,7 +41,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
         } finally {
             setIsLoadingBalance(false);
         }
-    }, [connection.rpcEndpoint]);
+    }, []);
 
     // Fetch balance when initialized
     useEffect(() => {
@@ -103,14 +101,11 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             setWithdrawError(null);
             setWithdrawSuccess(null);
 
-            // Get the RPC URL from the connection
-            const rpcUrl = connection.rpcEndpoint;
-
             // Withdraw via external transfer from Shadowire Address (burner[0]) to connected wallet
+            // Uses VITE_RPC_URL from env by default
             const result = await shredrClient.withdrawToWallet(
                 publicKey.toBase58(),
-                'all',  // Withdraw full balance
-                rpcUrl
+                'all'  // Withdraw full balance
             );
 
             console.log("Withdrawal successful:", result.signature);
@@ -125,7 +120,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
         } finally {
             setIsWithdrawing(false);
         }
-    }, [publicKey, isInitialized, connection.rpcEndpoint, fetchShadowireBalance]);
+    }, [publicKey, isInitialized, fetchShadowireBalance]);
 
     // ============ HELPERS ============
 

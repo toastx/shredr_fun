@@ -290,7 +290,7 @@ export class ShredrClient {
      * Get the balance at the Shadowire Address (burner[0])
      * This is the user's "private" balance available for withdrawal.
      * 
-     * @param rpcUrl - Solana RPC URL (defaults to mainnet)
+     * @param rpcUrl - Solana RPC URL (defaults to VITE_RPC_URL env var or mainnet)
      */
     async getShadowireBalance(rpcUrl?: string): Promise<{
         available: number;         // SOL amount (human readable)
@@ -312,7 +312,7 @@ export class ShredrClient {
      * 
      * @param destinationAddress - The wallet address to send funds to
      * @param amountInSol - Amount to withdraw in SOL (use 'all' to withdraw everything)
-     * @param rpcUrl - Solana RPC URL (defaults to mainnet)
+     * @param rpcUrl - Solana RPC URL (defaults to VITE_RPC_URL env var or mainnet)
      */
     async withdrawToWallet(
         destinationAddress: string,

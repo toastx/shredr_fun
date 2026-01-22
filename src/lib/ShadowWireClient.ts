@@ -1,6 +1,7 @@
 import { ShadowWireClient as ShadowWireSDK, TokenUtils } from '@radr/shadowwire';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import nacl from 'tweetnacl';
+import { RPC_URL } from './constants';
 
 /**
  * ShadowWire wrapper class for Shredr
@@ -11,9 +12,9 @@ export class ShadowWireClient {
     private connection: Connection;
     private keypair: Keypair | null = null;
 
-    constructor(rpcUrl: string = '') {
+    constructor(rpcUrl?: string) {
         this.sdk = new ShadowWireSDK({ debug: true });
-        this.connection = new Connection(rpcUrl || 'https://api.mainnet-beta.solana.com');
+        this.connection = new Connection(rpcUrl || RPC_URL);
     }
 
     /**

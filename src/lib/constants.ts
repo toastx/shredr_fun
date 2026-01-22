@@ -59,3 +59,11 @@ export const SALT_LENGTH = 16;
 
 /** PBKDF2 iteration count */
 export const PBKDF2_ITERATIONS = 100000;
+
+// ============ RPC CONSTANTS ============
+
+/** 
+ * Solana RPC URL - loaded from VITE_RPC_URL environment variable 
+ * Fallback to mainnet if not set
+ */
+export const RPC_URL = import.meta.env.VITE_RPC_URL || 'https://api.mainnet-beta.solana.com';
