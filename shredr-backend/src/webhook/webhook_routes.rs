@@ -1,7 +1,7 @@
 use axum::{routing::post, Router};
 use std::sync::Arc;
 
-use crate::webhook::{
+use super::webhook::{
     add_address_handler, create_webhook_handler, helius_webhook_handler, remove_address_handler,
     WebhookState,
 };
