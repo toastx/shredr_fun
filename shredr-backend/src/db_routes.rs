@@ -2,7 +2,8 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
+    routing::{delete, get, post},
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -28,32 +29,19 @@ pub struct ListQuery {
 }
 
 fn default_limit() -> i64 {
-    100 // Higher default for blob listing (frontend needs to try decrypt each)
+    10000
 }
 
-/// Create blob endpoint - matches frontend's createBlob(data: CreateBlobRequest): Promise<NonceBlob>
-///
-/// POST /api/blobs
-/// Body: { "encryptedBlob": "base64..." }
-/// Returns: NonceBlob { id, encryptedBlob, createdAt }
 pub async fn create_blob_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateBlobRequest>,
 ) -> impl IntoResponse {
     match state.db.create_blob(&request.encrypted_blob).await {
         Ok(blob) => (StatusCode::CREATED, Json(blob)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })).into_response(),
     }
 }
 
-/// Delete blob endpoint - matches frontend's deleteBlob(id: string): Promise<boolean>
-///
-/// DELETE /api/blobs/:id
-/// Returns: { "success": true } or 404 if not found
 pub async fn delete_blob_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -66,7 +54,7 @@ pub async fn delete_blob_handler(
                 (
                     StatusCode::NOT_FOUND,
                     Json(ErrorResponse {
-                        error: "Blob not found".to_string(),
+                        error: "Blob not found".into(),
                     }),
                 )
                     .into_response()
@@ -80,10 +68,6 @@ pub async fn delete_blob_handler(
     }
 }
 
-/// Get blob endpoint - returns a single blob by ID
-///
-/// GET /api/blobs/:id
-/// Returns: NonceBlob
 pub async fn get_blob_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -94,10 +78,6 @@ pub async fn get_blob_handler(
     }
 }
 
-/// List blobs endpoint - matches frontend's fetchAllBlobs(): Promise<NonceBlob[]>
-///
-/// GET /api/blobs
-/// Returns: NonceBlob[]
 pub async fn list_blobs_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<ListQuery>,
@@ -110,4 +90,20 @@ pub async fn list_blobs_handler(
         )
             .into_response(),
     }
+}
+
+/// Build blob creation router (POST /api/blobs)
+pub fn create_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/api/blobs", post(create_blob_handler))
+        .with_state(state)
+}
+
+/// Build blob read router (GET/DELETE /api/blobs)
+pub fn read_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/api/blobs", get(list_blobs_handler))
+        .route("/api/blobs/{id}", get(get_blob_handler))
+        .route("/api/blobs/{id}", delete(delete_blob_handler))
+        .with_state(state)
 }
