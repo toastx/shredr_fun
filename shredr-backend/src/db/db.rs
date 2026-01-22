@@ -2,6 +2,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 /// Maximum blob size in bytes (2KB - actual blobs are ~200 bytes)
+/// encoded bytes limit
 pub const MAX_BLOB_SIZE: usize = 2048;
 
 #[derive(Clone)]
