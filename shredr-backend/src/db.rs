@@ -1,6 +1,9 @@
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+/// Maximum blob size in bytes (2KB - actual blobs are ~200 bytes)
+pub const MAX_BLOB_SIZE: usize = 2048;
+
 #[derive(Clone)]
 pub struct DbHandler {
     pool: PgPool,
@@ -43,6 +46,15 @@ impl DbHandler {
     /// Create a new nonce blob
     /// Returns the created blob with its ID
     pub async fn create_blob(&self, encrypted_blob: &str) -> Result<NonceBlob, String> {
+        // Size check to prevent spam
+        if encrypted_blob.len() > MAX_BLOB_SIZE {
+            return Err(format!(
+                "Blob too large: {} bytes (max {} bytes)",
+                encrypted_blob.len(),
+                MAX_BLOB_SIZE
+            ));
+        }
+
         let id = Uuid::new_v4();
         let created_at = chrono::Utc::now().timestamp_millis();
 
