@@ -138,6 +138,11 @@ export class ShredrClient {
         this._walletPubkey = walletPubkey;
         
         // 2. Derive the Shadowire Address (burner[0]) - always same for this wallet
+        // IMPORTANT: Use generateNonceAtIndex(0) here, NOT generateBaseNonce().
+        // Both produce identical nonces for index 0: SHA256(masterSeed)
+        // But generateNonceAtIndex() is SIDE-EFFECT FREE - it doesn't modify
+        // the current state or save to storage. This is critical because we
+        // need to check for existing state in step 3/4 before setting up new user state.
         const baseNonce = await nonceService.generateNonceAtIndex(0, walletPubkey);
         this._shadowireBurner = await burnerService.deriveShadowireAddress(baseNonce);
         
