@@ -16,15 +16,16 @@ use webhook::{webhook_routes, WebhookState};
 use websocket::{websocket_routes, WebSocketMessage, WebSocketState};
 
 #[shuttle_runtime::main]
-async fn main(#[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore) -> ShuttleAxum {
+async fn main(
+    #[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore,
+    #[shuttle_shared_db::Postgres] pool: PgPool,
+) -> ShuttleAxum {
     tracing::info!("Starting Shredr Backend...");
 
     // Config
-    let database_url = secrets.get("DATABASE_URL").expect("DATABASE_URL required");
     let helius_api_key = secrets.get("HELIUS_API_KEY").expect("HELIUS_API_KEY required");
 
-    // Database
-    let pool = PgPool::connect(&database_url).await.expect("DB connection failed");
+    // Database (Shuttle-provisioned PostgreSQL)
     let db_handler = DbHandler::new(pool);
     db_handler.init_schema().await.expect("Schema init failed");
     tracing::info!("Database ready");
