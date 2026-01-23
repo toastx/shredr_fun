@@ -133,39 +133,49 @@ export class NonceService {
     }
 
     /**
-     * Generate the base nonce (index 0) and set it as current state.
-     * 
-     * WARNING: This function has SIDE EFFECTS:
-     * - Sets _walletHash, _currentNonce, _currentIndex
-     * - Saves to IndexedDB storage
-     * 
-     * Use this for NEW USERS who don't have existing state.
-     * For side-effect-free derivation of nonce[0] (e.g., Shadowire address),
-     * use generateNonceAtIndex(0) instead.
-     * 
-     * CONSISTENCY: generateNonceAtIndex(0) produces the same nonce value.
-     * Both compute: SHA256(masterSeed)
+     * Internal method to derive the base nonce (index 0) from master seed.
+     * SIDE-EFFECT FREE.
      */
-    async generateBaseNonce(walletPublicKey: Uint8Array): Promise<GeneratedNonce> {
+    private async _deriveBaseNonce(walletPublicKey: Uint8Array): Promise<GeneratedNonce> {
         if (!this._masterSeed) {
             throw new Error('NonceService not initialized. Call initFromSignature first.');
         }
+
+        const walletHash = await deriveWalletHash(walletPublicKey, WALLET_HASH_LENGTH);
         
-        this._walletHash = await deriveWalletHash(walletPublicKey, WALLET_HASH_LENGTH);
-        this._currentIndex = 0;
-        
-        // Base nonce is just the master seed hashed
+        // Base nonce is SHA256(masterSeed)
         const nonceBuffer = await crypto.subtle.digest('SHA-256', getArrayBuffer(this._masterSeed));
-        this._currentNonce = new Uint8Array(nonceBuffer);
+        
+        return {
+            nonce: new Uint8Array(nonceBuffer),
+            index: 0,
+            walletPubkeyHash: walletHash
+        };
+    }
+
+    /**
+     * Generate the base nonce (index 0) and set it as current state.
+     * 
+     * SIDE EFFECTS:
+     * - Sets _walletHash, _currentNonce, _currentIndex
+     * - Saves to IndexedDB storage
+     * 
+     * Use this for NEW USERS to start the chain, or for RETURNING USERS
+     * to derive the Shadowire address (index 0) before restoring their state.
+     * 
+     * CONSISTENCY: generateNonceAtIndex(0) produces the same nonce value.
+     */
+    async generateBaseNonce(walletPublicKey: Uint8Array): Promise<GeneratedNonce> {
+        const baseNonce = await this._deriveBaseNonce(walletPublicKey);
+        
+        this._walletHash = baseNonce.walletPubkeyHash;
+        this._currentNonce = baseNonce.nonce;
+        this._currentIndex = 0;
         
         // Persist to storage
         await this.storage.saveCurrentNonce(this._walletHash, this._currentNonce, this._currentIndex);
         
-        return {
-            nonce: this._currentNonce,
-            index: this._currentIndex,
-            walletPubkeyHash: this._walletHash
-        };
+        return baseNonce;
     }
 
     /**
@@ -240,28 +250,11 @@ export class NonceService {
             throw new Error(`Invalid nonce index: ${index}. Must be 0-${MAX_NONCE_INDEX}`);
         }
         
-        const walletHash = await deriveWalletHash(walletPublicKey, WALLET_HASH_LENGTH);
-        
-        // Start from base nonce (hash of master seed)
-        let nonceBuffer = await crypto.subtle.digest('SHA-256', getArrayBuffer(this._masterSeed));
-        let nonce = new Uint8Array(nonceBuffer);
+        const baseNonce = await this._deriveBaseNonce(walletPublicKey);
+        let nonce = baseNonce.nonce;
+        let nonceBuffer: ArrayBuffer;
         
         // Chain hash to reach target index
-        for (let i = 0; i < index; i++) {
-            nonceBuffer = await crypto.subtle.digest('SHA-256', getArrayBuffer(nonce));
-            nonce = new Uint8Array(nonceBuffer);
-        }
-        
-        return {
-            nonce,
-            index,
-            walletPubkeyHash: walletHash
-        };
-    }
-
-    /**
-     * Encrypt nonce for backend storage
-     */
     async encryptNonce(
         nonce: GeneratedNonce,
         encryptionKey: CryptoKey
