@@ -2,6 +2,7 @@ mod db;
 mod webhook;
 mod websocket;
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use axum::{http::Request, routing::get, Router};
@@ -11,39 +12,56 @@ use sqlx::PgPool;
 use tokio::sync::{watch, Mutex};
 use tower_governor::{
     governor::GovernorConfigBuilder,
-    key_extractor::KeyExtractor,
+    key_extractor::{KeyExtractor, PeerIpKeyExtractor},
     GovernorError, GovernorLayer,
 };
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use db::{db_routes, AppState, DbHandler};
 use webhook::{webhook_routes, WebhookState};
 use websocket::{websocket_routes, WebSocketMessage, WebSocketState};
 
-/// Custom key extractor that reads client IP from X-Forwarded-For header
+/// Custom key extractor that reads client IP from forwarding headers,
+/// falling back to the default PeerIpKeyExtractor when none are present.
 #[derive(Clone, Debug)]
-pub struct ForwardedIpKeyExtractor;
+pub struct ForwardedIpKeyExtractor {
+    fallback: PeerIpKeyExtractor,
+}
+
+impl Default for ForwardedIpKeyExtractor {
+    fn default() -> Self {
+        Self {
+            fallback: PeerIpKeyExtractor,
+        }
+    }
+}
 
 impl KeyExtractor for ForwardedIpKeyExtractor {
-    type Key = String;
+    type Key = IpAddr;
 
     fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, GovernorError> {
-        let ip = req.headers()
+        // Try X-Forwarded-For / X-Real-IP first
+        let forwarded_ip = req.headers()
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.split(',').next())
-            .map(|s| s.trim().to_string())
+            .map(|s| s.trim())
+            .and_then(|s| s.parse::<IpAddr>().ok())
             .or_else(|| {
                 req.headers()
                     .get("x-real-ip")
                     .and_then(|v| v.to_str().ok())
-                    .map(|s| s.trim().to_string())
-            })
-            .unwrap_or_else(|| "unknown".to_string());
-        
-        Ok(ip)
-    }
+                    .map(|s| s.trim())
+                    .and_then(|s| s.parse::<IpAddr>().ok())
+            });
 
+        if let Some(ip) = forwarded_ip {
+            return Ok(ip);
+        }
+
+        // Fallback to the default peer IP extractor (e.g., socket address)
+        self.fallback.extract(req)
+    }
 }
 
 
@@ -56,6 +74,7 @@ async fn main(
 
     // Config
     let helius_api_key = secrets.get("HELIUS_API_KEY").expect("HELIUS_API_KEY required");
+    let is_development = secrets.get("ENVIRONMENT").map(|e| e == "development").unwrap_or(true);
 
     // Database (Shuttle-provisioned PostgreSQL)
     let db_handler = DbHandler::new(pool);
@@ -77,7 +96,7 @@ async fn main(
         GovernorConfigBuilder::default()
             .per_second(30)
             .burst_size(60)
-            .key_extractor(ForwardedIpKeyExtractor)
+            .key_extractor(ForwardedIpKeyExtractor::default())
             .finish()
             .unwrap(),
     );
@@ -85,7 +104,7 @@ async fn main(
         GovernorConfigBuilder::default()
             .period(Duration::from_secs(10))
             .burst_size(5)
-            .key_extractor(ForwardedIpKeyExtractor)
+            .key_extractor(ForwardedIpKeyExtractor::default())
             .finish()
             .unwrap(),
     );
@@ -93,16 +112,28 @@ async fn main(
         GovernorConfigBuilder::default()
             .period(Duration::from_secs(12))
             .burst_size(5)
-            .key_extractor(ForwardedIpKeyExtractor)
+            .key_extractor(ForwardedIpKeyExtractor::default())
             .finish()
             .unwrap(),
     );
 
-    // CORS - permissive for development
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // CORS - permissive for development, restricted for production
+    let cors = if is_development {
+        tracing::info!("CORS: Development mode - allowing any origin");
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else {
+        tracing::info!("CORS: Production mode - restricting origins");
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list([
+                "https://shredr.fun".parse().unwrap(),
+                "https://www.shredr.fun".parse().unwrap(),
+            ]))
+            .allow_methods(Any)
+            .allow_headers(Any)
+    };
 
     // Build router
     let router = Router::new()
