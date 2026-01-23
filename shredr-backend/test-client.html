@@ -3,196 +3,454 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Shredr WebSocket Test Client</title>
+        <title>Shredr Test Client</title>
         <style>
-            body {
-                font-family: Arial, sans-serif;
-                max-width: 800px;
-                margin: 50px auto;
-                padding: 20px;
-                background-color: #f5f5f5;
+            * {
+                box-sizing: border-box;
             }
-            .container {
-                background: white;
+            body {
+                font-family: 'Segoe UI', Arial, sans-serif;
+                max-width: 1000px;
+                margin: 30px auto;
+                padding: 20px;
+                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                min-height: 100vh;
+                color: #e0e0e0;
+            }
+            .container { 
+                background: rgba(30, 30, 50, 0.95);
                 padding: 30px;
-                border-radius: 10px;
-                box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+                border-radius: 16px;
+                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+                border: 1px solid rgba(255, 255, 255, 0.1);
             }
             h1 {
-                color: #333;
+                color: #fff;
+                margin-bottom: 10px;
+            }
+            h2 {
+                color: #a0a0ff;
+                margin-top: 30px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+                padding-bottom: 10px;
+            }
+            .section {
+                background: rgba(40, 40, 70, 0.5);
+                padding: 20px;
+                border-radius: 12px;
+                margin: 15px 0;
             }
             .status {
-                padding: 10px;
+                padding: 12px 20px;
                 margin: 10px 0;
-                border-radius: 5px;
+                border-radius: 8px;
                 font-weight: bold;
+                display: inline-block;
             }
             .connected {
-                background-color: #d4edda;
-                color: #155724;
+                background-color: rgba(40, 167, 69, 0.2);
+                color: #5cff5c;
+                border: 1px solid #28a745;
             }
             .disconnected {
-                background-color: #f8d7da;
-                color: #721c24;
+                background-color: rgba(220, 53, 69, 0.2);
+                color: #ff6b6b;
+                border: 1px solid #dc3545;
             }
-            .messages {
-                margin-top: 20px;
-                max-height: 400px;
+            .messages, .blobs-list {
+                margin-top: 15px;
+                max-height: 300px;
                 overflow-y: auto;
-                border: 1px solid #ddd;
-                padding: 10px;
-                background-color: #f9f9f9;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 15px;
+                background: rgba(20, 20, 40, 0.5);
+                border-radius: 8px;
             }
-            .message {
-                padding: 10px;
-                margin: 5px 0;
+            .message, .blob-item {
+                padding: 12px;
+                margin: 8px 0;
                 border-left: 3px solid #007bff;
-                background-color: white;
+                background: rgba(50, 50, 80, 0.5);
+                border-radius: 0 8px 8px 0;
             }
-            .message.transaction {
-                border-left-color: #28a745;
-            }
-            .message.status {
-                border-left-color: #ffc107;
-            }
+            .message.transaction { border-left-color: #28a745; }
+            .message.status { border-left-color: #ffc107; }
+            .blob-item { border-left-color: #17a2b8; }
             .timestamp {
                 font-size: 0.8em;
-                color: #666;
+                color: #888;
             }
             button {
                 padding: 10px 20px;
                 margin: 5px;
                 border: none;
-                border-radius: 5px;
+                border-radius: 8px;
                 cursor: pointer;
                 font-size: 14px;
+                font-weight: 500;
+                transition: all 0.2s ease;
             }
-            .connect-btn {
-                background-color: #28a745;
-                color: white;
+            button:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
             }
-            .disconnect-btn {
-                background-color: #dc3545;
-                color: white;
-            }
-            .clear-btn {
-                background-color: #6c757d;
-                color: white;
-            }
-            input[type="text"] {
+            .connect-btn { background: linear-gradient(135deg, #28a745, #20c997); color: white; }
+            .disconnect-btn { background: linear-gradient(135deg, #dc3545, #c82333); color: white; }
+            .clear-btn { background: linear-gradient(135deg, #6c757d, #5a6268); color: white; }
+            .primary-btn { background: linear-gradient(135deg, #007bff, #0056b3); color: white; }
+            .danger-btn { background: linear-gradient(135deg, #dc3545, #c82333); color: white; }
+            .info-btn { background: linear-gradient(135deg, #17a2b8, #138496); color: white; }
+            input[type="text"], textarea {
                 width: 100%;
+                padding: 12px;
+                margin: 8px 0;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 8px;
+                background: rgba(30, 30, 50, 0.8);
+                color: #e0e0e0;
+                font-size: 14px;
+            }
+            input[type="text"]:focus, textarea:focus {
+                outline: none;
+                border-color: #007bff;
+                box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.2);
+            }
+            label {
+                display: block;
+                margin-top: 10px;
+                color: #aaa;
+                font-size: 0.9em;
+            }
+            pre {
+                background: rgba(0, 0, 0, 0.3);
                 padding: 10px;
-                margin: 10px 0;
-                border: 1px solid #ddd;
-                border-radius: 5px;
+                border-radius: 6px;
+                overflow-x: auto;
+                font-size: 0.85em;
+            }
+            .blob-id {
+                font-family: monospace;
+                color: #17a2b8;
+                font-size: 0.85em;
+            }
+            .blob-actions {
+                margin-top: 10px;
+            }
+            .blob-actions button {
+                padding: 6px 12px;
+                font-size: 12px;
+            }
+            .tabs {
+                display: flex;
+                gap: 10px;
+                margin-bottom: 20px;
+            }
+            .tab {
+                padding: 12px 24px;
+                background: rgba(50, 50, 80, 0.5);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 8px 8px 0 0;
+                cursor: pointer;
+                color: #aaa;
+                transition: all 0.2s;
+            }
+            .tab.active {
+                background: rgba(70, 70, 120, 0.8);
+                color: #fff;
+                border-bottom-color: transparent;
+            }
+            .tab-content {
+                display: none;
+            }
+            .tab-content.active {
+                display: block;
+            }
+            hr {
+                border: none;
+                border-top: 1px solid rgba(255, 255, 255, 0.1);
+                margin: 20px 0;
             }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🔌 Shredr WebSocket Test Client</h1>
+            <h1>🔧 Shredr Test Client</h1>
+            <p style="color: #888;">Test WebSocket connections and Blob API endpoints</p>
 
-            <div>
-                <label for="wsUrl">WebSocket URL:</label>
-                <input
-                    type="text"
-                    id="wsUrl"
-                    value="ws://localhost:8000/ws"
-                    placeholder="ws://localhost:8000/ws"
-                />
+            <div class="tabs">
+                <div class="tab active" onclick="switchTab('blobs')">📦 Blobs API</div>
+                <div class="tab" onclick="switchTab('websocket')">🔌 WebSocket</div>
+                <div class="tab" onclick="switchTab('webhook')">🪝 Webhook</div>
             </div>
 
-            <div>
-                <button class="connect-btn" onclick="connect()">Connect</button>
-                <button class="disconnect-btn" onclick="disconnect()">
-                    Disconnect
-                </button>
-                <button class="clear-btn" onclick="clearMessages()">
-                    Clear Messages
-                </button>
+            <!-- BLOBS TAB -->
+            <div id="blobs-tab" class="tab-content active">
+                <div class="section">
+                    <h2>📦 Blob Management</h2>
+                    
+                    <div>
+                        <label for="apiUrl">API Base URL:</label>
+                        <input type="text" id="apiUrl" value="http://localhost:8000" placeholder="http://localhost:8000" />
+                    </div>
+
+                    <hr />
+
+                    <h3 style="color: #5cff5c;">Create Blob</h3>
+                    <label for="blobContent">Encrypted Blob Content:</label>
+                    <textarea id="blobContent" rows="3" placeholder="Enter encrypted blob data (e.g., base64 encoded)"></textarea>
+                    <button class="primary-btn" onclick="createBlob()">➕ Create Blob</button>
+
+                    <hr />
+
+                    <h3 style="color: #17a2b8;">Fetch Blobs</h3>
+                    <div style="display: flex; gap: 10px; align-items: end;">
+                        <div style="flex: 1;">
+                            <label for="fetchLimit">Limit:</label>
+                            <input type="text" id="fetchLimit" value="10" placeholder="10" />
+                        </div>
+                        <div style="flex: 1;">
+                            <label for="fetchOffset">Offset:</label>
+                            <input type="text" id="fetchOffset" value="0" placeholder="0" />
+                        </div>
+                        <button class="info-btn" onclick="listBlobs()">📋 List Blobs</button>
+                    </div>
+                    
+                    <label for="getBlobId">Get Blob by ID:</label>
+                    <div style="display: flex; gap: 10px;">
+                        <input type="text" id="getBlobId" placeholder="Enter blob UUID" style="flex: 1;" />
+                        <button class="info-btn" onclick="getBlob()">🔍 Get</button>
+                    </div>
+
+                    <hr />
+
+                    <h3 style="color: #ff6b6b;">Delete Blob</h3>
+                    <label for="deleteBlobId">Blob ID to Delete:</label>
+                    <div style="display: flex; gap: 10px;">
+                        <input type="text" id="deleteBlobId" placeholder="Enter blob UUID" style="flex: 1;" />
+                        <button class="danger-btn" onclick="deleteBlob()">🗑️ Delete</button>
+                    </div>
+
+                    <hr />
+
+                    <h3>Results</h3>
+                    <div id="blobResults" class="blobs-list">
+                        <p style="color: #666;">Results will appear here...</p>
+                    </div>
+                </div>
             </div>
 
-            <div id="status" class="status disconnected">Disconnected</div>
+            <!-- WEBSOCKET TAB -->
+            <div id="websocket-tab" class="tab-content">
+                <div class="section">
+                    <h2>🔌 WebSocket Connection</h2>
+                    
+                    <label for="wsUrl">WebSocket URL:</label>
+                    <input type="text" id="wsUrl" value="ws://localhost:8000/ws" placeholder="ws://localhost:8000/ws" />
 
-            <hr style="margin: 20px 0; border: 1px solid #ddd" />
+                    <div>
+                        <button class="connect-btn" onclick="connect()">Connect</button>
+                        <button class="disconnect-btn" onclick="disconnect()">Disconnect</button>
+                        <button class="clear-btn" onclick="clearMessages()">Clear</button>
+                    </div>
 
-            <h2>Webhook Address Management</h2>
-            <div>
-                <label for="webhookId">Webhook ID:</label>
-                <input
-                    type="text"
-                    id="webhookId"
-                    placeholder="Enter Webhook ID"
-                />
-            </div>
-            <div>
-                <label for="addresses">Addresses (comma separated):</label>
-                <input
-                    type="text"
-                    id="addresses"
-                    placeholder="Enter wallet addresses"
-                />
-            </div>
-            <div>
-                <button
-                    onclick="addAddress()"
-                    style="background-color: #17a2b8; color: white"
-                >
-                    Add Addresses
-                </button>
-                <button
-                    onclick="removeAddress()"
-                    style="background-color: #dc3545; color: white"
-                >
-                    Remove Addresses
-                </button>
+                    <div id="status" class="status disconnected">Disconnected</div>
+
+                    <h3>Messages</h3>
+                    <div id="messages" class="messages">
+                        <p style="color: #666;">No messages yet. Connect to start receiving messages.</p>
+                    </div>
+                </div>
             </div>
 
-            <h2>Messages</h2>
-            <div id="messages" class="messages">
-                <p style="color: #999">
-                    No messages yet. Connect to start receiving messages.
-                </p>
+            <!-- WEBHOOK TAB -->
+            <div id="webhook-tab" class="tab-content">
+                <div class="section">
+                    <h2>🪝 Webhook Address Management</h2>
+                    
+                    <label for="webhookId">Webhook ID:</label>
+                    <input type="text" id="webhookId" placeholder="Enter Webhook ID" />
+                    
+                    <label for="addresses">Addresses (comma separated):</label>
+                    <input type="text" id="addresses" placeholder="Enter wallet addresses" />
+                    
+                    <div>
+                        <button class="primary-btn" onclick="addAddress()">➕ Add Addresses</button>
+                        <button class="danger-btn" onclick="removeAddress()">➖ Remove Addresses</button>
+                    </div>
+                </div>
             </div>
         </div>
 
         <script>
             let ws = null;
             let messageCount = 0;
-            const API_URL = "http://localhost:8000";
 
-            async function addAddress() {
-                const webhookId = document
-                    .getElementById("webhookId")
-                    .value.trim();
-                const addressesStr = document
-                    .getElementById("addresses")
-                    .value.trim();
+            function getApiUrl() {
+                return document.getElementById('apiUrl').value.trim();
+            }
 
-                if (!webhookId || !addressesStr) {
-                    alert("Please enter both Webhook ID and Addresses");
+            function switchTab(tabName) {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                
+                document.querySelector(`.tab:nth-child(${tabName === 'blobs' ? 1 : tabName === 'websocket' ? 2 : 3})`).classList.add('active');
+                document.getElementById(`${tabName}-tab`).classList.add('active');
+            }
+
+            // ========== BLOB API FUNCTIONS ==========
+            
+            async function createBlob() {
+                const content = document.getElementById('blobContent').value.trim();
+                if (!content) {
+                    showBlobResult('❌ Please enter blob content', 'error');
                     return;
                 }
 
-                const addresses = addressesStr
-                    .split(",")
-                    .map((a) => a.trim())
-                    .filter((a) => a);
+                try {
+                    const response = await fetch(`${getApiUrl()}/api/blobs`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ encryptedBlob: content })
+                    });
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        showBlobResult(`✅ Blob Created!\n${JSON.stringify(data, null, 2)}`, 'success');
+                        document.getElementById('blobContent').value = '';
+                    } else {
+                        showBlobResult(`❌ Error: ${data.error || JSON.stringify(data)}`, 'error');
+                    }
+                } catch (error) {
+                    showBlobResult(`❌ Network Error: ${error.message}`, 'error');
+                }
+            }
+
+            async function listBlobs() {
+                const limit = document.getElementById('fetchLimit').value || 10;
+                const offset = document.getElementById('fetchOffset').value || 0;
 
                 try {
-                    const response = await fetch(`${API_URL}/webhook/address`, {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                        },
-                        body: JSON.stringify({
-                            webhook_id: webhookId,
-                            addresses: addresses,
-                        }),
-                    });
-
+                    const response = await fetch(`${getApiUrl()}/api/blobs?limit=${limit}&offset=${offset}`);
                     const data = await response.json();
+                    
+                    if (response.ok) {
+                        if (Array.isArray(data) && data.length > 0) {
+                            let html = `<p style="color: #5cff5c;">Found ${data.length} blob(s):</p>`;
+                            data.forEach(blob => {
+                                html += formatBlobItem(blob);
+                            });
+                            document.getElementById('blobResults').innerHTML = html;
+                        } else {
+                            showBlobResult('📭 No blobs found', 'info');
+                        }
+                    } else {
+                        showBlobResult(`❌ Error: ${data.error || JSON.stringify(data)}`, 'error');
+                    }
+                } catch (error) {
+                    showBlobResult(`❌ Network Error: ${error.message}`, 'error');
+                }
+            }
 
+            async function getBlob() {
+                const id = document.getElementById('getBlobId').value.trim();
+                if (!id) {
+                    showBlobResult('❌ Please enter a blob ID', 'error');
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`${getApiUrl()}/api/blobs/${id}`);
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        document.getElementById('blobResults').innerHTML = formatBlobItem(data);
+                    } else {
+                        showBlobResult(`❌ Error: ${data.error || 'Blob not found'}`, 'error');
+                    }
+                } catch (error) {
+                    showBlobResult(`❌ Network Error: ${error.message}`, 'error');
+                }
+            }
+
+            async function deleteBlob() {
+                const id = document.getElementById('deleteBlobId').value.trim();
+                if (!id) {
+                    showBlobResult('❌ Please enter a blob ID', 'error');
+                    return;
+                }
+
+                if (!confirm(`Are you sure you want to delete blob ${id}?`)) return;
+
+                try {
+                    const response = await fetch(`${getApiUrl()}/api/blobs/${id}`, {
+                        method: 'DELETE'
+                    });
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        showBlobResult(`✅ Blob deleted successfully!`, 'success');
+                        document.getElementById('deleteBlobId').value = '';
+                    } else {
+                        showBlobResult(`❌ Error: ${data.error || 'Failed to delete'}`, 'error');
+                    }
+                } catch (error) {
+                    showBlobResult(`❌ Network Error: ${error.message}`, 'error');
+                }
+            }
+
+            function formatBlobItem(blob) {
+                const createdAt = new Date(blob.createdAt).toLocaleString();
+                return `
+                    <div class="blob-item">
+                        <div><strong>ID:</strong> <span class="blob-id">${blob.id}</span></div>
+                        <div class="timestamp">Created: ${createdAt}</div>
+                        <div style="margin-top: 8px;"><strong>Content:</strong></div>
+                        <pre style="max-height: 100px; overflow: auto;">${blob.encryptedBlob}</pre>
+                        <div class="blob-actions">
+                            <button class="danger-btn" onclick="deleteBlobById('${blob.id}')">🗑️ Delete</button>
+                            <button class="info-btn" onclick="copyToClipboard('${blob.id}')">📋 Copy ID</button>
+                        </div>
+                    </div>
+                `;
+            }
+
+            function deleteBlobById(id) {
+                document.getElementById('deleteBlobId').value = id;
+                deleteBlob();
+            }
+
+            function copyToClipboard(text) {
+                navigator.clipboard.writeText(text).then(() => {
+                    alert('Copied to clipboard!');
+                });
+            }
+
+            function showBlobResult(message, type) {
+                const colors = { success: '#5cff5c', error: '#ff6b6b', info: '#17a2b8' };
+                document.getElementById('blobResults').innerHTML = `<p style="color: ${colors[type] || '#e0e0e0'};">${message}</p>`;
+            }
+
+            // ========== WEBHOOK FUNCTIONS ==========
+
+            async function addAddress() {
+                const webhookId = document.getElementById('webhookId').value.trim();
+                const addressesStr = document.getElementById('addresses').value.trim();
+
+                if (!webhookId || !addressesStr) {
+                    alert('Please enter both Webhook ID and Addresses');
+                    return;
+                }
+
+                const addresses = addressesStr.split(',').map(a => a.trim()).filter(a => a);
+
+                try {
+                    const response = await fetch(`${getApiUrl()}/webhook/address`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ webhook_id: webhookId, addresses: addresses })
+                    });
+                    const data = await response.json();
+                    
                     if (response.ok) {
                         addLog(`✅ Success: ${data.message}`);
                     } else {
@@ -204,37 +462,24 @@
             }
 
             async function removeAddress() {
-                const webhookId = document
-                    .getElementById("webhookId")
-                    .value.trim();
-                const addressesStr = document
-                    .getElementById("addresses")
-                    .value.trim();
+                const webhookId = document.getElementById('webhookId').value.trim();
+                const addressesStr = document.getElementById('addresses').value.trim();
 
                 if (!webhookId || !addressesStr) {
-                    alert("Please enter both Webhook ID and Addresses");
+                    alert('Please enter both Webhook ID and Addresses');
                     return;
                 }
 
-                const addresses = addressesStr
-                    .split(",")
-                    .map((a) => a.trim())
-                    .filter((a) => a);
+                const addresses = addressesStr.split(',').map(a => a.trim()).filter(a => a);
 
                 try {
-                    const response = await fetch(`${API_URL}/webhook/address`, {
-                        method: "DELETE",
-                        headers: {
-                            "Content-Type": "application/json",
-                        },
-                        body: JSON.stringify({
-                            webhook_id: webhookId,
-                            addresses: addresses,
-                        }),
+                    const response = await fetch(`${getApiUrl()}/webhook/address`, {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ webhook_id: webhookId, addresses: addresses })
                     });
-
                     const data = await response.json();
-
+                    
                     if (response.ok) {
                         addLog(`✅ Success: ${data.message}`);
                     } else {
@@ -245,21 +490,22 @@
                 }
             }
 
+            // ========== WEBSOCKET FUNCTIONS ==========
+
             function connect() {
-                const url = document.getElementById("wsUrl").value;
+                const url = document.getElementById('wsUrl').value;
 
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    addLog("Already connected!");
+                    addLog('Already connected!');
                     return;
                 }
 
                 addLog(`Connecting to ${url}...`);
-
                 ws = new WebSocket(url);
 
                 ws.onopen = () => {
                     updateStatus(true);
-                    addLog("Connected successfully!");
+                    addLog('Connected successfully!');
                 };
 
                 ws.onmessage = (event) => {
@@ -277,7 +523,7 @@
 
                 ws.onclose = () => {
                     updateStatus(false);
-                    addLog("Disconnected from server");
+                    addLog('Disconnected from server');
                 };
             }
 
@@ -289,50 +535,33 @@
             }
 
             function updateStatus(connected) {
-                const statusDiv = document.getElementById("status");
+                const statusDiv = document.getElementById('status');
                 if (connected) {
-                    statusDiv.className = "status connected";
-                    statusDiv.textContent = "Connected";
+                    statusDiv.className = 'status connected';
+                    statusDiv.textContent = 'Connected';
                 } else {
-                    statusDiv.className = "status disconnected";
-                    statusDiv.textContent = "Disconnected";
+                    statusDiv.className = 'status disconnected';
+                    statusDiv.textContent = 'Disconnected';
                 }
             }
 
             function addMessage(message) {
-                const messagesDiv = document.getElementById("messages");
-
-                // Clear placeholder text on first message
-                if (messageCount === 0) {
-                    messagesDiv.innerHTML = "";
-                }
-
+                const messagesDiv = document.getElementById('messages');
+                if (messageCount === 0) messagesDiv.innerHTML = '';
                 messageCount++;
 
-                const messageDiv = document.createElement("div");
+                const messageDiv = document.createElement('div');
                 messageDiv.className = `message ${message.type}`;
 
                 const timestamp = new Date(message.timestamp).toLocaleString();
-
-                let content = "";
-                if (message.type === "transaction") {
-                    content = `
-                    <strong>🔔 Transaction Received</strong>
-                    <div class="timestamp">${timestamp}</div>
-                    <pre>${JSON.stringify(message.data, null, 2)}</pre>
-                `;
-                } else if (message.type === "status") {
-                    content = `
-                    <strong>📊 Status Update</strong>
-                    <div class="timestamp">${timestamp}</div>
-                    <p>Connected clients: ${message.clients_count}</p>
-                `;
+                let content = '';
+                
+                if (message.type === 'transaction') {
+                    content = `<strong>🔔 Transaction</strong><div class="timestamp">${timestamp}</div><pre>${JSON.stringify(message.data, null, 2)}</pre>`;
+                } else if (message.type === 'status') {
+                    content = `<strong>📊 Status</strong><div class="timestamp">${timestamp}</div><p>Connected clients: ${message.clients_count}</p>`;
                 } else {
-                    content = `
-                    <strong>📨 Message</strong>
-                    <div class="timestamp">${timestamp}</div>
-                    <pre>${JSON.stringify(message, null, 2)}</pre>
-                `;
+                    content = `<strong>📨 Message</strong><div class="timestamp">${timestamp}</div><pre>${JSON.stringify(message, null, 2)}</pre>`;
                 }
 
                 messageDiv.innerHTML = content;
@@ -340,30 +569,19 @@
             }
 
             function addLog(text) {
-                const messagesDiv = document.getElementById("messages");
+                const messagesDiv = document.getElementById('messages');
+                if (messageCount === 0) messagesDiv.innerHTML = '';
 
-                if (messageCount === 0) {
-                    messagesDiv.innerHTML = "";
-                }
-
-                const logDiv = document.createElement("div");
-                logDiv.className = "message";
-                logDiv.innerHTML = `
-                <div class="timestamp">${new Date().toLocaleString()}</div>
-                <p>${text}</p>
-            `;
+                const logDiv = document.createElement('div');
+                logDiv.className = 'message';
+                logDiv.innerHTML = `<div class="timestamp">${new Date().toLocaleString()}</div><p>${text}</p>`;
                 messagesDiv.insertBefore(logDiv, messagesDiv.firstChild);
             }
 
             function clearMessages() {
-                const messagesDiv = document.getElementById("messages");
-                messagesDiv.innerHTML =
-                    '<p style="color: #999;">No messages yet. Connect to start receiving messages.</p>';
+                document.getElementById('messages').innerHTML = '<p style="color: #666;">No messages yet. Connect to start receiving messages.</p>';
                 messageCount = 0;
             }
-
-            // Auto-connect on page load (optional)
-            // window.onload = connect;
         </script>
     </body>
 </html>
