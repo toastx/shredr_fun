@@ -26,6 +26,16 @@
     animation: pulse 2s infinite;
 }
 
+.monitor-icon.connected {
+    background: #00ff00;
+    box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+}
+
+.monitor-icon.disconnected {
+    background: #666666;
+    box-shadow: none;
+}
+
 .monitor-title {
     color: #e0e0e0;
     font-size: 0.875rem;
@@ -39,6 +49,62 @@
     font-size: 0.75rem;
     font-family: 'Space Mono', monospace;
     letter-spacing: 0.02em;
+    margin-bottom: 1rem;
+}
+
+.transaction-list {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid rgba(255, 26, 26, 0.2);
+}
+
+.transaction-header {
+    color: #e0e0e0;
+    font-size: 0.75rem;
+    font-weight: 500;
+    margin-bottom: 0.5rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.transaction-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+    font-size: 0.75rem;
+    font-family: 'Space Mono', monospace;
+}
+
+.transaction-type {
+    width: 12px;
+    text-align: center;
+    font-weight: bold;
+}
+
+.transaction-type.received {
+    color: #00ff00;
+}
+
+.transaction-type.sent {
+    color: #ff6b6b;
+}
+
+.transaction-amount {
+    flex: 1;
+    color: #e0e0e0;
+}
+
+.transaction-sig {
+    color: #666666;
+    font-size: 0.7rem;
+}
+
+.last-activity {
+    margin-top: 0.5rem;
+    color: #888888;
+    font-size: 0.7rem;
+    font-style: italic;
 }
 
 /* ========== ANIMATIONS ========== */

@@ -137,11 +137,27 @@ export interface NonceBlobAPI {
     deleteBlob(id: string): Promise<boolean>;
 }
 
+// ============ WEBSOCKET TYPES ============
+
+export interface WebSocketTransactionMessage {
+    type: 'transaction';
+    data: any;  // Transaction data from Helius
+    timestamp: string;  // ISO 8601 timestamp
+}
+
+export interface WebSocketStatusMessage {
+    type: 'status';
+    clients_count: number;
+    timestamp: string;  // ISO 8601 timestamp
+}
+
+export type WebSocketMessage = WebSocketTransactionMessage | WebSocketStatusMessage;
+
 // ============ ERROR TYPES ============
 
 export class DecryptionError extends Error {
     readonly reason: 'wrong_key' | 'corrupted' | 'unknown';
-    
+
     constructor(reason: 'wrong_key' | 'corrupted' | 'unknown', message: string) {
         super(message);
         this.name = 'DecryptionError';

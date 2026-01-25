@@ -5,13 +5,14 @@ export { NonceService, nonceService } from './NonceService';
 export { StorageService } from './StorageService';
 export { ShredrClient, shredrClient } from './ShredrClient';
 export { ApiClient, apiClient } from './ApiClient';
+export { WebSocketClient, webSocketClient } from './WebSocketClient';
 
 export type { SigningMode, PendingTransaction, ShredrState } from './ShredrClient';
 export { BurnerService as EncryptionService, burnerService as encryptionService } from './BurnerService';
 
 // Types
 export { DecryptionError } from './types';
-export type { 
+export type {
     // Storage types
     NonceState,
     // Nonce types
@@ -19,13 +20,17 @@ export type {
     EncryptedNoncePayload,
     DerivedKeys,
     // Burner types
-    BurnerKeyPair, 
+    BurnerKeyPair,
     // API types
     NonceBlob,
     CreateBlobRequest,
     DecryptBlobsResult,
     ConsumeResult,
-    NonceBlobAPI
+    NonceBlobAPI,
+    // WebSocket types
+    WebSocketMessage,
+    WebSocketTransactionMessage,
+    WebSocketStatusMessage
 } from './types';
 
 // Constants and utils

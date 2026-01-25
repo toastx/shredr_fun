@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
-import { shredrClient } from '../../lib';
+import { shredrClient, webSocketClient } from '../../lib';
 import { MASTER_MESSAGE } from '../../lib/constants';
 import AddressDisplay from '../AddressDisplay';
 import { TransactionMonitor } from '../TransactionMonitor';
@@ -42,6 +42,7 @@ function GeneratorCard() {
             setIsMonitoring(false);
             setError(null);
             shredrClient.destroy();
+            webSocketClient.disconnect();
         } else if (connected && cardState === 'disconnected') {
             setCardState('connected');
         }
@@ -89,6 +90,9 @@ function GeneratorCard() {
             if (address) {
                 setBurnerAddress(address);
                 setCardState('ready');
+
+                // 4. Connect WebSocket for transaction monitoring
+                webSocketClient.connect();
             } else {
                 throw new Error('Failed to derive burner address');
             }
