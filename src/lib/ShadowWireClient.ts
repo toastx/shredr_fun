@@ -1,7 +1,7 @@
 import { ShadowWireClient as ShadowWireSDK, TokenUtils } from '@radr/shadowwire';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import nacl from 'tweetnacl';
-import { RPC_URL } from './constants';
+import { HELIUS_RPC_URL } from './constants';
 
 /**
  * ShadowWire wrapper class for Shredr
@@ -14,7 +14,7 @@ export class ShadowWireClient {
 
     constructor(rpcUrl?: string) {
         this.sdk = new ShadowWireSDK({ debug: true });
-        this.connection = new Connection(rpcUrl || RPC_URL);
+        this.connection = new Connection(rpcUrl || HELIUS_RPC_URL);
     }
 
     /**

@@ -31,7 +31,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
         
         setIsLoadingBalance(true);
         try {
-            // Uses VITE_RPC_URL from env by default
+            // Uses HELIUS_RPC_URL from env by default
             const balance = await shredrClient.getShadowireBalance();
             setTotalBalance(balance.availableLamports);
         } catch (err) {
@@ -102,7 +102,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             setWithdrawSuccess(null);
 
             // Withdraw via external transfer from Shadowire Address (burner[0]) to connected wallet
-            // Uses VITE_RPC_URL from env by default
+            // Uses HELIUS_RPC_URL from env by default
             const result = await shredrClient.withdrawToWallet(
                 publicKey.toBase58(),
                 'all'  // Withdraw full balance

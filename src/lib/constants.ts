@@ -41,10 +41,6 @@ export const DOMAIN_STORAGE_KEY = 'SHREDR_STORAGE_KEY';       // IndexedDB encry
 /** Domain separation for burner master seed derivation */
 export const DOMAIN_BURNER_MASTER = 'SHREDR_BURNER_MASTER';   // Master seed for burner derivation
 
-/** API Base URL */
-export const API_BASE_URL = 'http://localhost:8000';
-
-
 /** Number of consecutive empty addresses before stopping recovery scan */
 export const CONSECUTIVE_EMPTY_THRESHOLD = 10;
 
@@ -60,10 +56,7 @@ export const SALT_LENGTH = 16;
 /** PBKDF2 iteration count */
 export const PBKDF2_ITERATIONS = 100000;
 
-// ============ RPC CONSTANTS ============
-
-/** 
- * Solana RPC URL - loaded from VITE_RPC_URL environment variable 
- * Fallback to mainnet if not set
- */
-export const RPC_URL = import.meta.env.VITE_RPC_URL || 'https://api.mainnet-beta.solana.com';
+/** API Base URL */
+export const HELIUS_RPC_URL = "https://rpc-proxy.shredrmoney.workers.dev";
+/** API Base URL */
+export const HELIUS_WSS_URL = "wss://rpc-proxy.shredrmoney.workers.dev";
