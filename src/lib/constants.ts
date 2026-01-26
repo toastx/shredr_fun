@@ -56,7 +56,11 @@ export const SALT_LENGTH = 16;
 /** PBKDF2 iteration count */
 export const PBKDF2_ITERATIONS = 100000;
 
-/** API Base URL */
+/** HELIUS RPC URL */
 export const HELIUS_RPC_URL = "https://rpc-proxy.shredrmoney.workers.dev";
-/** API Base URL */
+/** HELIUS WSS URL */
 export const HELIUS_WSS_URL = "wss://rpc-proxy.shredrmoney.workers.dev";
+/** API Base URL */
+export const API_BASE_URL = "http://localhost:8000";
+
+
