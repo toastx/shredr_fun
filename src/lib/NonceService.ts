@@ -241,18 +241,33 @@ export class NonceService {
      * @param index - The index to derive (0 = base nonce, 1+ = chained)
      * @param walletPublicKey - The wallet public key for hash derivation
      */
-    async generateNonceAtIndex(index: number, walletPublicKey: Uint8Array): Promise<GeneratedNonce> {
-        if (!this._masterSeed) {
-            throw new Error('NonceService not initialized. Call initFromSignature first.');
-        }
-        
-        if (index < 0 || index > MAX_NONCE_INDEX) {
-            throw new Error(`Invalid nonce index: ${index}. Must be 0-${MAX_NONCE_INDEX}`);
-        }
-        
-        const baseNonce = await this._deriveBaseNonce(walletPublicKey);
-        let nonce = baseNonce.nonce;
-        let nonceBuffer: ArrayBuffer;
+     async generateNonceAtIndex(index: number, walletPublicKey: Uint8Array): Promise<GeneratedNonce> {
+         if (!this._masterSeed) {
+             throw new Error('NonceService not initialized. Call initFromSignature first.');
+         }
+         
+         if (index < 0 || index > MAX_NONCE_INDEX) {
+             throw new Error(`Invalid nonce index: ${index}. Must be 0-${MAX_NONCE_INDEX}`);
+         }
+         
+         const walletHash = await deriveWalletHash(walletPublicKey, WALLET_HASH_LENGTH);
+         
+         // Start from base nonce (hash of master seed)
+         let nonceBuffer = await crypto.subtle.digest('SHA-256', getArrayBuffer(this._masterSeed));
+         let nonce = new Uint8Array(nonceBuffer);
+         
+         // Chain hash to reach target index
+         for (let i = 0; i < index; i++) {
+             nonceBuffer = await crypto.subtle.digest('SHA-256', getArrayBuffer(nonce));
+             nonce = new Uint8Array(nonceBuffer);
+         }
+         
+         return {
+             nonce,
+             index,
+             walletPubkeyHash: walletHash
+         };
+     }
         
         // Chain hash to reach target index
     async encryptNonce(
