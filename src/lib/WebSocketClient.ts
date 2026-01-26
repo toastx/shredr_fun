@@ -1,4 +1,4 @@
-import { WebSocketMessage } from './types';
+import type { WebSocketMessage } from './types';
 import { API_BASE_URL } from './constants';
 
 /**
