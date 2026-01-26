@@ -1,5 +1,5 @@
 import type { WebSocketMessage } from './types';
-import { API_BASE_URL } from './constants';
+import { HELIUS_WSS_URL } from './constants';
 
 /**
  * WebSocket client for real-time transaction monitoring
@@ -8,52 +8,67 @@ export class WebSocketClient {
     private ws: WebSocket | null = null;
     private reconnectAttempts = 0;
     private maxReconnectAttempts = 5;
-    private reconnectDelay = 1000; // Start with 1 second
-    private messageHandlers: ((message: WebSocketMessage) => void)[] = [];
+    private reconnectDelay = 1000;
+    private messageHandlers: ((data: any) => void)[] = [];
     private connectionHandlers: ((connected: boolean) => void)[] = [];
 
     /**
-     * Connect to the WebSocket server
-     */
+      * Connect to the Cloudflare Proxy
+      */
     connect(): void {
-        if (this.ws?.readyState === WebSocket.OPEN) {
-            return; // Already connected
-        }
+        if (this.ws?.readyState === WebSocket.OPEN) return;
 
-        const wsUrl = API_BASE_URL.replace('http', 'ws') + '/ws';
-        console.log('Connecting to WebSocket:', wsUrl);
+        // Change http://... to ws://... (your Cloudflare Worker URL)
+        console.log('Connecting to Proxy WS:', HELIUS_WSS_URL);
 
-        this.ws = new WebSocket(wsUrl);
+        this.ws = new WebSocket(HELIUS_WSS_URL);
 
         this.ws.onopen = () => {
-            console.log('WebSocket connected');
+            console.log('Connected to Proxy');
             this.reconnectAttempts = 0;
-            this.reconnectDelay = 1000;
-            this.connectionHandlers.forEach(handler => handler(true));
+            this.connectionHandlers.forEach(h => h(true));
         };
 
         this.ws.onmessage = (event) => {
             try {
-                const message: WebSocketMessage = JSON.parse(event.data);
-                this.messageHandlers.forEach(handler => handler(message));
-            } catch (error) {
-                console.error('Failed to parse WebSocket message:', error);
+                const data = JSON.parse(event.data);
+                // Solana updates come in as 'accountNotification'
+                this.messageHandlers.forEach(h => h(data));
+            } catch (e) {
+                console.error('WS Parse Error:', e);
             }
         };
 
-        this.ws.onclose = (event) => {
-            console.log('WebSocket disconnected:', event.code, event.reason);
-            this.connectionHandlers.forEach(handler => handler(false));
-
-            // Attempt to reconnect if not a clean close
-            if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+        this.ws.onclose = () => {
+            this.connectionHandlers.forEach(h => h(false));
+            if (this.reconnectAttempts < this.maxReconnectAttempts) {
                 this.scheduleReconnect();
             }
         };
+    }
+    
+    /**
+      * Subscribe to a Burner Wallet's updates
+      * This is the "Temp Mail" logic - no management credits used!
+      */
+    subscribeToAccount(address: string) {
+        if (!this.isConnected()) return;
 
-        this.ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
+        const request = {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "accountSubscribe",
+            params: [
+                address,
+                {
+                    encoding: "jsonParsed",
+                    commitment: "confirmed"
+                }
+            ]
         };
+
+        this.ws?.send(JSON.stringify(request));
+        console.log(`Subscribed to: ${address}`);
     }
 
     /**
