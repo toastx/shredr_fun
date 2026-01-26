@@ -93,6 +93,25 @@ function GeneratorCard() {
 
                 // 4. Connect WebSocket for transaction monitoring
                 webSocketClient.connect();
+
+                // 5. Subscribe to burner address once connected
+                if (webSocketClient.isConnected()) {
+                    webSocketClient.subscribeToAccount(address);
+                } else {
+                    const handleConnect = (connected: boolean) => {
+                        if (connected) {
+                            webSocketClient.subscribeToAccount(address);
+                            webSocketClient.offConnectionChange(handleConnect);
+                        }
+                    };
+                    webSocketClient.onConnectionChange(handleConnect);
+                }
+
+                // 6. Add message handler to console.log received messages
+                webSocketClient.onMessage((data) => {
+                    console.log('WebSocket message received:', data);
+                });
+              
             } else {
                 throw new Error('Failed to derive burner address');
             }
