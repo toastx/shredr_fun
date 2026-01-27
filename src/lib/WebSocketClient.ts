@@ -13,6 +13,19 @@ export class WebSocketClient {
     private connectionHandlers: ((connected: boolean) => void)[] = [];
 
     /**
+     * Sanitize data for safe logging
+     */
+    private sanitizeForLog(input: unknown): string {
+        let str: string;
+        if (typeof input === 'object' && input !== null) {
+            str = JSON.stringify(input);
+        } else {
+            str = `${input}`;
+        }
+        return str.replace(/[\r\n]/g, '');
+    }
+
+    /**
       * Connect to the Cloudflare Proxy
       */
     connect(): void {
@@ -35,10 +48,12 @@ export class WebSocketClient {
 
                 // Handle Solana account updates
                 if (data.method === "accountNotification") {
-                    console.log("Account updated:", data.params.result.value);
+                    const safeValue = this.sanitizeForLog(data.params.result.value);
+                    console.log("Account updated:", safeValue);
                     const accountInfo = data.params.result.value;
                     if (accountInfo && typeof accountInfo.lamports === 'number') {
-                        console.log(`New balance: ${accountInfo.lamports} lamports`);
+                        const safeLamports = this.sanitizeForLog(accountInfo.lamports);
+                        console.log(`New balance: ${safeLamports} lamports`);
 
                         // Emit accountUpdate message with lamports
                         const accountUpdateMessage = {
