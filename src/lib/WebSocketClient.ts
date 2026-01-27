@@ -32,7 +32,17 @@ export class WebSocketClient {
         this.ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                // Solana updates come in as 'accountNotification'
+                
+                // Handle Solana account updates
+                if (data.method === "accountNotification") {
+                    console.log("Account updated:", data.params.result.value);
+                    const accountInfo = data.params.result.value;
+                    if (accountInfo && typeof accountInfo.lamports === 'number') {
+                        console.log(`New balance: ${accountInfo.lamports} lamports`);
+                    }
+                }
+
+                // Broadcast to all registered handlers
                 this.messageHandlers.forEach(h => h(data));
             } catch (e) {
                 console.error('WS Parse Error:', e);
