@@ -151,7 +151,13 @@ export interface WebSocketStatusMessage {
     timestamp: string;  // ISO 8601 timestamp
 }
 
-export type WebSocketMessage = WebSocketTransactionMessage | WebSocketStatusMessage;
+export interface WebSocketAccountUpdateMessage {
+    type: 'accountUpdate';
+    lamports: number;
+    account: number;  // slot or some identifier
+}
+
+export type WebSocketMessage = WebSocketTransactionMessage | WebSocketStatusMessage | WebSocketAccountUpdateMessage;
 
 // ============ ERROR TYPES ============
 
