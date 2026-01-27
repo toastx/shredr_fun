@@ -38,6 +38,27 @@ function GeneratorCard() {
     // ============ HELPER FUNCTIONS ============
 
     /**
+     * Fetch the current balance for the burner address
+     */
+    const fetchInitialBalance = useCallback(async (address: string) => {
+        try {
+            const connection = new Connection(HELIUS_RPC_URL);
+            const publicKey = new PublicKey(address);
+            const accountInfo = await connection.getAccountInfo(publicKey);
+            if (accountInfo) {
+                const balanceSol = accountInfo.lamports / 1e9;
+                setBurnerBalance(balanceSol);
+                console.log(`Initial balance: ${balanceSol} SOL`);
+            } else {
+                setBurnerBalance(0);
+            }
+        } catch (err) {
+            console.error('Failed to fetch initial balance:', err);
+            setBurnerBalance(0);
+        }
+    }, []);
+
+    /**
      * Fetch the last significant transaction for the burner address
      */
     const fetchLastSignificantTransaction = useCallback(async (address: string) => {
@@ -153,10 +174,14 @@ function GeneratorCard() {
                 // 5. Subscribe to burner address once connected
                 if (webSocketClient.isConnected()) {
                     webSocketClient.subscribeToAccount(address);
+                    fetchInitialBalance(address);
+                    fetchLastSignificantTransaction(address);
                 } else {
                     const handleConnect = (connected: boolean) => {
                         if (connected) {
                             webSocketClient.subscribeToAccount(address);
+                            fetchInitialBalance(address);
+                            fetchLastSignificantTransaction(address);
                             webSocketClient.offConnectionChange(handleConnect);
                         }
                     };
