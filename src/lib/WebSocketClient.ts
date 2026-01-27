@@ -31,7 +31,7 @@ export class WebSocketClient {
     connect(): void {
         if (this.ws?.readyState === WebSocket.OPEN) return;
 
-        // Change http://... to ws://... (your Cloudflare Worker URL)
+        // Cloudflare Worker URL
         console.log('Connecting to Proxy WS:', HELIUS_WSS_URL);
 
         this.ws = new WebSocket(HELIUS_WSS_URL);
