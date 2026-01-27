@@ -5,6 +5,7 @@ import './TransactionMonitor.css';
 
 interface TransactionMonitorProps {
     burnerAddress: string;
+    externalTransactions?: TransactionInfo[];
 }
 
 interface TransactionInfo {
@@ -14,7 +15,7 @@ interface TransactionInfo {
     timestamp: string;
 }
 
-function TransactionMonitor({ burnerAddress }: TransactionMonitorProps) {
+function TransactionMonitor({ burnerAddress, externalTransactions = [] }: TransactionMonitorProps) {
     const [isConnected, setIsConnected] = useState(false);
     const [transactions, setTransactions] = useState<TransactionInfo[]>([]);
     const [lastActivity, setLastActivity] = useState<Date | null>(null);
@@ -57,6 +58,17 @@ function TransactionMonitor({ burnerAddress }: TransactionMonitorProps) {
             webSocketClient.offMessage(handleMessage);
         };
     }, [burnerAddress]);
+
+    // Merge external transactions
+    useEffect(() => {
+        if (externalTransactions.length > 0) {
+            setTransactions(prev => {
+                const combined = [...externalTransactions, ...prev];
+                return combined.slice(0, 10); // Keep last 10
+            });
+            setLastActivity(new Date());
+        }
+    }, [externalTransactions]);
 
     return (
         <div className="transaction-monitor">

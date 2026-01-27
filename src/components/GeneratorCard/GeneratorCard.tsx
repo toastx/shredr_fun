@@ -1,8 +1,10 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
+import { Connection, PublicKey } from '@solana/web3.js';
 import { shredrClient, webSocketClient } from '../../lib';
-import { MASTER_MESSAGE } from '../../lib/constants';
+import { MASTER_MESSAGE, HELIUS_RPC_URL } from '../../lib/constants';
+import type { WebSocketMessage, WebSocketAccountUpdateMessage } from '../../lib/types';
 import AddressDisplay from '../AddressDisplay';
 import { TransactionMonitor } from '../TransactionMonitor';
 import './GeneratorCard.css';
@@ -30,6 +32,60 @@ function GeneratorCard() {
     const [copied, setCopied] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [isMonitoring, setIsMonitoring] = useState(false);
+    const [burnerBalance, setBurnerBalance] = useState<number>(0); // in SOL
+    const [externalTransactions, setExternalTransactions] = useState<any[]>([]);
+
+    // ============ HELPER FUNCTIONS ============
+
+    /**
+     * Fetch the last significant transaction for the burner address
+     */
+    const fetchLastSignificantTransaction = useCallback(async (address: string) => {
+        try {
+            const connection = new Connection(HELIUS_RPC_URL);
+            const publicKey = new PublicKey(address);
+
+            // Get recent signatures
+            const signatures = await connection.getSignaturesForAddress(publicKey, { limit: 10 });
+
+            for (const sigInfo of signatures) {
+                const tx = await connection.getTransaction(sigInfo.signature, {
+                    commitment: 'confirmed',
+                    maxSupportedTransactionVersion: 0
+                });
+
+                if (tx && tx.meta) {
+                    // Check if it's a SOL transfer with significant amount
+                    const preBalances = tx.meta.preBalances || [];
+                    const postBalances = tx.meta.postBalances || [];
+                    const accountKeys = tx.transaction.message.getAccountKeys().staticAccountKeys;
+
+                    // Find the burner account index
+                    const burnerIndex = accountKeys.findIndex((key: PublicKey) => key.equals(publicKey));
+                    if (burnerIndex !== -1) {
+                        const preBalance = preBalances[burnerIndex] || 0;
+                        const postBalance = postBalances[burnerIndex] || 0;
+                        const diff = postBalance - preBalance;
+
+                        // If received SOL and amount > 0.01 SOL (10^7 lamports)
+                        if (diff > 10000000) { // 0.01 SOL
+                            const amountSol = diff / 1e9;
+                            const txInfo = {
+                                signature: sigInfo.signature,
+                                amount: amountSol,
+                                type: 'received' as const,
+                                timestamp: sigInfo.blockTime ? new Date(sigInfo.blockTime * 1000).toISOString() : new Date().toISOString()
+                            };
+                            setExternalTransactions(prev => [txInfo, ...prev.slice(0, 9)]);
+                            break; // Only take the first (most recent) significant one
+                        }
+                    }
+                }
+            }
+        } catch (err) {
+            console.error('Failed to fetch last transaction:', err);
+        }
+    }, []);
 
     // ============ EFFECTS ============
 
@@ -107,9 +163,21 @@ function GeneratorCard() {
                     webSocketClient.onConnectionChange(handleConnect);
                 }
 
-                // 6. Add message handler to console.log received messages
-                webSocketClient.onMessage((data) => {
+                // 6. Add message handler
+                webSocketClient.onMessage((data: WebSocketMessage) => {
                     console.log('WebSocket message received:', data);
+
+                    if (data.type === 'accountUpdate') {
+                        // Update balance
+                        const balanceSol = data.lamports / 1e9;
+                        setBurnerBalance(balanceSol);
+                        console.log(`Updated balance: ${balanceSol} SOL`);
+
+                        // Fetch last significant transaction
+                        if (address) {
+                            fetchLastSignificantTransaction(address);
+                        }
+                    }
                 });
               
             } else {
@@ -200,9 +268,15 @@ function GeneratorCard() {
                             onCopy={handleCopy}
                         />
 
+                        <div className="balance-display">
+                            <span className="balance-label">burner balance</span>
+                            <span className="balance-amount">{burnerBalance.toFixed(4)} SOL</span>
+                        </div>
+
                         {isMonitoring && (
-                            <TransactionMonitor 
-                                burnerAddress={burnerAddress || ''} 
+                            <TransactionMonitor
+                                burnerAddress={burnerAddress || ''}
+                                externalTransactions={externalTransactions}
                             />
                         )}
                     </div>

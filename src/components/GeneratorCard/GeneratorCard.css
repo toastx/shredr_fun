@@ -48,6 +48,32 @@
     animation: fadeIn 0.3s ease;
 }
 
+/* ========== BALANCE DISPLAY ========== */
+.balance-display {
+    margin: 1.5rem 0;
+    padding: 1rem;
+    background: rgba(255, 26, 26, 0.05);
+    border: 1px solid rgba(255, 26, 26, 0.2);
+    border-radius: 4px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.balance-label {
+    font-size: 0.875rem;
+    color: #888;
+    text-transform: lowercase;
+    font-family: "Space Mono", monospace;
+}
+
+.balance-amount {
+    font-size: 1.125rem;
+    font-weight: 700;
+    color: #ff1a1a;
+    font-family: "Space Mono", monospace;
+}
+
 /* ========== LOADING ANIMATION ========== */
 .loading-dots::after {
     content: '';

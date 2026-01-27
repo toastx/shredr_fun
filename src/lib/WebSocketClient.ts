@@ -32,13 +32,21 @@ export class WebSocketClient {
         this.ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                
+
                 // Handle Solana account updates
                 if (data.method === "accountNotification") {
                     console.log("Account updated:", data.params.result.value);
                     const accountInfo = data.params.result.value;
                     if (accountInfo && typeof accountInfo.lamports === 'number') {
                         console.log(`New balance: ${accountInfo.lamports} lamports`);
+
+                        // Emit accountUpdate message with lamports
+                        const accountUpdateMessage = {
+                            type: 'accountUpdate',
+                            lamports: accountInfo.lamports,
+                            account: data.params.result.context.slot // or whatever identifier
+                        };
+                        this.messageHandlers.forEach(h => h(accountUpdateMessage));
                     }
                 }
 
