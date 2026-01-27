@@ -1,6 +1,6 @@
 mod db;
 mod webhook;
-mod websocket;
+// mod websocket;
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use axum::{http::Request, routing::get, Router};
 use helius::{types::Cluster, Helius};
 use shuttle_axum::ShuttleAxum;
 use sqlx::PgPool;
-use tokio::sync::{watch, Mutex};
+// use tokio::sync::{watch, Mutex};
 use tower_governor::{
     governor::GovernorConfigBuilder,
     key_extractor::{KeyExtractor, PeerIpKeyExtractor},
@@ -19,7 +19,7 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use db::{db_routes, AppState, DbHandler};
 use webhook::{webhook_routes, WebhookState};
-use websocket::{websocket_routes, WebSocketMessage, WebSocketState};
+// use websocket::{websocket_routes, WebSocketMessage, WebSocketState};
 
 /// Custom key extractor that reads client IP from forwarding headers,
 /// falling back to the default PeerIpKeyExtractor when none are present.
@@ -82,14 +82,14 @@ async fn main(
     tracing::info!("Database ready");
 
     // State
-    let (tx, rx) = watch::channel(WebSocketMessage::Status {
-        clients_count: 0,
-        timestamp: chrono::Utc::now(),
-    });
+    // let (tx, rx) = watch::channel(WebSocketMessage::Status {
+    //     clients_count: 0,
+    //     timestamp: chrono::Utc::now(),
+    // });
     let app_state = Arc::new(AppState { db: db_handler });
-    let ws_state = Arc::new(WebSocketState { clients_count: Arc::new(Mutex::new(0)), rx });
+    // let ws_state = Arc::new(WebSocketState { clients_count: Arc::new(Mutex::new(0)), rx });
     let helius = Arc::new(Helius::new(&helius_api_key, Cluster::MainnetBeta).expect("Helius init failed"));
-    let webhook_state = Arc::new(WebhookState { tx, helius });
+    let webhook_state = Arc::new(WebhookState { helius });
 
     // Rate limits
     let general_config = Arc::new(
@@ -140,7 +140,7 @@ async fn main(
         .merge(db_routes::create_router(app_state.clone()).layer(GovernorLayer::new(db_config)))
         .merge(db_routes::read_router(app_state).layer(GovernorLayer::new(general_config)))
         .merge(webhook_routes::router(webhook_state).layer(GovernorLayer::new(webhook_config)))
-        .merge(websocket_routes::router(ws_state))
+        // .merge(websocket_routes::router(ws_state))
         .route("/health", get(|| async { "OK" }))
         .layer(cors);
 
