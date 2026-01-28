@@ -29,7 +29,7 @@ pub struct ListQuery {
 }
 
 fn default_limit() -> i64 {
-    10000
+    100
 }
 
 pub async fn create_blob_handler(
@@ -82,7 +82,8 @@ pub async fn list_blobs_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<ListQuery>,
 ) -> impl IntoResponse {
-    match state.db.list_blobs(query.limit, query.offset).await {
+    let limit = query.limit.clamp(1, 100);
+    match state.db.list_blobs(limit, query.offset).await {
         Ok(blobs) => (StatusCode::OK, Json(blobs)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -92,18 +93,18 @@ pub async fn list_blobs_handler(
     }
 }
 
-/// Build blob creation router (POST /api/blobs)
-pub fn create_router(state: Arc<AppState>) -> Router {
+/// Build blob write router (POST/DELETE /api/blobs)
+pub fn write_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/blobs", post(create_blob_handler))
+        .route("/api/blobs/:id", delete(delete_blob_handler))
         .with_state(state)
 }
 
-/// Build blob read router (GET/DELETE /api/blobs)
+/// Build blob read router (GET /api/blobs)
 pub fn read_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/blobs", get(list_blobs_handler))
-        .route("/api/blobs/{id}", get(get_blob_handler))
-        .route("/api/blobs/{id}", delete(delete_blob_handler))
+        .route("/api/blobs/:id", get(get_blob_handler))
         .with_state(state)
 }

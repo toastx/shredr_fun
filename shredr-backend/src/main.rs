@@ -137,7 +137,7 @@ async fn main(
 
     // Build router
     let router = Router::new()
-        .merge(db_routes::create_router(app_state.clone()).layer(GovernorLayer::new(db_config)))
+        .merge(db_routes::write_router(app_state.clone()).layer(GovernorLayer::new(db_config)))
         .merge(db_routes::read_router(app_state).layer(GovernorLayer::new(general_config)))
         .merge(webhook_routes::router(webhook_state).layer(GovernorLayer::new(webhook_config)))
         // .merge(websocket_routes::router(ws_state))

@@ -173,8 +173,50 @@ pub struct NonceBlob {
 }
 
 /// Request to create a new blob
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateBlobRequest {
     pub encrypted_blob: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::test]
+    async fn test_create_blob_too_large() {
+        // Use a lazy connection so we don't need a real DB for validation logic
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://fake:fake@localhost:5432/fake")
+            .expect("Failed to create pool");
+        
+        let db = DbHandler::new(pool);
+        
+        let huge_blob = "a".repeat(MAX_BLOB_SIZE + 1);
+        let result = db.create_blob(&huge_blob).await;
+        
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Blob too large"));
+    }
+
+    #[tokio::test]
+    async fn test_create_blob_valid_size() {
+         // Use a lazy connection so we don't need a real DB for validation logic
+         // This test will fail at the DB step, but it confirms validation passed
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://fake:fake@localhost:5432/fake")
+            .expect("Failed to create pool");
+        
+        let db = DbHandler::new(pool);
+        
+        let valid_blob = "a".repeat(MAX_BLOB_SIZE);
+        let result = db.create_blob(&valid_blob).await;
+        
+        // Should be Err because DB connection fails, not "Blob too large"
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(!err_msg.contains("Blob too large"));
+        assert!(err_msg.contains("Failed to create blob"));
+    }
 }
