@@ -1,7 +1,10 @@
-import { ShadowWireClient as ShadowWireSDK, TokenUtils } from '@radr/shadowwire';
+import { ShadowWireClient as ShadowWireSDK, TokenUtils,initWASM, generateRangeProof, isWASMSupported } from '@radr/shadowwire';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import nacl from 'tweetnacl';
 import { HELIUS_RPC_URL } from './constants';
+import {  } from '@radr/shadowwire';
+
+  
 
 /**
  * ShadowWire wrapper class for Shredr
@@ -70,6 +73,13 @@ export class ShadowWireClient {
      * Internal transfer (amount hidden) to another ShadowWire user
      */
     async transferInternal(recipientAddress: string, amountInSol: number): Promise<string> {
+        if (isWASMSupported()) {
+            await initWASM('/settler_wasm_bg.wasm');
+        }
+        else { 
+            console.log("WASM not supp")
+        }
+        const proof = await generateRangeProof(100000000, 64);
         if (!this.keypair) throw new Error('Keypair not set');
 
         // Create signMessage function using tweetnacl
@@ -79,12 +89,13 @@ export class ShadowWireClient {
             return signature;
         };
 
-        const transferTx = await this.sdk.transfer({
+        const transferTx = await this.sdk.transferWithClientProofs({
             sender: this.keypair.publicKey.toBase58(),
             recipient: recipientAddress,
-            amount: amountInSol,
+            amount: TokenUtils.toSmallestUnit(amountInSol, 'SOL'),
             token: 'SOL',
             type: 'internal',
+            customProof:proof,
             wallet: { signMessage }
         });
 
@@ -99,6 +110,8 @@ export class ShadowWireClient {
      * External transfer (sender anonymous, amount visible) to any Solana wallet
      */
     async transferExternal(recipientAddress: string, amountInSol: number): Promise<string> {
+        await initWASM('/settler_wasm_bg.wasm');
+        const proof = await generateRangeProof(100000000, 64);
         if (!this.keypair) throw new Error('Keypair not set');
 
         const signMessage = async (message: Uint8Array): Promise<Uint8Array> => {
@@ -107,12 +120,13 @@ export class ShadowWireClient {
             return signature;
         };
 
-        const transferTx = await this.sdk.transfer({
+        const transferTx = await this.sdk.transferWithClientProofs({
             sender: this.keypair.publicKey.toBase58(),
             recipient: recipientAddress,
-            amount: amountInSol,
+            amount: TokenUtils.toSmallestUnit(amountInSol, 'SOL'),
             token: 'SOL',
             type: 'external',
+            customProof:proof,
             wallet: { signMessage }
         });
 
@@ -179,6 +193,15 @@ export class ShadowWireClient {
             availableLamports: balance.available,
             poolAddress: balance.pool_address
         };
+    }
+
+    /**
+     * Get the native SOL balance of the current wallet
+     */
+    async getWalletBalance(): Promise<number> {
+        if (!this.keypair) throw new Error('Keypair not set');
+        const balance = await this.connection.getBalance(this.keypair.publicKey);
+        return balance;
     }
 
     /**

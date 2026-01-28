@@ -11,7 +11,7 @@ import { nonceService } from './NonceService';
 import { burnerService } from './BurnerService';
 import { apiClient } from './ApiClient';
 import { ShadowWireClient } from './ShadowWireClient';
-import { Keypair } from '@solana/web3.js';
+import { Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import type { GeneratedNonce, BurnerKeyPair, CreateBlobRequest } from './types';
 // ============ TYPES ============
 export type SigningMode = 'auto' | 'manual';
@@ -21,6 +21,14 @@ export interface PendingTransaction {
     from: string;         // Sender address
     timestamp: number;    // Unix timestamp
 }
+
+export interface IncomingTxResult {
+    needsApproval: boolean;
+    pendingTx?: PendingTransaction;
+    sweepSignature?: string;
+}
+
+export const MIN_SWEEP_THRESHOLD_LAMPORTS = 0.1 * LAMPORTS_PER_SOL;
 export interface ShredrState {
     initialized: boolean;
     currentNonce: GeneratedNonce | null;
@@ -251,39 +259,96 @@ export class ShredrClient {
         return this._currentBurner;
     }
     // ============ TRANSACTION HANDLING ============
+    
     /**
-     * Handle incoming transaction to burner address
-     * In auto mode, sweeps immediately
-     * In manual mode, returns the transaction for approval
+     * Handle incoming transaction when balance exceeds threshold
+     * Called when burner balance is detected above MIN_SWEEP_THRESHOLD
+     *
+     * In auto mode: executes sweep immediately
+     * In manual mode: returns pending transaction for UI approval
+     *
+     * @param balanceLamports - Current burner balance in lamports
+     * @returns IncomingTxResult with approval status and optional sweep signature
      */
-    async handleIncomingTransaction(
-        tx: PendingTransaction,
-        sweepFn: (burner: BurnerKeyPair, amount: number) => Promise<string>
-    ): Promise<{ swept: boolean; sweepSignature?: string }> {
-        if (!this._currentBurner) {
-            throw new Error('No current burner');
+    async incomingTx(balanceLamports: number): Promise<IncomingTxResult> {
+        if (!this._initialized || !this._currentBurner) {
+            throw new Error('ShredrClient not initialized');
         }
+
+        // Check threshold
+        if (balanceLamports <= MIN_SWEEP_THRESHOLD_LAMPORTS) {
+            return { needsApproval: false };
+        }
+
+        const pendingTx: PendingTransaction = {
+            amount: balanceLamports,
+            signature: '',
+            from: 'unknown',
+            timestamp: Date.now()
+        };
+
         if (this._signingMode === 'auto') {
             // Auto mode - sweep immediately
-            const sweepSig = await sweepFn(this._currentBurner, tx.amount);
-            return { swept: true, sweepSignature: sweepSig };
+            console.log(`Auto-sweep triggered: ${balanceLamports / LAMPORTS_PER_SOL} SOL`);
+            const sweepSig = await this.executeSweep(balanceLamports);
+            return { needsApproval: false, sweepSignature: sweepSig };
         } else {
             // Manual mode - return for approval
-            return { swept: false };
+            return { needsApproval: true, pendingTx };
         }
     }
+
     /**
-     * Approve and execute a pending transaction (for manual mode)
+     * Approve and execute sweep for a pending transaction (manual mode)
+     * @param pendingTx - The pending transaction to approve
+     * @returns The sweep signature
      */
-    async approveAndSweep(
-        tx: PendingTransaction,
-        sweepFn: (burner: BurnerKeyPair, amount: number) => Promise<string>
-    ): Promise<string> {
-        if (!this._currentBurner) {
-            throw new Error('No current burner');
+    async approveSweep(pendingTx: PendingTransaction): Promise<string> {
+        if (!this._initialized || !this._currentBurner) {
+            throw new Error('ShredrClient not initialized');
         }
-        return await sweepFn(this._currentBurner, tx.amount);
+        return await this.executeSweep(pendingTx.amount);
     }
+
+    /**
+     * Execute sweep by transferring internally to the shadowwire burner address (burner[0])
+     *
+     * @param amountInLamports - Amount to sweep in lamports
+     * @param rpcUrl - Optional Solana RPC URL
+     * @returns The internal transfer signature
+     */
+    async executeSweep(amountInLamports: number, rpcUrl?: string): Promise<string> {
+        if (!this._initialized || !this._currentBurner) {
+            throw new Error('ShredrClient not initialized');
+        }
+        if (!this._shadowireBurner) {
+            throw new Error('Shadowire burner not available');
+        }
+
+        // Convert lamports to SOL
+        const amountInSol = amountInLamports / LAMPORTS_PER_SOL;
+
+        // Create ShadowWire client with the current burner's keypair
+        const shadowWireClient = new ShadowWireClient(rpcUrl);
+        const burnerKeypair = Keypair.fromSecretKey(this._currentBurner.secretKey);
+        shadowWireClient.setKeypair(burnerKeypair);
+
+        // Check wallet balance before attempting transfer
+        const walletBalance = await shadowWireClient.getWalletBalance();
+        if (walletBalance < amountInLamports) {
+            throw new Error(`Insufficient funds: wallet has ${walletBalance} lamports, need ${amountInLamports} lamports`);
+        }
+
+        // Step 2: Internal transfer to shadowwire burner address (burner[0])
+        // This hides the amount and sender
+        const shadowireAddress = this._shadowireBurner.address;
+        console.log(`Sweep: Transferring internally to Shadowire Address: ${shadowireAddress}...`);
+        const transferSig = await shadowWireClient.transferInternal(shadowireAddress, amountInSol);
+        console.log(`Sweep: Internal transfer successful: ${transferSig}`);
+
+        return transferSig;
+    }
+
     // ============ SHADOWIRE BALANCE & WITHDRAW ============
 
     /**
