@@ -66,3 +66,6 @@ export const API_BASE_URL = "http://localhost:8000";
 
 /** Transaction fee buffer for sweep operations (covering deposit + transfer) */
 export const SWEEP_FEE_BUFFER_LAMPORTS = 25000;
+
+/** Minimum balance threshold before triggering sweep (0.1 SOL) */
+export const SWEEP_THRESHOLD_LAMPORTS = 0.1 * 1e9; // 100,000,000 lamports

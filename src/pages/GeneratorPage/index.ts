@@ -1,2 +1,1 @@
-export { ClaimPage } from './ClaimPage';
 export { GeneratorPage } from './GeneratorPage';

@@ -33,7 +33,7 @@ function GeneratorCard() {
   const [burnerAddress, setBurnerAddress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [burnerBalance, setBurnerBalance] = useState<number>(0);
-  const [externalTransactions, setExternalTransactions] = useState<any[]>([]);
+
   const [pendingTransaction, setPendingTransaction] =
     useState<PendingTransaction | null>(null);
   const [isShielding, setIsShielding] = useState(false);
@@ -81,62 +81,7 @@ function GeneratorCard() {
     }
   }, []);
 
-  /**
-   * Fetch transaction history
-   * Only updates the transactions list, does NOT update balance
-   */
-  const fetchTransactionHistory = useCallback(async (address: string) => {
-    try {
-      const connection = new Connection(HELIUS_RPC_URL);
-      const pubkey = new PublicKey(address);
 
-      // Get recent signatures
-      const signatures = await connection.getSignaturesForAddress(pubkey, {
-        limit: 10,
-      });
-
-      const txs: any[] = [];
-
-      for (let i = 0; i < signatures.length; i++) {
-        const sigInfo = signatures[i];
-        if (sigInfo.err) continue;
-
-        const tx = await connection.getTransaction(sigInfo.signature, {
-          commitment: "confirmed",
-          maxSupportedTransactionVersion: 0,
-        });
-
-        if (tx && tx.meta) {
-          const preBalances = tx.meta.preBalances || [];
-          const postBalances = tx.meta.postBalances || [];
-          const accountKeys =
-            tx.transaction.message.getAccountKeys().staticAccountKeys;
-
-          const burnerIndex = accountKeys.findIndex((key: PublicKey) =>
-            key.equals(pubkey),
-          );
-          if (burnerIndex !== -1) {
-            const preBalance = preBalances[burnerIndex] || 0;
-            const postBalance = postBalances[burnerIndex] || 0;
-            const diff = postBalance - preBalance;
-            const amountSol = Math.abs(diff) / LAMPORTS_PER_SOL;
-
-            txs.push({
-              signature: sigInfo.signature,
-              timestamp: sigInfo.blockTime
-                ? new Date(sigInfo.blockTime * 1000).toISOString()
-                : new Date().toISOString(),
-              type: diff >= 0 ? ("received" as const) : ("sent" as const),
-              amount: amountSol,
-            });
-          }
-        }
-      }
-      setExternalTransactions(txs);
-    } catch (err) {
-      console.error("Failed to fetch transaction history:", err);
-    }
-  }, []);
 
   const updateToNewBurner = useCallback(async () => {
     const newAddress = shredrClient.currentBurnerAddress;
@@ -149,9 +94,8 @@ function GeneratorCard() {
       }
 
       await refreshTotalBalance(newAddress);
-      fetchTransactionHistory(newAddress);
     }
-  }, [burnerAddress, fetchTransactionHistory, refreshTotalBalance]);
+  }, [burnerAddress, refreshTotalBalance]);
 
   // ============ EFFECTS ============
 
@@ -228,7 +172,7 @@ function GeneratorCard() {
             handleBalanceUpdate(publicLamports);
           }
 
-          fetchTransactionHistory(address);
+
         };
 
         if (webSocketClient.isConnected()) {
@@ -258,9 +202,6 @@ function GeneratorCard() {
                 `Confirmed balance update: ${publicLamports} lamports`,
               );
               handleBalanceUpdate(publicLamports);
-
-              // Also update history
-              fetchTransactionHistory(currentAddress);
             }
           }
         });
@@ -277,7 +218,7 @@ function GeneratorCard() {
         setCardState("error");
       }
     }
-  }, [publicKey, signMessage, refreshTotalBalance, fetchTransactionHistory]);
+  }, [publicKey, signMessage, refreshTotalBalance]);
 
   /**
    * Copy burner address and start monitoring
@@ -422,7 +363,6 @@ function GeneratorCard() {
             {cardState === "monitoring" && (
               <TransactionMonitor
                 burnerAddress={burnerAddress || ""}
-                externalTransactions={externalTransactions}
               />
             )}
           </div>

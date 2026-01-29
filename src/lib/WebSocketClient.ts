@@ -83,10 +83,30 @@ export class WebSocketClient {
     /**
       * Subscribe to a Burner Wallet's updates
       * This is the "Temp Mail" logic - no management credits used!
+      * Auto-connects if not already connected.
       */
     subscribeToAccount(address: string) {
-        if (!this.isConnected()) return;
+        // Auto-connect if not connected
+        if (!this.isConnected()) {
+            this.connect();
+            // Queue subscription after connection
+            const onConnect = (connected: boolean) => {
+                if (connected) {
+                    this.sendSubscription(address);
+                    this.offConnectionChange(onConnect);
+                }
+            };
+            this.onConnectionChange(onConnect);
+            return;
+        }
 
+        this.sendSubscription(address);
+    }
+
+    /**
+     * Internal: Send subscription request
+     */
+    private sendSubscription(address: string) {
         const request = {
             jsonrpc: "2.0",
             id: 1,
