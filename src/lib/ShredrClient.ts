@@ -456,17 +456,49 @@ export class ShredrClient {
       );
     }
 
-    const amountToDepositSol = amountToDeposit / LAMPORTS_PER_SOL;
     const shadowireAddress = this._shadowireBurner.address;
 
-    // Step 1: Deposit funds into ShadowWire pool (shielding)
-    console.log(
-      `Sweep Step 1: Depositing ${amountToDepositSol} SOL into ShadowWire pool...`,
-    );
-    const { signature: depositSig, userBalancePda } =
-      await shadowWireClient.deposit(amountToDepositSol);
-    console.log(`Sweep: Deposit successful: ${depositSig}`);
-    console.log(`Sweep: User Balance PDA: ${userBalancePda}`);
+    // Step 1: Deposit funds into ShadowWire pool (shielding) with retry
+    const MAX_DEPOSIT_RETRIES = 3;
+    const DEPOSIT_RETRY_DELAY = 2000;
+    let depositResult: { signature: string; userBalancePda: string } | null = null;
+    let depositAmountToUse = amountToDeposit;
+
+    for (let attempt = 1; attempt <= MAX_DEPOSIT_RETRIES; attempt++) {
+      try {
+        const amountToDepositSol = depositAmountToUse / LAMPORTS_PER_SOL;
+        console.log(
+          `Sweep Step 1: Depositing ${amountToDepositSol} SOL (Attempt ${attempt}/${MAX_DEPOSIT_RETRIES})...`,
+        );
+        
+        depositResult = await shadowWireClient.deposit(amountToDepositSol);
+        console.log(`Sweep: Deposit successful: ${depositResult.signature}`);
+        break; // Success
+      } catch (err) {
+        console.error(`Sweep: Deposit attempt ${attempt} failed:`, err);
+        
+        // If we failed due to insufficient funds in simulation, re-query balance
+        const errorMsg = String(err);
+        if (errorMsg.includes("insufficient lamports") || errorMsg.includes("0x1")) {
+          console.log("Sweep: Simulation failed with insufficient funds. Re-querying wallet balance...");
+          const freshWalletBalance = await shadowWireClient.getWalletBalance();
+          depositAmountToUse = freshWalletBalance - SWEEP_FEE_BUFFER_LAMPORTS;
+          
+          if (depositAmountToUse <= 0) {
+             throw new Error("Insufficient funds available to even cover the fee buffer.");
+          }
+        }
+
+        if (attempt === MAX_DEPOSIT_RETRIES) {
+          throw err; // Re-throw if last attempt fails
+        }
+        
+        console.log(`Sweep: Retrying deposit in ${DEPOSIT_RETRY_DELAY}ms...`);
+        await new Promise(resolve => setTimeout(resolve, DEPOSIT_RETRY_DELAY));
+      }
+    }
+
+    if (!depositResult) throw new Error("Deposit failed after retries");
 
     // Wait for PDA initialization on first deposit
     console.log(`Sweep: Waiting for PDA initialization...`);
