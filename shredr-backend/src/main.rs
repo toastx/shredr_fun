@@ -2,13 +2,12 @@ mod db;
 mod webhook;
 // mod websocket;
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use axum::{http::Request, routing::get, Router};
 use helius::{types::Cluster, Helius};
-use shuttle_axum::ShuttleAxum;
-use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 // use tokio::sync::{watch, Mutex};
 use tower_governor::{
     governor::GovernorConfigBuilder,
@@ -64,19 +63,51 @@ impl KeyExtractor for ForwardedIpKeyExtractor {
     }
 }
 
+/// Build the PostgreSQL connection string from environment variables
+fn build_database_url() -> String {
+    let host = std::env::var("DATABASE_HOST").expect("DATABASE_HOST is required");
+    let user = std::env::var("DATABASE_USER").expect("DATABASE_USER is required");
+    let password = std::env::var("DATABASE_PASSWORD").expect("DATABASE_PASSWORD is required");
+    let database = std::env::var("DATABASE_NAME").expect("DATABASE_NAME is required");
+    
+    // Default to SSL mode for production (Koyeb, etc.)
+    format!(
+        "postgres://{}:{}@{}/{}?sslmode=require",
+        user, password, host, database
+    )
+}
 
-#[shuttle_runtime::main]
-async fn main(
-    #[shuttle_runtime::Secrets] secrets: shuttle_runtime::SecretStore,
-    #[shuttle_shared_db::Postgres] pool: PgPool,
-) -> ShuttleAxum {
+#[tokio::main]
+async fn main() {
+    // Initialize tracing
+    tracing_subscriber::fmt::init();
+    
     tracing::info!("Starting Shredr Backend...");
 
-    // Config
-    let helius_api_key = secrets.get("HELIUS_API_KEY").expect("HELIUS_API_KEY required");
-    let is_development = secrets.get("ENVIRONMENT").map(|e| e == "development").unwrap_or(true);
+    // Load environment variables from .env file
+    dotenvy::dotenv().ok();
 
-    // Database (Shuttle-provisioned PostgreSQL)
+    // Config
+    let helius_api_key = std::env::var("HELIUS_API_KEY").expect("HELIUS_API_KEY required");
+    let is_development = std::env::var("ENVIRONMENT")
+        .map(|e| e == "development")
+        .unwrap_or(true);
+
+    // Build database connection URL
+    let database_url = build_database_url();
+    tracing::info!("Connecting to database...");
+
+    // Create PostgreSQL connection pool
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(Duration::from_secs(30))
+        .connect(&database_url)
+        .await
+        .expect("Failed to connect to database");
+
+    tracing::info!("Database connection established");
+
+    // Database handler
     let db_handler = DbHandler::new(pool);
     db_handler.init_schema().await.expect("Schema init failed");
     tracing::info!("Database ready");
@@ -144,6 +175,21 @@ async fn main(
         .route("/health", get(|| async { "OK" }))
         .layer(cors);
 
-    tracing::info!("Server ready");
-    Ok(router.into())
+    // Get port from environment or default to 8000
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8000);
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    tracing::info!("Server listening on http://{}", addr);
+
+    // Start the server
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("Failed to bind to address");
+
+    axum::serve(listener, router)
+        .await
+        .expect("Server error");
 }

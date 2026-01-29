@@ -97,7 +97,7 @@ pub async fn list_blobs_handler(
 pub fn write_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/blobs", post(create_blob_handler))
-        .route("/api/blobs/:id", delete(delete_blob_handler))
+        .route("/api/blobs/{id}", delete(delete_blob_handler))
         .with_state(state)
 }
 
@@ -105,6 +105,6 @@ pub fn write_router(state: Arc<AppState>) -> Router {
 pub fn read_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/blobs", get(list_blobs_handler))
-        .route("/api/blobs/:id", get(get_blob_handler))
+        .route("/api/blobs/{id}", get(get_blob_handler))
         .with_state(state)
 }
