@@ -12,7 +12,7 @@ import { burnerService } from "./BurnerService";
 import { apiClient } from "./ApiClient";
 import { ShadowWireClient } from "./ShadowWireClient";
 import { Keypair, LAMPORTS_PER_SOL } from "@solana/web3.js";
-import { SWEEP_FEE_BUFFER_LAMPORTS } from "./constants";
+import { SWEEP_FEE_BUFFER_LAMPORTS, SWEEP_THRESHOLD_LAMPORTS } from "./constants";
 import type { GeneratedNonce, BurnerKeyPair, CreateBlobRequest } from "./types";
 // ============ TYPES ============
 export type SigningMode = "auto" | "manual";
@@ -29,7 +29,7 @@ export interface IncomingTxResult {
   sweepSignature?: string;
 }
 
-export const MIN_SWEEP_THRESHOLD_LAMPORTS = 0.1 * LAMPORTS_PER_SOL;
+
 export interface ShredrState {
   initialized: boolean;
   currentNonce: GeneratedNonce | null;
@@ -366,7 +366,7 @@ export class ShredrClient {
     }
 
     // Check threshold
-    if (balanceLamports <= MIN_SWEEP_THRESHOLD_LAMPORTS) {
+    if (balanceLamports < SWEEP_THRESHOLD_LAMPORTS) {
       return { needsApproval: false };
     }
 
