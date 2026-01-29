@@ -97,13 +97,10 @@ export class ShadowWireClient {
     recipientAddress: string,
     amountInSol: number,
   ): Promise<string> {
-    if (isWASMSupported()) {
-      await initWASM("/settler_wasm_bg.wasm");
-    } else {
-      console.log("WASM not supp");
-    }
-    const proof = await generateRangeProof(100000000, 64);
-    console.log("proof generated");
+    await this.ensureWASM();
+    const amountInLamports = TokenUtils.toSmallestUnit(amountInSol, "SOL");
+    const proof = await generateRangeProof(amountInLamports, 64);
+    console.log(`Proof generated for ${amountInLamports} lamports`);
     if (!this.keypair) throw new Error("Keypair not set");
 
     // Create signMessage function using tweetnacl
@@ -143,8 +140,10 @@ export class ShadowWireClient {
     recipientAddress: string,
     amountInSol: number,
   ): Promise<string> {
-    await initWASM("/settler_wasm_bg.wasm");
-    const proof = await generateRangeProof(100000000, 64);
+    await this.ensureWASM();
+    const amountInLamports = TokenUtils.toSmallestUnit(amountInSol, "SOL");
+    const proof = await generateRangeProof(amountInLamports, 64);
+    console.log(`Proof generated for ${amountInLamports} lamports`);
     if (!this.keypair) throw new Error("Keypair not set");
 
     const signMessage = async (message: Uint8Array): Promise<Uint8Array> => {
@@ -279,6 +278,17 @@ export class ShadowWireClient {
     }
 
     return this.withdraw(balance.available);
+  }
+  /**
+   * Ensure WASM is initialized and supported
+   */
+  private async ensureWASM(): Promise<void> {
+    if (!isWASMSupported()) {
+      throw new Error(
+        "WASM is not supported in this environment. Privacy features (range proofs) require WASM.",
+      );
+    }
+    await initWASM("/settler_wasm_bg.wasm");
   }
 }
 
