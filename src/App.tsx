@@ -1,6 +1,6 @@
 import { Routes, Route } from 'react-router-dom';
-import { Navbar, Footer, GeneratorCard } from './components';
-import { ClaimPage } from './pages';
+import { Navbar, Footer } from './components';
+import { ClaimPage, GeneratorPage } from './pages';
 import './App.css';
 
 function App() {
@@ -13,11 +13,7 @@ function App() {
             <Routes>
                 <Route 
                     path="/" 
-                    element={
-                        <main className="main-content">
-                            <GeneratorCard />
-                        </main>
-                    } 
+                    element={<GeneratorPage />} 
                 />
                 <Route 
                     path="/claim" 

@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { webSocketClient } from '../../lib';
+import { HELIUS_RPC_URL } from '../../lib/constants';
 import type { WebSocketMessage } from '../../lib';
 import './TransactionMonitor.css';
 
 interface TransactionMonitorProps {
     burnerAddress: string;
-    externalTransactions?: TransactionInfo[];
 }
 
 interface TransactionInfo {
@@ -15,24 +16,103 @@ interface TransactionInfo {
     timestamp: string;
 }
 
-function TransactionMonitor({ burnerAddress, externalTransactions = [] }: TransactionMonitorProps) {
+function TransactionMonitor({ burnerAddress }: TransactionMonitorProps) {
     const [isConnected, setIsConnected] = useState(false);
     const [transactions, setTransactions] = useState<TransactionInfo[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
 
+    /**
+     * Fetch transaction history for the burner address
+     */
+    const fetchTransactionHistory = useCallback(async () => {
+        if (!burnerAddress) return;
+        
+        setIsLoading(true);
+        try {
+            const connection = new Connection(HELIUS_RPC_URL);
+            const pubkey = new PublicKey(burnerAddress);
+
+            // Get recent signatures
+            const signatures = await connection.getSignaturesForAddress(pubkey, {
+                limit: 10,
+            });
+
+            const txs: TransactionInfo[] = [];
+
+            for (let i = 0; i < signatures.length; i++) {
+                const sigInfo = signatures[i];
+                if (sigInfo.err) continue;
+
+                const tx = await connection.getTransaction(sigInfo.signature, {
+                    commitment: "confirmed",
+                    maxSupportedTransactionVersion: 0,
+                });
+
+                if (tx && tx.meta) {
+                    const preBalances = tx.meta.preBalances || [];
+                    const postBalances = tx.meta.postBalances || [];
+                    const accountKeys =
+                        tx.transaction.message.getAccountKeys().staticAccountKeys;
+
+                    const burnerIndex = accountKeys.findIndex((key: PublicKey) =>
+                        key.equals(pubkey),
+                    );
+                    if (burnerIndex !== -1) {
+                        const preBalance = preBalances[burnerIndex] || 0;
+                        const postBalance = postBalances[burnerIndex] || 0;
+                        const diff = postBalance - preBalance;
+                        const amountSol = Math.abs(diff) / LAMPORTS_PER_SOL;
+
+                        txs.push({
+                            signature: sigInfo.signature,
+                            timestamp: sigInfo.blockTime
+                                ? new Date(sigInfo.blockTime * 1000).toISOString()
+                                : new Date().toISOString(),
+                            type: diff >= 0 ? 'received' : 'sent',
+                            amount: amountSol,
+                        });
+                    }
+                }
+            }
+            setTransactions(txs);
+        } catch (err) {
+            console.error("Failed to fetch transaction history:", err);
+        } finally {
+            setIsLoading(false);
+        }
+    }, [burnerAddress]);
+
+    // Fetch history on mount and when address changes
+    useEffect(() => {
+        fetchTransactionHistory();
+    }, [fetchTransactionHistory]);
+
+    // Listen for WebSocket connection changes
     useEffect(() => {
         const handleConnectionChange = (connected: boolean) => {
             setIsConnected(connected);
         };
         webSocketClient.onConnectionChange(handleConnectionChange);
+        setIsConnected(webSocketClient.isConnected());
+        
         return () => webSocketClient.offConnectionChange(handleConnectionChange);
     }, []);
 
-    // Use external transactions directly
+    // Listen for account updates and refresh history
     useEffect(() => {
-        if (externalTransactions.length > 0) {
-            setTransactions(externalTransactions.slice(0, 10));
-        }
-    }, [externalTransactions]);
+        if (!burnerAddress) return;
+
+        const handleMessage = async (data: WebSocketMessage) => {
+            if (data.type === 'accountUpdate') {
+                // Wait for transaction to finalize, then refresh
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                fetchTransactionHistory();
+            }
+        };
+
+        webSocketClient.onMessage(handleMessage);
+        return () => webSocketClient.offMessage(handleMessage);
+    }, [burnerAddress, fetchTransactionHistory]);
 
     const getTxLink = (sig: string) => `https://orbmarkets.io/tx/${sig}`;
 
@@ -44,6 +124,10 @@ function TransactionMonitor({ burnerAddress, externalTransactions = [] }: Transa
                     {isConnected ? 'monitoring...' : 'connecting...'}
                 </span>
             </div>
+
+            {isLoading && transactions.length === 0 && (
+                <div className="no-transactions">loading transactions...</div>
+            )}
 
             {transactions.length > 0 && (
                 <div className="transaction-list">
@@ -66,7 +150,7 @@ function TransactionMonitor({ burnerAddress, externalTransactions = [] }: Transa
                 </div>
             )}
 
-            {transactions.length === 0 && (
+            {!isLoading && transactions.length === 0 && (
                 <div className="no-transactions">no transactions yet</div>
             )}
         </div>
