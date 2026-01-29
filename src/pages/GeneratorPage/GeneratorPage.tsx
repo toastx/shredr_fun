@@ -5,7 +5,7 @@ import { Connection, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { shredrClient, webSocketClient } from "../../lib";
 import { MASTER_MESSAGE, HELIUS_RPC_URL, SWEEP_THRESHOLD_LAMPORTS } from "../../lib/constants";
 import type { WebSocketMessage } from "../../lib/types";
-import type { PendingTransaction } from "../../lib/ShredrClient";
+import type { PendingTransaction, SigningMode } from "../../lib/ShredrClient";
 import AddressDisplay from "../../components/AddressDisplay";
 import { TransactionMonitor } from "../../components/TransactionMonitor";
 import { TransactionApprovalModal } from "../../components/TransactionApprovalModal";
@@ -36,6 +36,7 @@ function GeneratorPage() {
     const [pendingTransaction, setPendingTransaction] = useState<PendingTransaction | null>(null);
     const [isShielding, setIsShielding] = useState(false);
     const [copied, setCopied] = useState(false);
+    const [isAutoMode, setIsAutoMode] = useState(true);
 
     // Refs
     const hasTriggeredSweep = useRef<boolean>(false);
@@ -221,6 +222,12 @@ function GeneratorPage() {
         hasTriggeredSweep.current = false;
     }, []);
 
+    const handleModeToggle = useCallback(() => {
+        const newMode: SigningMode = isAutoMode ? "manual" : "auto";
+        setIsAutoMode(!isAutoMode);
+        shredrClient.setSigningMode(newMode);
+    }, [isAutoMode]);
+
     // ============ RENDER ============
 
     const renderContent = () => {
@@ -257,8 +264,21 @@ function GeneratorPage() {
             case "monitoring":
                 return (
                     <div className="results-section">
+                        <div className="results-header">
+                            <span className="results-title">burner address</span>
+                            <label className="mode-toggle">
+                                <input
+                                    type="checkbox"
+                                    checked={isAutoMode}
+                                    onChange={handleModeToggle}
+                                />
+                                <span className="toggle-slider"></span>
+                                <span className="toggle-label">{isAutoMode ? "auto" : "manual"}</span>
+                            </label>
+                        </div>
+
                         <AddressDisplay
-                            label="burner address"
+                            label=""
                             value={burnerAddress || ""}
                             placeholder=""
                             isCopied={copied}
