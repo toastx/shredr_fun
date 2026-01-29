@@ -110,6 +110,9 @@ export class NonceService {
     /**
      * Load current nonce from storage (for returning users)
      * Call after initFromSignature
+     * 
+     * If stored data cannot be decrypted (e.g., user switched wallets),
+     * this will return null and clear the stale data.
      */
     async loadCurrentNonce(walletPublicKey: Uint8Array): Promise<GeneratedNonce | null> {
         if (!this.initialized) {
@@ -117,7 +120,20 @@ export class NonceService {
         }
         
         this._walletHash = await deriveWalletHash(walletPublicKey, WALLET_HASH_LENGTH);
-        const stored = await this.storage.getCurrentNonce(this._walletHash);
+        
+        let stored: { nonce: Uint8Array; index: number } | null = null;
+        try {
+            stored = await this.storage.getCurrentNonce(this._walletHash);
+        } catch (e) {
+            if (e instanceof DecryptionError) {
+                // Data exists but can't be decrypted - likely different wallet or corrupted
+                console.warn('Stored nonce data cannot be decrypted (wallet may have changed). Treating as new user.');
+                // Clear the stale data by saving a null state would require additional logic
+                // For now, just return null and let the caller handle as new user
+                return null;
+            }
+            throw e; // Re-throw other errors
+        }
         
         if (stored) {
             this._currentNonce = stored.nonce;

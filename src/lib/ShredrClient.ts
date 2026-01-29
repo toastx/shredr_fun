@@ -379,10 +379,11 @@ export class ShredrClient {
 
     if (this._signingMode === "auto") {
       // Auto mode - sweep immediately
+      // Use trustBalance since we got the balance from WebSocket
       console.log(
         `Auto-sweep triggered: ${balanceLamports / LAMPORTS_PER_SOL} SOL`,
       );
-      const sweepSig = await this.executeSweep(balanceLamports);
+      const sweepSig = await this.executeSweep(balanceLamports, undefined, true);
       return { needsApproval: false, sweepSignature: sweepSig };
     } else {
       // Manual mode - return for approval
@@ -413,11 +414,13 @@ export class ShredrClient {
    *
    * @param amountInLamports - Amount to sweep in lamports
    * @param rpcUrl - Optional Solana RPC URL
+   * @param trustBalance - If true, skip RPC balance verification (use when WebSocket already confirmed balance)
    * @returns The internal transfer signature
    */
   async executeSweep(
     amountInLamports: number,
     rpcUrl?: string,
+    trustBalance: boolean = false,
   ): Promise<string> {
     if (!this._initialized || !this._currentBurner) {
       throw new Error("ShredrClient not initialized");
@@ -430,18 +433,26 @@ export class ShredrClient {
     const shadowWireClient = new ShadowWireClient(rpcUrl);
     const burnerKeypair = Keypair.fromSecretKey(this._currentBurner.secretKey);
     shadowWireClient.setKeypair(burnerKeypair);
+    
+    console.log(`Sweep: Using burner address ${this._currentBurner.address}`);
 
-    // Check wallet balance before attempting transfer
-    const walletBalance = await shadowWireClient.getWalletBalance();
-    console.log(`Wallet balance: ${walletBalance} lamports`);
-
-    // Ensure we leave enough for deposit fees
-    const maxSweepable = walletBalance - SWEEP_FEE_BUFFER_LAMPORTS;
-    const amountToDeposit = Math.min(amountInLamports, maxSweepable);
+    let amountToDeposit: number;
+    
+    if (trustBalance) {
+      // Trust the caller's balance (from WebSocket) - just subtract fee buffer
+      amountToDeposit = amountInLamports - SWEEP_FEE_BUFFER_LAMPORTS;
+      console.log(`Sweep: Trusting WebSocket balance: ${amountInLamports}, depositing: ${amountToDeposit}`);
+    } else {
+      // Verify with RPC (may have propagation delay)
+      const walletBalance = await shadowWireClient.getWalletBalance();
+      console.log(`Sweep: RPC wallet balance: ${walletBalance} lamports`);
+      const maxSweepable = walletBalance - SWEEP_FEE_BUFFER_LAMPORTS;
+      amountToDeposit = Math.min(amountInLamports, maxSweepable);
+    }
 
     if (amountToDeposit <= 0) {
       throw new Error(
-        `Insufficient funds after fees: wallet has ${walletBalance}, need > ${SWEEP_FEE_BUFFER_LAMPORTS}`,
+        `Insufficient funds after fees: need > ${SWEEP_FEE_BUFFER_LAMPORTS} lamports`,
       );
     }
 
@@ -457,11 +468,31 @@ export class ShredrClient {
     console.log(`Sweep: Deposit successful: ${depositSig}`);
     console.log(`Sweep: User Balance PDA: ${userBalancePda}`);
 
-    // Step 2: Query actual pool balance (may differ due to fees)
+    // Wait for PDA initialization on first deposit
+    console.log(`Sweep: Waiting for PDA initialization...`);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Step 2: Query pool balance with retry (PDA may take time to reflect)
     console.log(`Sweep Step 2: Checking pool balance after deposit...`);
-    const poolBalance = await shadowWireClient.getBalance();
-    const actualPoolBalanceSol = poolBalance.available;
-    console.log(`Sweep: Actual pool balance: ${actualPoolBalanceSol} SOL`);
+    
+    const MAX_BALANCE_RETRIES = 3;
+    const BALANCE_RETRY_DELAY = 2000;
+    let actualPoolBalanceSol = 0;
+    
+    for (let attempt = 1; attempt <= MAX_BALANCE_RETRIES; attempt++) {
+      const poolBalance = await shadowWireClient.getBalance();
+      actualPoolBalanceSol = poolBalance.available;
+      console.log(`Sweep: Pool balance check attempt ${attempt}: ${actualPoolBalanceSol} SOL`);
+      
+      if (actualPoolBalanceSol > 0) {
+        break;
+      }
+      
+      if (attempt < MAX_BALANCE_RETRIES) {
+        console.log(`Sweep: Balance is 0, retrying in ${BALANCE_RETRY_DELAY}ms...`);
+        await new Promise(resolve => setTimeout(resolve, BALANCE_RETRY_DELAY));
+      }
+    }
 
     if (actualPoolBalanceSol <= 0) {
       throw new Error(
@@ -469,26 +500,51 @@ export class ShredrClient {
       );
     }
 
-    // Step 3: Internal transfer FULL pool balance to shadowwire address (burner[0])
+    // Step 3: Internal transfer with retry logic
     console.log(
       `Sweep Step 3: Transferring ${actualPoolBalanceSol} SOL internally to Shadowire Address: ${shadowireAddress}...`,
     );
 
-    let transferSig: string;
-    try {
-      transferSig = await shadowWireClient.transferInternal(
-        shadowireAddress,
-        actualPoolBalanceSol,
-      );
-      console.log(`Sweep: Internal transfer successful: ${transferSig}`);
-    } catch (err) {
-      // Internal transfer failed - save state for recovery
-      console.error("Sweep: Internal transfer failed!", err);
+    const MAX_TRANSFER_RETRIES = 3;
+    const TRANSFER_RETRY_DELAY = 3000;
+    let transferSig: string | null = null;
+    let lastError: Error | null = null;
+    
+    for (let attempt = 1; attempt <= MAX_TRANSFER_RETRIES; attempt++) {
+      try {
+        console.log(`Sweep: Internal transfer attempt ${attempt}...`);
+        
+        // Re-check pool balance before each attempt (it may have updated)
+        if (attempt > 1) {
+          const freshBalance = await shadowWireClient.getBalance();
+          if (freshBalance.available > 0) {
+            actualPoolBalanceSol = freshBalance.available;
+            console.log(`Sweep: Fresh pool balance: ${actualPoolBalanceSol} SOL`);
+          }
+        }
+        
+        transferSig = await shadowWireClient.transferInternal(
+          shadowireAddress,
+          actualPoolBalanceSol,
+        );
+        console.log(`Sweep: Internal transfer successful: ${transferSig}`);
+        break; // Success!
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        console.error(`Sweep: Internal transfer attempt ${attempt} failed:`, lastError.message);
+        
+        if (attempt < MAX_TRANSFER_RETRIES) {
+          console.log(`Sweep: Retrying in ${TRANSFER_RETRY_DELAY}ms...`);
+          await new Promise(resolve => setTimeout(resolve, TRANSFER_RETRY_DELAY));
+        }
+      }
+    }
+    
+    if (!transferSig) {
+      // All retries failed - save state for manual recovery
+      console.error("Sweep: All internal transfer attempts failed!");
       console.log(
         `Recovery: Funds deposited but not transferred. Pool has ${actualPoolBalanceSol} SOL.`,
-      );
-      console.log(
-        `Recovery: Call recoverPendingSweep() to retry the internal transfer.`,
       );
 
       // Store pending sweep info for recovery
@@ -500,7 +556,7 @@ export class ShredrClient {
       };
 
       throw new Error(
-        `Internal transfer failed. Call recoverPendingSweep() to retry. Error: ${err instanceof Error ? err.message : String(err)}`,
+        `Internal transfer failed after ${MAX_TRANSFER_RETRIES} attempts. Funds are safe in pool. Error: ${lastError?.message}`,
       );
     }
 
