@@ -109,14 +109,18 @@ export class ShadowWireClient {
     const transferTx = await this.sdk.transferWithClientProofs({
       sender: this.keypair.publicKey.toBase58(),
       recipient: recipientAddress,
-      amount: TokenUtils.toSmallestUnit(amountInSol, "SOL"),
+      amount: amountInSol, // SDK expects SOL, not lamports
       token: "SOL",
       type: "internal",
       customProof: proof,
       wallet: { signMessage },
     });
 
-    if (!transferTx.success) throw new Error("Transfer transaction failed");
+    if (!transferTx.success) {
+      const errorMsg = ((transferTx as unknown) as { error?: string }).error || "Transfer transaction failed";
+      console.error("Internal transfer failed:", errorMsg);
+      throw new Error(errorMsg);
+    }
 
     console.log("Internal transfer completed");
     console.log("Transaction signature:", transferTx.tx_signature);
@@ -145,14 +149,18 @@ export class ShadowWireClient {
     const transferTx = await this.sdk.transferWithClientProofs({
       sender: this.keypair.publicKey.toBase58(),
       recipient: recipientAddress,
-      amount: TokenUtils.toSmallestUnit(amountInSol, "SOL"),
+      amount: amountInSol, // SDK expects SOL, not lamports
       token: "SOL",
       type: "external",
       customProof: proof,
       wallet: { signMessage },
     });
 
-    if (!transferTx.success) throw new Error("Transfer transaction failed");
+    if (!transferTx.success) {
+      const errorMsg = ((transferTx as unknown) as { error?: string }).error || "Transfer transaction failed";
+      console.error("External transfer failed:", errorMsg);
+      throw new Error(errorMsg);
+    }
 
     console.log("External transfer completed");
     console.log("Transaction signature:", transferTx.tx_signature);
