@@ -94,6 +94,28 @@ function GeneratorPage() {
             }
         } catch (err) {
             console.error("Sweep failed:", err);
+            
+            // Check if this was an internal transfer failure (recoverable)
+            if (shredrClient.hasPendingSweep) {
+                console.log("Attempting recovery of pending sweep...");
+                try {
+                    const recoverySig = await shredrClient.recoverPendingSweep();
+                    console.log("Recovery successful:", recoverySig);
+                    
+                    // Rotate to new burner after successful recovery
+                    const newAddress = shredrClient.currentBurnerAddress;
+                    if (newAddress && newAddress !== burnerAddressRef.current) {
+                        setBurnerAddress(newAddress);
+                        webSocketClient.subscribeToAccount(newAddress);
+                        await refreshBalance(newAddress);
+                    }
+                } catch (recoveryErr) {
+                    console.error("Recovery also failed:", recoveryErr);
+                    setError(`Sweep recovery failed. Your funds are safe in the pool. Try again later.`);
+                }
+            } else {
+                setError(err instanceof Error ? err.message : "Sweep failed");
+            }
         }
         setIsShielding(false);
         hasTriggeredSweep.current = false;
@@ -151,8 +173,32 @@ function GeneratorPage() {
                 // Subscribe to account updates (auto-connects WebSocket)
                 webSocketClient.subscribeToAccount(address);
 
+                // Check for any pending pool balance that wasn't transferred
+                // (e.g., from a previous failed internal transfer)
+                const pendingCheck = await shredrClient.checkPendingPoolBalance();
+                if (pendingCheck.hasPending) {
+                    console.log(`Found ${pendingCheck.poolBalanceSol} SOL in pool - completing transfer...`);
+                    setIsShielding(true);
+                    try {
+                        const transferSig = await shredrClient.completePendingPoolTransfer();
+                        if (transferSig) {
+                            console.log("Pending pool transfer completed:", transferSig);
+                            // Update to new burner after rotation
+                            const newAddress = shredrClient.currentBurnerAddress;
+                            if (newAddress) {
+                                setBurnerAddress(newAddress);
+                                webSocketClient.subscribeToAccount(newAddress);
+                            }
+                        }
+                    } catch (pendingErr) {
+                        console.error("Failed to complete pending transfer:", pendingErr);
+                        setError(`Pending transfer failed: ${pendingErr instanceof Error ? pendingErr.message : String(pendingErr)}`);
+                    }
+                    setIsShielding(false);
+                }
+
                 // Fetch initial balance and check for sweep
-                const lamports = await refreshBalance(address);
+                const lamports = await refreshBalance(shredrClient.currentBurnerAddress || address);
                 if (lamports >= SWEEP_THRESHOLD_LAMPORTS) {
                     handleBalanceUpdate(lamports);
                 }
