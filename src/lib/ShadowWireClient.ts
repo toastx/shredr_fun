@@ -70,12 +70,19 @@ export class ShadowWireClient {
     const signature = await this.connection.sendRawTransaction(tx.serialize());
     console.log("Transaction sent:", signature);
 
-    await this.connection.confirmTransaction({
-      signature,
-      blockhash,
-      lastValidBlockHeight,
-    });
-    console.log("Deposit confirmed!");
+    try {
+      await this.connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+      console.log("Deposit confirmed!");
+    } catch (e: any) {
+      if (e.logs) {
+        console.error("Transaction failed. Logs:", e.logs);
+      }
+      throw e;
+    }
 
     return {
       signature,
@@ -194,12 +201,19 @@ export class ShadowWireClient {
     const signature = await this.connection.sendRawTransaction(tx.serialize());
     console.log("Withdraw transaction sent:", signature);
 
-    await this.connection.confirmTransaction({
-      signature,
-      blockhash,
-      lastValidBlockHeight,
-    });
-    console.log("Withdraw confirmed!");
+    try {
+      await this.connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      });
+      console.log("Withdraw confirmed!");
+    } catch (e: any) {
+      if (e.logs) {
+        console.error("Withdraw failed. Logs:", e.logs);
+      }
+      throw e;
+    }
 
     return signature;
   }
