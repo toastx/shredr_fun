@@ -206,11 +206,14 @@ function GeneratorPage() {
                 // Listen for account updates
                 webSocketClient.onMessage(async (data: WebSocketMessage) => {
                     if (data.type === "accountUpdate") {
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        const currentAddress = burnerAddressRef.current;
-                        if (currentAddress) {
-                            const newLamports = await refreshBalance(currentAddress);
-                            handleBalanceUpdate(newLamports);
+                        // Use lamports directly from WebSocket message
+                        const lamportsFromWs = (data as { lamports?: number }).lamports;
+                        if (typeof lamportsFromWs === "number" && lamportsFromWs > 0) {
+                            console.log(`WebSocket balance update: ${lamportsFromWs} lamports`);
+                            // Update UI balance
+                            setBurnerBalance(lamportsFromWs / LAMPORTS_PER_SOL);
+                            // Trigger sweep if above threshold
+                            handleBalanceUpdate(lamportsFromWs);
                         }
                     }
                 });

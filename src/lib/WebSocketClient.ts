@@ -59,13 +59,14 @@ export class WebSocketClient {
                         const accountUpdateMessage = {
                             type: 'accountUpdate',
                             lamports: accountInfo.lamports,
-                            account: data.params.result.context.slot // or whatever identifier
+                            account: data.params.result.context.slot
                         };
                         this.messageHandlers.forEach(h => h(accountUpdateMessage));
                     }
+                    return; // Don't broadcast raw Solana data
                 }
 
-                // Broadcast to all registered handlers
+                // Broadcast other messages to all registered handlers
                 this.messageHandlers.forEach(h => h(data));
             } catch (e) {
                 console.error('WS Parse Error:', e);
