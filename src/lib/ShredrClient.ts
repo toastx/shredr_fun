@@ -272,6 +272,82 @@ export class ShredrClient {
     this._currentBurner = await burnerService.deriveBurnerFromNonce(newNonce);
     return this._currentBurner;
   }
+
+  // ============ PENDING POOL TRANSFER RECOVERY ============
+
+  /**
+   * Check if the current burner has funds in the ShadowWire pool that haven't
+   * been transferred to burner[0] yet. This can happen if:
+   * - A previous deposit succeeded but internal transfer failed
+   * - The user disconnected/refreshed mid-sweep
+   * 
+   * @param rpcUrl - Optional Solana RPC URL
+   * @returns Object with hasPending flag and balance info
+   */
+  async checkPendingPoolBalance(rpcUrl?: string): Promise<{
+    hasPending: boolean;
+    poolBalanceSol: number;
+    poolBalanceLamports: number;
+  }> {
+    if (!this._initialized || !this._currentBurner) {
+      return { hasPending: false, poolBalanceSol: 0, poolBalanceLamports: 0 };
+    }
+
+    const client = new ShadowWireClient(rpcUrl);
+    const balance = await client.getBalanceForAddress(this._currentBurner.address);
+
+    return {
+      hasPending: balance.available > 0,
+      poolBalanceSol: balance.available,
+      poolBalanceLamports: balance.availableLamports,
+    };
+  }
+
+  /**
+   * Complete a pending pool transfer - transfers any funds in the current
+   * burner's pool to burner[0] (Shadowire Address).
+   * 
+   * @param rpcUrl - Optional Solana RPC URL
+   * @returns The internal transfer signature, or null if no funds to transfer
+   */
+  async completePendingPoolTransfer(rpcUrl?: string): Promise<string | null> {
+    if (!this._initialized || !this._currentBurner) {
+      throw new Error("ShredrClient not initialized");
+    }
+    if (!this._shadowireBurner) {
+      throw new Error("Shadowire burner not available");
+    }
+
+    // Check pool balance
+    const { hasPending, poolBalanceSol } = await this.checkPendingPoolBalance(rpcUrl);
+
+    if (!hasPending || poolBalanceSol <= 0) {
+      console.log("No pending pool balance to transfer");
+      return null;
+    }
+
+    console.log(`Found ${poolBalanceSol} SOL in burner pool - completing transfer...`);
+
+    // Create client with current burner
+    const shadowWireClient = new ShadowWireClient(rpcUrl);
+    const burnerKeypair = Keypair.fromSecretKey(this._currentBurner.secretKey);
+    shadowWireClient.setKeypair(burnerKeypair);
+
+    // Transfer to burner[0]
+    const shadowireAddress = this._shadowireBurner.address;
+    console.log(`Transferring ${poolBalanceSol} SOL to Shadowire Address: ${shadowireAddress}...`);
+
+    const transferSig = await shadowWireClient.transferInternal(
+      shadowireAddress,
+      poolBalanceSol,
+    );
+    console.log(`Pool transfer completed: ${transferSig}`);
+
+    // Rotate to new burner after successful transfer
+    await this.consumeAndGenerateNew();
+
+    return transferSig;
+  }
   // ============ TRANSACTION HANDLING ============
 
   /**
@@ -329,6 +405,12 @@ export class ShredrClient {
   /**
    * Execute sweep by transferring internally to the shadowwire burner address (burner[0])
    *
+   * Flow:
+   * 1. Deposit public SOL into ShadowWire pool
+   * 2. Query actual pool balance (accounts for tx fees)
+   * 3. Internal transfer FULL pool balance to burner[0]
+   * 4. Rotate to new burner
+   *
    * @param amountInLamports - Amount to sweep in lamports
    * @param rpcUrl - Optional Solana RPC URL
    * @returns The internal transfer signature
@@ -344,9 +426,6 @@ export class ShredrClient {
       throw new Error("Shadowire burner not available");
     }
 
-    // Convert lamports to SOL
-    const amountInSol = amountInLamports / LAMPORTS_PER_SOL;
-
     // Create ShadowWire client with the current burner's keypair
     const shadowWireClient = new ShadowWireClient(rpcUrl);
     const burnerKeypair = Keypair.fromSecretKey(this._currentBurner.secretKey);
@@ -356,40 +435,160 @@ export class ShredrClient {
     const walletBalance = await shadowWireClient.getWalletBalance();
     console.log(`Wallet balance: ${walletBalance} lamports`);
 
-    // Ensure we leave enough for fees
+    // Ensure we leave enough for deposit fees
     const maxSweepable = walletBalance - SWEEP_FEE_BUFFER_LAMPORTS;
-    const amountToSweep = Math.min(amountInLamports, maxSweepable);
+    const amountToDeposit = Math.min(amountInLamports, maxSweepable);
 
-    if (amountToSweep <= 0) {
+    if (amountToDeposit <= 0) {
       throw new Error(
         `Insufficient funds after fees: wallet has ${walletBalance}, need > ${SWEEP_FEE_BUFFER_LAMPORTS}`,
       );
     }
 
-    const amountToSweepSol = amountToSweep / LAMPORTS_PER_SOL;
+    const amountToDepositSol = amountToDeposit / LAMPORTS_PER_SOL;
+    const shadowireAddress = this._shadowireBurner.address;
 
     // Step 1: Deposit funds into ShadowWire pool (shielding)
     console.log(
-      `Sweep: Depositing ${amountToSweepSol} SOL into ShadowWire pool...`,
+      `Sweep Step 1: Depositing ${amountToDepositSol} SOL into ShadowWire pool...`,
     );
     const { signature: depositSig, userBalancePda } =
-      await shadowWireClient.deposit(amountToSweepSol);
+      await shadowWireClient.deposit(amountToDepositSol);
     console.log(`Sweep: Deposit successful: ${depositSig}`);
     console.log(`Sweep: User Balance PDA: ${userBalancePda}`);
 
-    // Step 2: Internal transfer to shadowwire burner address (burner[0])
-    // This hides the amount and sender
+    // Step 2: Query actual pool balance (may differ due to fees)
+    console.log(`Sweep Step 2: Checking pool balance after deposit...`);
+    const poolBalance = await shadowWireClient.getBalance();
+    const actualPoolBalanceSol = poolBalance.available;
+    console.log(`Sweep: Actual pool balance: ${actualPoolBalanceSol} SOL`);
+
+    if (actualPoolBalanceSol <= 0) {
+      throw new Error(
+        `Pool balance is 0 after deposit. Deposit may have failed or fees consumed everything.`,
+      );
+    }
+
+    // Step 3: Internal transfer FULL pool balance to shadowwire address (burner[0])
+    console.log(
+      `Sweep Step 3: Transferring ${actualPoolBalanceSol} SOL internally to Shadowire Address: ${shadowireAddress}...`,
+    );
+
+    let transferSig: string;
+    try {
+      transferSig = await shadowWireClient.transferInternal(
+        shadowireAddress,
+        actualPoolBalanceSol,
+      );
+      console.log(`Sweep: Internal transfer successful: ${transferSig}`);
+    } catch (err) {
+      // Internal transfer failed - save state for recovery
+      console.error("Sweep: Internal transfer failed!", err);
+      console.log(
+        `Recovery: Funds deposited but not transferred. Pool has ${actualPoolBalanceSol} SOL.`,
+      );
+      console.log(
+        `Recovery: Call recoverPendingSweep() to retry the internal transfer.`,
+      );
+
+      // Store pending sweep info for recovery
+      this._pendingSweep = {
+        burnerAddress: this._currentBurner.address,
+        burnerSecretKey: this._currentBurner.secretKey,
+        poolBalance: actualPoolBalanceSol,
+        timestamp: Date.now(),
+      };
+
+      throw new Error(
+        `Internal transfer failed. Call recoverPendingSweep() to retry. Error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // Clear any pending sweep state since we succeeded
+    this._pendingSweep = null;
+
+    // Step 4: Rotate nonce/burner after successful sweep
+    await this.consumeAndGenerateNew();
+
+    return transferSig;
+  }
+
+  // Pending sweep state for recovery
+  private _pendingSweep: {
+    burnerAddress: string;
+    burnerSecretKey: Uint8Array;
+    poolBalance: number;
+    timestamp: number;
+  } | null = null;
+
+  /**
+   * Check if there's a pending sweep that needs recovery
+   */
+  get hasPendingSweep(): boolean {
+    return this._pendingSweep !== null;
+  }
+
+  /**
+   * Get info about pending sweep (if any)
+   */
+  get pendingSweepInfo(): {
+    burnerAddress: string;
+    poolBalance: number;
+    timestamp: number;
+  } | null {
+    if (!this._pendingSweep) return null;
+    return {
+      burnerAddress: this._pendingSweep.burnerAddress,
+      poolBalance: this._pendingSweep.poolBalance,
+      timestamp: this._pendingSweep.timestamp,
+    };
+  }
+
+  /**
+   * Recover a pending sweep by retrying the internal transfer
+   * Use this after executeSweep failed at the internal transfer step
+   */
+  async recoverPendingSweep(rpcUrl?: string): Promise<string> {
+    if (!this._pendingSweep) {
+      throw new Error("No pending sweep to recover");
+    }
+    if (!this._shadowireBurner) {
+      throw new Error("Shadowire burner not available");
+    }
+
+    console.log(`Recovery: Attempting to recover sweep...`);
+
+    // Create client with the saved burner keypair
+    const shadowWireClient = new ShadowWireClient(rpcUrl);
+    const burnerKeypair = Keypair.fromSecretKey(this._pendingSweep.burnerSecretKey);
+    shadowWireClient.setKeypair(burnerKeypair);
+
+    // Check current pool balance (it may have changed)
+    const poolBalance = await shadowWireClient.getBalance();
+    const currentPoolBalanceSol = poolBalance.available;
+    console.log(`Recovery: Current pool balance: ${currentPoolBalanceSol} SOL`);
+
+    if (currentPoolBalanceSol <= 0) {
+      this._pendingSweep = null;
+      throw new Error("Pool balance is 0 - nothing to recover");
+    }
+
+    // Retry internal transfer
     const shadowireAddress = this._shadowireBurner.address;
     console.log(
-      `Sweep: Transferring internally to Shadowire Address: ${shadowireAddress}...`,
+      `Recovery: Retrying internal transfer of ${currentPoolBalanceSol} SOL to ${shadowireAddress}...`,
     );
+
     const transferSig = await shadowWireClient.transferInternal(
       shadowireAddress,
-      amountToSweepSol,
+      currentPoolBalanceSol,
     );
-    console.log(`Sweep: Internal transfer successful: ${transferSig}`);
+    console.log(`Recovery: Internal transfer successful: ${transferSig}`);
 
-    // Rotate nonce/burner after successful sweep
+    // Clear pending state
+    this._pendingSweep = null;
+
+    // Rotate nonce/burner
     await this.consumeAndGenerateNew();
 
     return transferSig;
@@ -500,6 +699,7 @@ export class ShredrClient {
     this._shadowireBurner = null;
     this._walletPubkey = null;
     this._currentBlobId = null;
+    this._pendingSweep = null;
   }
 }
 // ============ SINGLETON EXPORT ============
