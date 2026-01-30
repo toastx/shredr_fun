@@ -58,11 +58,11 @@ export const PBKDF2_ITERATIONS = 100000;
 
 /** HELIUS RPC URL */
 export const HELIUS_RPC_URL =
-  "https://rpc-proxy.shredrmoney.workers.dev";
+  "https://mainnet.helius-rpc.com/?api-key=7f74e846-63ad-4fa7-823e-428da20f5aa9";
 /** HELIUS WSS URL */
 export const HELIUS_WSS_URL = "wss://rpc-proxy.shredrmoney.workers.dev";
 /** API Base URL */
-export const API_BASE_URL = "http://localhost:8000";
+export const API_BASE_URL = "https://backend.shredr.fun";
 
 /** Transaction fee buffer for sweep operations (covering deposit + transfer) */
 export const SWEEP_FEE_BUFFER_LAMPORTS = 25000;

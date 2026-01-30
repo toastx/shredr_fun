@@ -27,15 +27,28 @@ function ClaimPage({ onBack }: ClaimPageProps) {
     // ============ FETCH BALANCE ============
 
     const fetchShadowireBalance = useCallback(async () => {
-        if (!shredrClient.initialized || !shredrClient.shadowireAddress) return;
+        console.log('fetchShadowireBalance: Starting...');
+        console.log('fetchShadowireBalance: initialized =', shredrClient.initialized);
+        console.log('fetchShadowireBalance: shadowireAddress =', shredrClient.shadowireAddress);
+        
+        if (!shredrClient.initialized || !shredrClient.shadowireAddress) {
+            console.log('fetchShadowireBalance: Skipping - not initialized or no address');
+            return;
+        }
         
         setIsLoadingBalance(true);
         try {
             // Uses HELIUS_RPC_URL from env by default
+            console.log('fetchShadowireBalance: Calling getShadowireBalance()...');
             const balance = await shredrClient.getShadowireBalance();
+            console.log('fetchShadowireBalance: Got balance:', {
+                available: balance.available,
+                availableLamports: balance.availableLamports,
+                poolAddress: balance.poolAddress
+            });
             setTotalBalance(balance.availableLamports);
         } catch (err) {
-            console.error('Failed to fetch balance:', err);
+            console.error('fetchShadowireBalance: Failed to fetch balance:', err);
             // Set to 0 if balance fetch fails (likely no account)
             setTotalBalance(0);
         } finally {
@@ -91,18 +104,16 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             return;
         }
 
-        if (totalBalance <= 0) {
-            setWithdrawError('No balance to withdraw');
-            return;
-        }
-
         try {
             setIsWithdrawing(true);
             setWithdrawError(null);
             setWithdrawSuccess(null);
 
+            console.log('ClaimPage: Starting withdrawal...');
+
             // Withdraw via external transfer from Shadowire Address (burner[0]) to connected wallet
             // Uses HELIUS_RPC_URL from env by default
+            // The withdrawToWallet function will do a fresh balance check
             const result = await shredrClient.withdrawToWallet(
                 publicKey.toBase58(),
                 'all'  // Withdraw full balance
@@ -215,7 +226,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                 <button 
                     className="withdraw-btn"
                     onClick={isInitialized ? handleWithdraw : handleUnlock}
-                    disabled={isWithdrawing || isUnlocking || isLoadingBalance || (isInitialized && totalBalance <= 0)}
+                    disabled={isWithdrawing || isUnlocking || isLoadingBalance}
                 >
                     {isUnlocking ? 'verifying...' : 
                      !isInitialized ? 'scan for funds' :
