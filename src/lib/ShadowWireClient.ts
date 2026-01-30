@@ -227,16 +227,22 @@ export class ShadowWireClient {
   }> {
     if (!this.keypair) throw new Error("Keypair not set");
 
-    const balance = await this.sdk.getBalance(
-      this.keypair.publicKey.toBase58(),
-      "SOL",
-    );
+    const address = this.keypair.publicKey.toBase58();
+    console.log(`ShadowWireClient.getBalance: Querying for address: ${address}`);
 
-    return {
+    const balance = await this.sdk.getBalance(address, "SOL");
+    
+    console.log(`ShadowWireClient.getBalance: SDK raw response:`, balance);
+
+    const result = {
       available: TokenUtils.fromSmallestUnit(balance.available, "SOL"),
       availableLamports: balance.available,
       poolAddress: balance.pool_address,
     };
+    
+    console.log(`ShadowWireClient.getBalance: Converted result:`, result);
+
+    return result;
   }
 
   /**
@@ -249,13 +255,21 @@ export class ShadowWireClient {
     availableLamports: number;
     poolAddress: string;
   }> {
+    console.log(`ShadowWireClient.getBalanceForAddress: Querying for address: ${walletAddress}`);
+    
     const balance = await this.sdk.getBalance(walletAddress, "SOL");
+    
+    console.log(`ShadowWireClient.getBalanceForAddress: SDK raw response:`, balance);
 
-    return {
+    const result = {
       available: TokenUtils.fromSmallestUnit(balance.available, "SOL"),
       availableLamports: balance.available,
       poolAddress: balance.pool_address,
     };
+    
+    console.log(`ShadowWireClient.getBalanceForAddress: Converted result:`, result);
+
+    return result;
   }
 
   /**

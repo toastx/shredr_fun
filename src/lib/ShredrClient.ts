@@ -701,9 +701,19 @@ export class ShredrClient {
       );
     }
 
+    console.log(`getShadowireBalance: Querying balance for address: ${this._shadowireBurner.address}`);
+    
     // Create a temporary ShadowWire client to check balance
     const client = new ShadowWireClient(rpcUrl);
-    return client.getBalanceForAddress(this._shadowireBurner.address);
+    const balance = await client.getBalanceForAddress(this._shadowireBurner.address);
+    
+    console.log(`getShadowireBalance: Result:`, {
+      available: balance.available,
+      availableLamports: balance.availableLamports,
+      poolAddress: balance.poolAddress
+    });
+    
+    return balance;
   }
 
   /**
@@ -741,19 +751,23 @@ export class ShredrClient {
     // Create ShadowWire client with the burner keypair
     const client = new ShadowWireClient(rpcUrl);
     const keypair = Keypair.fromSecretKey(this._shadowireBurner.secretKey);
-    client.setKeypair(keypair);
-
-    // Get balance if withdrawing all
+    
+    // Get balance if withdrawing all (check BEFORE setting keypair to be consistent with UI)
     let withdrawAmount: number;
     if (amountInSol === "all") {
-      const balance = await client.getBalance();
+      const balance = await client.getBalanceForAddress(this._shadowireBurner.address);
+      console.log(`Withdraw: Shadowire balance check: ${balance.available} SOL (${balance.availableLamports} lamports)`);
       if (balance.available <= 0) {
-        throw new Error("No balance to withdraw");
+        throw new Error(`No balance to withdraw from Shadowire pool. Pool balance: ${balance.availableLamports} lamports`);
       }
       withdrawAmount = balance.available;
     } else {
       withdrawAmount = amountInSol;
     }
+    
+    // Set keypair for the actual transfer
+    client.setKeypair(keypair);
+    console.log(`Withdraw: Using keypair ${keypair.publicKey.toString()}`)
 
     // Perform external transfer from burner[0] to destination
     const signature = await client.transferExternal(
