@@ -42,6 +42,7 @@ function GeneratorPage() {
     const hasTriggeredSweep = useRef<boolean>(false);
     const copiedTimeout = useRef<NodeJS.Timeout | null>(null);
     const burnerAddressRef = useRef<string | null>(null);
+    const wsMessageHandlerRef = useRef<((data: WebSocketMessage) => void) | null>(null);
 
     // Sync ref with state
     useEffect(() => {
@@ -130,12 +131,32 @@ function GeneratorPage() {
             setCopied(false);
             setError(null);
             setPendingTransaction(null);
-            shredrClient.destroy();
+            // IMPORTANT: Disconnect WebSocket BEFORE destroying client
+            // to prevent any callbacks from firing during cleanup
             webSocketClient.disconnect();
+            shredrClient.destroy();
         } else if (connected && pageState === "disconnected") {
             setPageState("connected");
         }
     }, [connected, pageState]);
+
+    // Cleanup effect for unmount - prevents memory leaks
+    useEffect(() => {
+        return () => {
+            // Clear any pending timeout
+            if (copiedTimeout.current) {
+                clearTimeout(copiedTimeout.current);
+                copiedTimeout.current = null;
+            }
+            // Remove WebSocket message handler
+            if (wsMessageHandlerRef.current) {
+                webSocketClient.offMessage(wsMessageHandlerRef.current);
+                wsMessageHandlerRef.current = null;
+            }
+            // Disconnect WebSocket on unmount
+            webSocketClient.disconnect();
+        };
+    }, []);
 
     // ============ ACTIONS ============
 
@@ -204,19 +225,44 @@ function GeneratorPage() {
                 }
 
                 // Listen for account updates
-                webSocketClient.onMessage(async (data: WebSocketMessage) => {
-                    if (data.type === "accountUpdate") {
-                        // Use lamports directly from WebSocket message
-                        const lamportsFromWs = (data as { lamports?: number }).lamports;
-                        if (typeof lamportsFromWs === "number" && lamportsFromWs > 0) {
-                            console.log(`WebSocket balance update: ${lamportsFromWs} lamports`);
-                            // Update UI balance
-                            setBurnerBalance(lamportsFromWs / LAMPORTS_PER_SOL);
-                            // Trigger sweep if above threshold
-                            handleBalanceUpdate(lamportsFromWs);
-                        }
+                // Store handler ref for cleanup
+                const messageHandler = async (data: WebSocketMessage) => {
+                    // SECURITY: Validate message structure before processing
+                    if (!data || typeof data !== "object") {
+                        console.warn("Invalid WebSocket message: not an object");
+                        return;
                     }
-                });
+                    
+                    if (data.type !== "accountUpdate") {
+                        return; // Skip non-account-update messages
+                    }
+
+                    // Validate lamports value with strict type checking
+                    const lamportsFromWs = (data as { lamports?: unknown }).lamports;
+                    
+                    // SECURITY: Validate lamports is a safe positive integer
+                    if (
+                        typeof lamportsFromWs !== "number" ||
+                        !Number.isFinite(lamportsFromWs) ||
+                        !Number.isSafeInteger(lamportsFromWs) ||
+                        lamportsFromWs < 0
+                    ) {
+                        console.warn("Invalid lamports value from WebSocket:", lamportsFromWs);
+                        return;
+                    }
+
+                    if (lamportsFromWs > 0) {
+                        console.log(`WebSocket balance update: ${lamportsFromWs} lamports`);
+                        // Update UI balance
+                        setBurnerBalance(lamportsFromWs / LAMPORTS_PER_SOL);
+                        // Trigger sweep if above threshold
+                        handleBalanceUpdate(lamportsFromWs);
+                    }
+                };
+                
+                // Store ref for cleanup and register handler
+                wsMessageHandlerRef.current = messageHandler;
+                webSocketClient.onMessage(messageHandler);
             } else {
                 throw new Error("Failed to derive burner address");
             }
