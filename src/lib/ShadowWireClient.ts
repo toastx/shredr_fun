@@ -8,7 +8,19 @@ import {
 import { Connection, Keypair, VersionedTransaction } from "@solana/web3.js";
 import nacl from "tweetnacl";
 import { HELIUS_RPC_URL } from "./constants";
-import {} from "@radr/shadowwire";
+
+// Type for transfer response from SDK (avoids fragile type casting)
+interface TransferResponse {
+  success: boolean;
+  tx_signature: string;
+  amount_hidden?: boolean;
+  error?: string;
+}
+
+// Type for transaction confirmation errors (Solana-specific)
+interface TransactionError extends Error {
+  logs?: string[];
+}
 
 /**
  * ShadowWire wrapper class for Shredr
@@ -77,9 +89,11 @@ export class ShadowWireClient {
         lastValidBlockHeight,
       });
       console.log("Deposit confirmed!");
-    } catch (e: any) {
-      if (e.logs) {
-        console.error("Transaction failed. Logs:", e.logs);
+    } catch (e: unknown) {
+      // SECURITY: Only log transaction logs, not full error object which may contain sensitive data
+      const txError = e as TransactionError;
+      if (txError.logs) {
+        console.error("Transaction failed. Program logs available.");
       }
       throw e;
     }
@@ -104,9 +118,11 @@ export class ShadowWireClient {
     if (!this.keypair) throw new Error("Keypair not set");
 
     // Create signMessage function using tweetnacl
+    // SECURITY: This closure captures keypair reference - ensure keypair is cleared after use
+    const keypairRef = this.keypair;
     const signMessage = async (message: Uint8Array): Promise<Uint8Array> => {
       console.log("signMessage called");
-      const signature = nacl.sign.detached(message, this.keypair!.secretKey);
+      const signature = nacl.sign.detached(message, keypairRef.secretKey);
       return signature;
     };
 
@@ -120,8 +136,9 @@ export class ShadowWireClient {
       wallet: { signMessage },
     });
 
-    if (!transferTx.success) {
-      const errorMsg = ((transferTx as unknown) as { error?: string }).error || "Transfer transaction failed";
+    const txResult = transferTx as TransferResponse;
+    if (!txResult.success) {
+      const errorMsg = txResult.error || "Transfer transaction failed";
       console.error("Internal transfer failed:", errorMsg);
       throw new Error(errorMsg);
     }
@@ -146,9 +163,11 @@ export class ShadowWireClient {
     console.log(`Proof generated for ${amountInLamports} lamports`);
     if (!this.keypair) throw new Error("Keypair not set");
 
+    // SECURITY: This closure captures keypair reference - ensure keypair is cleared after use
+    const keypairRef = this.keypair;
     const signMessage = async (message: Uint8Array): Promise<Uint8Array> => {
       console.log("signMessage called");
-      const signature = nacl.sign.detached(message, this.keypair!.secretKey);
+      const signature = nacl.sign.detached(message, keypairRef.secretKey);
       return signature;
     };
 
@@ -162,8 +181,9 @@ export class ShadowWireClient {
       wallet: { signMessage },
     });
 
-    if (!transferTx.success) {
-      const errorMsg = ((transferTx as unknown) as { error?: string }).error || "Transfer transaction failed";
+    const txResult = transferTx as TransferResponse;
+    if (!txResult.success) {
+      const errorMsg = txResult.error || "Transfer transaction failed";
       console.error("External transfer failed:", errorMsg);
       throw new Error(errorMsg);
     }
@@ -187,6 +207,11 @@ export class ShadowWireClient {
 
     console.log("Withdraw transaction created");
 
+    // Validate SDK response
+    if (!withdrawTx.unsigned_tx_base64) {
+      throw new Error("Withdraw transaction missing unsigned_tx_base64");
+    }
+
     // Deserialize and sign the transaction
     const txBuffer = Buffer.from(withdrawTx.unsigned_tx_base64, "base64");
     const tx = VersionedTransaction.deserialize(txBuffer);
@@ -207,9 +232,11 @@ export class ShadowWireClient {
         lastValidBlockHeight,
       });
       console.log("Withdraw confirmed!");
-    } catch (e: any) {
-      if (e.logs) {
-        console.error("Withdraw failed. Logs:", e.logs);
+    } catch (e: unknown) {
+      // SECURITY: Only log transaction logs, not full error object which may contain sensitive data
+      const txError = e as TransactionError;
+      if (txError.logs) {
+        console.error("Withdraw failed. Program logs available.");
       }
       throw e;
     }
@@ -293,16 +320,39 @@ export class ShadowWireClient {
 
     return this.withdraw(balance.available);
   }
+
+  // Memoized WASM initialization state
+  private static _wasmInitialized = false;
+  private static _wasmInitPromise: Promise<void> | null = null;
+
   /**
-   * Ensure WASM is initialized and supported
+   * Ensure WASM is initialized and supported (memoized for performance)
    */
   private async ensureWASM(): Promise<void> {
+    // Fast path: already initialized
+    if (ShadowWireClient._wasmInitialized) {
+      return;
+    }
+
+    // Check support
     if (!isWASMSupported()) {
       throw new Error(
         "WASM is not supported in this environment. Privacy features (range proofs) require WASM.",
       );
     }
-    await initWASM("/settler_wasm_bg.wasm");
+
+    // Use existing promise if initialization is in progress (prevents race conditions)
+    if (ShadowWireClient._wasmInitPromise) {
+      await ShadowWireClient._wasmInitPromise;
+      return;
+    }
+
+    // Initialize WASM and memoize
+    ShadowWireClient._wasmInitPromise = initWASM("/settler_wasm_bg.wasm").then(() => {
+      ShadowWireClient._wasmInitialized = true;
+    });
+
+    await ShadowWireClient._wasmInitPromise;
   }
 }
 
