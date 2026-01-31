@@ -484,8 +484,11 @@ export class ShredrClient {
           const freshWalletBalance = await shadowWireClient.getWalletBalance();
           depositAmountToUse = freshWalletBalance - SWEEP_FEE_BUFFER_LAMPORTS;
           
+          // Throw immediately if fresh balance is still insufficient
           if (depositAmountToUse <= 0) {
-             throw new Error("Insufficient funds available to even cover the fee buffer.");
+            throw new Error(
+              `Insufficient funds after re-query: wallet has ${freshWalletBalance} lamports, need > ${SWEEP_FEE_BUFFER_LAMPORTS} for fees.`
+            );
           }
         }
 
@@ -539,10 +542,19 @@ export class ShredrClient {
 
     const MAX_TRANSFER_RETRIES = 3;
     const TRANSFER_RETRY_DELAY = 3000;
+    const TRANSFER_TIMEOUT_MS = 30000; // 30 second total timeout
+    const transferStartTime = Date.now();
     let transferSig: string | null = null;
     let lastError: Error | null = null;
     
     for (let attempt = 1; attempt <= MAX_TRANSFER_RETRIES; attempt++) {
+      // Check timeout to prevent infinite waiting
+      if (Date.now() - transferStartTime > TRANSFER_TIMEOUT_MS) {
+        lastError = new Error(`Transfer timeout exceeded (${TRANSFER_TIMEOUT_MS}ms)`);
+        console.error("Sweep: Transfer timeout exceeded");
+        break;
+      }
+      
       try {
         console.log(`Sweep: Internal transfer attempt ${attempt}...`);
         
@@ -552,6 +564,9 @@ export class ShredrClient {
           if (freshBalance.available > 0) {
             actualPoolBalanceSol = freshBalance.available;
             console.log(`Sweep: Fresh pool balance: ${actualPoolBalanceSol} SOL`);
+          } else {
+            // Balance is now 0 - throw early instead of continuing
+            throw new Error("Pool balance is now 0 - cannot proceed with transfer");
           }
         }
         
@@ -579,10 +594,11 @@ export class ShredrClient {
         `Recovery: Funds deposited but not transferred. Pool has ${actualPoolBalanceSol} SOL.`,
       );
 
-      // Store pending sweep info for recovery
+      // Store pending sweep info for recovery (no secret key - use nonce index instead)
+      // SECURITY: We intentionally do NOT store the secret key to minimize exposure
       this._pendingSweep = {
         burnerAddress: this._currentBurner.address,
-        burnerSecretKey: this._currentBurner.secretKey,
+        burnerNonceIndex: this._currentNonce?.index ?? -1,
         poolBalance: actualPoolBalanceSol,
         timestamp: Date.now(),
       };
@@ -602,9 +618,10 @@ export class ShredrClient {
   }
 
   // Pending sweep state for recovery
+  // SECURITY: We store nonce index instead of secret key to minimize key exposure in memory
   private _pendingSweep: {
     burnerAddress: string;
-    burnerSecretKey: Uint8Array;
+    burnerNonceIndex: number; // Used to re-derive the burner keypair for recovery
     poolBalance: number;
     timestamp: number;
   } | null = null;
@@ -643,12 +660,30 @@ export class ShredrClient {
     if (!this._shadowireBurner) {
       throw new Error("Shadowire burner not available");
     }
+    if (!this._walletPubkey) {
+      throw new Error("Wallet pubkey not available - call initFromSignature first");
+    }
 
-    console.log(`Recovery: Attempting to recover sweep...`);
+    console.log(`Recovery: Attempting to recover sweep for nonce index ${this._pendingSweep.burnerNonceIndex}...`);
 
-    // Create client with the saved burner keypair
+    // Re-derive the burner keypair from the stored nonce index
+    // SECURITY: This avoids keeping the secret key in memory long-term
+    const recoveryNonce = await nonceService.generateNonceAtIndex(
+      this._pendingSweep.burnerNonceIndex,
+      this._walletPubkey
+    );
+    const recoveryBurner = await burnerService.deriveBurnerFromNonce(recoveryNonce);
+    
+    // Verify address matches what we expected
+    if (recoveryBurner.address !== this._pendingSweep.burnerAddress) {
+      console.warn(
+        `Recovery: Derived address ${recoveryBurner.address} doesn't match expected ${this._pendingSweep.burnerAddress}`
+      );
+    }
+
+    // Create client with the re-derived burner keypair
     const shadowWireClient = new ShadowWireClient(rpcUrl);
-    const burnerKeypair = Keypair.fromSecretKey(this._pendingSweep.burnerSecretKey);
+    const burnerKeypair = Keypair.fromSecretKey(recoveryBurner.secretKey);
     shadowWireClient.setKeypair(burnerKeypair);
 
     // Check current pool balance (it may have changed)
@@ -657,6 +692,8 @@ export class ShredrClient {
     console.log(`Recovery: Current pool balance: ${currentPoolBalanceSol} SOL`);
 
     if (currentPoolBalanceSol <= 0) {
+      // Clear the recovery burner before clearing pending state
+      burnerService.clearBurner(recoveryBurner);
       this._pendingSweep = null;
       throw new Error("Pool balance is 0 - nothing to recover");
     }
@@ -667,19 +704,25 @@ export class ShredrClient {
       `Recovery: Retrying internal transfer of ${currentPoolBalanceSol} SOL to ${shadowireAddress}...`,
     );
 
-    const transferSig = await shadowWireClient.transferInternal(
-      shadowireAddress,
-      currentPoolBalanceSol,
-    );
-    console.log(`Recovery: Internal transfer successful: ${transferSig}`);
+    try {
+      const transferSig = await shadowWireClient.transferInternal(
+        shadowireAddress,
+        currentPoolBalanceSol,
+      );
+      console.log(`Recovery: Internal transfer successful: ${transferSig}`);
 
-    // Clear pending state
-    this._pendingSweep = null;
+      // Clear pending state and zero out recovery keypair
+      burnerService.clearBurner(recoveryBurner);
+      this._pendingSweep = null;
 
-    // Rotate nonce/burner
-    await this.consumeAndGenerateNew();
+      // Rotate nonce/burner
+      await this.consumeAndGenerateNew();
 
-    return transferSig;
+      return transferSig;
+    } finally {
+      // SECURITY: Always zero out the recovery keypair, even on failure
+      burnerService.clearBurner(recoveryBurner);
+    }
   }
 
   // ============ SHADOWIRE BALANCE & WITHDRAW ============
@@ -802,6 +845,7 @@ export class ShredrClient {
     this._walletPubkey = null;
     this._currentBlobId = null;
     this._pendingSweep = null;
+    this._isNewUser = false;
   }
 }
 // ============ SINGLETON EXPORT ============
