@@ -347,10 +347,17 @@ export class ShadowWireClient {
       return;
     }
 
-    // Initialize WASM and memoize
-    ShadowWireClient._wasmInitPromise = initWASM("/settler_wasm_bg.wasm").then(() => {
-      ShadowWireClient._wasmInitialized = true;
-    });
+    // Initialize WASM with proper error handling
+    // If init fails, we clear the promise so future calls can retry
+    ShadowWireClient._wasmInitPromise = initWASM("/settler_wasm_bg.wasm")
+      .then(() => {
+        ShadowWireClient._wasmInitialized = true;
+      })
+      .catch((err) => {
+        // Clear promise on failure so retries are possible
+        ShadowWireClient._wasmInitPromise = null;
+        throw err;
+      });
 
     await ShadowWireClient._wasmInitPromise;
   }

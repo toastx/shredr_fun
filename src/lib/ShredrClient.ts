@@ -711,8 +711,7 @@ export class ShredrClient {
       );
       console.log(`Recovery: Internal transfer successful: ${transferSig}`);
 
-      // Clear pending state and zero out recovery keypair
-      burnerService.clearBurner(recoveryBurner);
+      // Clear pending state (burner cleanup happens in finally)
       this._pendingSweep = null;
 
       // Rotate nonce/burner

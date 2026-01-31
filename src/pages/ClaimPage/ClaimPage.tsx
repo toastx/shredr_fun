@@ -94,16 +94,11 @@ function ClaimPage({ onBack }: ClaimPageProps) {
         }
     }, []);
 
-    // Fetch balance when initialized
+    // Fetch balance when in loadingBalance state (centralized balance fetching)
     useEffect(() => {
-        if (connected && pageState === 'ready' && publicKey) {
-            // Use debounced fetch
-            if (balanceFetchTimeoutRef.current) {
-                clearTimeout(balanceFetchTimeoutRef.current);
-            }
-            balanceFetchTimeoutRef.current = setTimeout(() => {
-                fetchShadowireBalance();
-            }, 100);
+        if (connected && pageState === 'loadingBalance' && publicKey) {
+            // Trigger balance fetch - force=true bypasses debounce for initial load
+            fetchShadowireBalance(true);
         } else if (!connected) {
             setTotalBalance(0);
             setPageState('idle');
@@ -131,9 +126,9 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                 setPageState('newUser');
             } else {
                 await shredrClient.initFromSignature(signature, publicKey.toBytes());
-                setPageState('ready');
-                // Force fetch balance after initialization
-                await fetchShadowireBalance(true);
+                // Set to loadingBalance - the useEffect will handle fetching
+                // This centralizes balance fetching logic in one place
+                setPageState('loadingBalance');
             }
 
         } catch (err) {
@@ -141,7 +136,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             setWithdrawError('Failed to verify: ' + (err instanceof Error ? err.message : String(err)));
             setPageState('error');
         }
-    }, [publicKey, signMessage, fetchShadowireBalance]);
+    }, [publicKey, signMessage]);
 
     const handleWithdraw = useCallback(async () => {
         if (!publicKey) {
