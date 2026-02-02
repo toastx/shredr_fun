@@ -99,11 +99,15 @@ export class ShredrClient {
       Array<{ id: string; encryptedBlob: string; createdAt: number }>
     > = () => apiClient.fetchAllBlobs(),
   ): Promise<boolean> {
+    console.log("[checkIfNewUser] Starting check...");
+    
     // Initialize nonce service to enable storage access
     await nonceService.initFromSignature(signature);
+    console.log("[checkIfNewUser] NonceService initialized");
 
     // Try local storage first
     const nonce = await nonceService.loadCurrentNonce(walletPubkey);
+    console.log("[checkIfNewUser] Local storage nonce:", nonce ? `index=${nonce.index}` : "null");
     if (nonce) {
       return false;
     }
@@ -111,17 +115,27 @@ export class ShredrClient {
     // Try remote backend if fetch function provided
     if (fetchBlobsFn) {
       try {
+        console.log("[checkIfNewUser] Fetching blobs from backend...");
         const blobs = await fetchBlobsFn();
+        console.log("[checkIfNewUser] Backend returned blobs:", blobs.length);
+        
         const result = await nonceService.tryDecryptBlobs(blobs);
+        console.log("[checkIfNewUser] tryDecryptBlobs result:", {
+          found: result.found,
+          blobId: result.blobId,
+          nonceIndex: result.nonce?.index
+        });
+        
         if (result.found && result.nonce) {
           return false;
         }
       } catch (err) {
-        console.warn("Failed to fetch blobs from backend:", err);
+        console.warn("[checkIfNewUser] Failed to fetch blobs from backend:", err);
       }
     }
 
     // No nonce found - new user
+    console.log("[checkIfNewUser] No nonce found - treating as new user");
     return true;
   }
 
@@ -145,9 +159,12 @@ export class ShredrClient {
       data,
     ) => apiClient.createBlob(data),
   ): Promise<void> {
+    console.log("[initFromSignature] Starting initialization...");
+    
     // 1. Initialize both services
     await nonceService.initFromSignature(signature);
     await burnerService.initFromSignature(signature);
+    console.log("[initFromSignature] Services initialized");
 
     // Store wallet pubkey for Shadowire Address derivation
     this._walletPubkey = walletPubkey;
@@ -161,24 +178,36 @@ export class ShredrClient {
     const baseNonce = await nonceService.generateNonceAtIndex(0, walletPubkey);
     this._shadowireBurner =
       await burnerService.deriveShadowireAddress(baseNonce);
+    console.log("[initFromSignature] Shadowire address derived:", this._shadowireBurner?.address);
 
     // 3. Try local storage first for current spending nonce
     let nonce = await nonceService.loadCurrentNonce(walletPubkey);
+    console.log("[initFromSignature] Local storage nonce:", nonce ? `index=${nonce.index}` : "null");
+    
     if (!nonce) {
       // 4. Try remote backend if fetch function provided
       if (fetchBlobsFn) {
         try {
+          console.log("[initFromSignature] Fetching blobs from backend...");
           const blobs = await fetchBlobsFn();
+          console.log("[initFromSignature] Backend returned blobs:", blobs.length);
+          
           const result = await nonceService.tryDecryptBlobs(blobs);
+          console.log("[initFromSignature] tryDecryptBlobs result:", {
+            found: result.found,
+            blobId: result.blobId,
+            nonceIndex: result.nonce?.index
+          });
 
           if (result.found && result.nonce) {
             // Found in remote - sync to local
+            console.log("[initFromSignature] Syncing remote nonce to local storage...");
             await nonceService.setCurrentState(result.nonce);
             nonce = result.nonce;
             this._currentBlobId = result.blobId ?? null;
           }
         } catch (err) {
-          console.warn("Failed to fetch blobs from backend:", err);
+          console.warn("[initFromSignature] Failed to fetch blobs from backend:", err);
         }
       }
     }
@@ -186,8 +215,10 @@ export class ShredrClient {
       // 5. New user - generate base nonce (index 0), then increment to index 1
       // burner[0] is RESERVED for Shadowire Address (pool accumulator)
       // burner[1+] are spending burners for receiving public SOL
+      console.log("[initFromSignature] No nonce found - generating new base nonce (NEW USER)");
       await nonceService.generateBaseNonce(walletPubkey);
       nonce = await nonceService.incrementNonce(); // Move to index 1
+      console.log("[initFromSignature] New nonce generated at index:", nonce.index);
       this._isNewUser = true;
 
       // Upload to backend if function provided
@@ -196,13 +227,16 @@ export class ShredrClient {
           const blobData = await nonceService.createBlobData(nonce);
           const newBlob = await createBlobFn(blobData);
           this._currentBlobId = newBlob.id;
+          console.log("[initFromSignature] Blob uploaded to backend:", newBlob.id);
         } catch (err) {
-          console.warn("Failed to upload blob to backend:", err);
+          console.warn("[initFromSignature] Failed to upload blob to backend:", err);
         }
       }
     } else {
+      console.log("[initFromSignature] Returning user - using nonce at index:", nonce.index);
       this._isNewUser = false;
     }
+
 
     // Safety check: ensure current nonce is not the same as burner[0] nonce
     // This protects burner[0] from being used for receiving public SOL

@@ -1,0 +1,55 @@
+# Node modules - will be installed in container
+node_modules
+npm-debug.log
+
+# Backend directory - excluded as requested
+shredr-backend
+
+# Git files
+.git
+.gitignore
+.github
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build output (if exists locally)
+dist
+build
+
+# Test files and coverage
+tests
+coverage
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+.mocharc.json
+
+# CI/CD
+.github
+
+# Documentation
+README.md
+LICENSE
+
+# Environment files (if any)
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Agent files
+.agent
+
+# Log files
+*.log
+logs
