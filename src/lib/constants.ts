@@ -58,7 +58,7 @@ export const PBKDF2_ITERATIONS = 100000;
 
 /** HELIUS RPC URL */
 export const HELIUS_RPC_URL =
-  "https://mainnet.helius-rpc.com/?api-key=a4796593-2f7c-4c3d-bd04-1006f4141528";
+  "https://rpc-proxy.shredrmoney.workers.dev";
 /** HELIUS WSS URL */
 export const HELIUS_WSS_URL = "wss://rpc-proxy.shredrmoney.workers.dev";
 /** API Base URL */
