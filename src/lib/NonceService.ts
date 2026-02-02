@@ -120,14 +120,16 @@ export class NonceService {
         }
         
         this._walletHash = await deriveWalletHash(walletPublicKey, WALLET_HASH_LENGTH);
+        console.log(`[loadCurrentNonce] Looking up nonce for wallet hash: ${this._walletHash.slice(0, 8)}...`);
         
         let stored: { nonce: Uint8Array; index: number } | null = null;
         try {
             stored = await this.storage.getCurrentNonce(this._walletHash);
+            console.log(`[loadCurrentNonce] IndexedDB result:`, stored ? `index=${stored.index}` : 'null');
         } catch (e) {
             if (e instanceof DecryptionError) {
                 // Data exists but can't be decrypted - likely different wallet or corrupted
-                console.warn('Stored nonce data cannot be decrypted (wallet may have changed). Treating as new user.');
+                console.warn('[loadCurrentNonce] Stored nonce data cannot be decrypted (wallet may have changed). Treating as new user.');
                 // Clear the stale data by saving a null state would require additional logic
                 // For now, just return null and let the caller handle as new user
                 return null;
@@ -145,6 +147,7 @@ export class NonceService {
             };
         }
         
+        console.log(`[loadCurrentNonce] No nonce found in IndexedDB`);
         return null;
     }
 
@@ -375,7 +378,11 @@ export class NonceService {
 
     /**
      * Try to decrypt blobs to find user's blob
-     * Returns decrypted nonce if found
+     * Returns the decrypted nonce with the HIGHEST index (latest state)
+     * 
+     * IMPORTANT: We must check ALL blobs and return the one with highest index,
+     * not just the first one that decrypts. Old blobs may still exist if
+     * deletion failed during previous consumeAndGenerateNew calls.
      */
     async tryDecryptBlobs(blobs: NonceBlob[]): Promise<{
         found: boolean;
@@ -387,6 +394,14 @@ export class NonceService {
             throw new Error('Encryption key not available');
         }
 
+        console.log(`[tryDecryptBlobs] Checking ${blobs.length} blobs...`);
+
+        // Track the best (highest index) match found
+        let bestMatch: {
+            blobId: string;
+            nonce: GeneratedNonce;
+        } | null = null;
+
         for (const blob of blobs) {
             try {
                 const encrypted: EncryptedNoncePayload = {
@@ -395,18 +410,31 @@ export class NonceService {
                 };
                 const decrypted = await this.decryptNonce(encrypted, encKey);
 
-                // Successfully decrypted = this is our blob!
-                return {
-                    found: true,
-                    blobId: blob.id,
-                    nonce: decrypted
-                };
+                console.log(`[tryDecryptBlobs] Successfully decrypted blob ${blob.id} with nonce index: ${decrypted.index}`);
+
+                // Keep track of the blob with the highest nonce index
+                if (!bestMatch || decrypted.index > bestMatch.nonce.index) {
+                    bestMatch = {
+                        blobId: blob.id,
+                        nonce: decrypted
+                    };
+                }
             } catch {
                 // Couldn't decrypt - not our blob, try next
                 continue;
             }
         }
 
+        if (bestMatch) {
+            console.log(`[tryDecryptBlobs] Best match: blob ${bestMatch.blobId} with nonce index ${bestMatch.nonce.index}`);
+            return {
+                found: true,
+                blobId: bestMatch.blobId,
+                nonce: bestMatch.nonce
+            };
+        }
+
+        console.log(`[tryDecryptBlobs] No matching blobs found`);
         return { found: false };
     }
 
