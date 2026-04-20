@@ -143,7 +143,7 @@ impl DbHandler {
                 r#"
                 SELECT id, encrypted_blob, created_at, is_consumed
                 FROM nonce_blobs
-                WHERE created_at < $1
+                WHERE is_consumed = FALSE AND created_at < $1
                 ORDER BY created_at DESC
                 LIMIT $2
                 "#
@@ -152,7 +152,7 @@ impl DbHandler {
                 r#"
                 SELECT id, encrypted_blob, created_at, is_consumed
                 FROM nonce_blobs
-                
+                WHERE is_consumed = FALSE
                 ORDER BY created_at DESC
                 LIMIT $1
                 "#
