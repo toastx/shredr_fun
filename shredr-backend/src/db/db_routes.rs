@@ -16,11 +16,6 @@ pub struct AppState {
     pub db: DbHandler,
 }
 
-#[derive(Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
-}
-
 #[derive(Deserialize)]
 pub struct ListQuery {
     #[serde(default = "default_limit")]
