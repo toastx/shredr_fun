@@ -1,5 +1,6 @@
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
+use crate::error::AppError;
 
 /// Maximum blob size in bytes (2KB - actual blobs are ~200 bytes)
 /// encoded bytes limit
@@ -16,20 +17,29 @@ impl DbHandler {
     }
 
     /// Initialize the database schema
-    pub async fn init_schema(&self) -> Result<(), String> {
+    pub async fn init_schema(&self) -> Result<(), AppError> {
         // Create the table
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS nonce_blobs (
                 id UUID PRIMARY KEY,
                 encrypted_blob TEXT NOT NULL,
-                created_at BIGINT NOT NULL
+                created_at BIGINT NOT NULL,
+                is_consumed BOOLEAN NOT NULL DEFAULT FALSE
             )
             "#,
         )
         .execute(&self.pool)
-        .await
-        .map_err(|e| format!("Failed to create table: {}", e))?;
+        .await?;
+
+        // Try to add the column if it doesn't exist (for existing databases)
+        let _ = sqlx::query(
+            r#"
+            ALTER TABLE nonce_blobs ADD COLUMN IF NOT EXISTS is_consumed BOOLEAN NOT NULL DEFAULT FALSE
+            "#,
+        )
+        .execute(&self.pool)
+        .await;
 
         // Create the index
         sqlx::query(
@@ -38,22 +48,20 @@ impl DbHandler {
             "#,
         )
         .execute(&self.pool)
-        .await
-        .map_err(|e| format!("Failed to create index: {}", e))?;
+        .await?;
 
         Ok(())
     }
 
     /// Create a new nonce blob
     /// Returns the created blob with its ID
-    pub async fn create_blob(&self, encrypted_blob: &str) -> Result<NonceBlob, String> {
+    pub async fn create_blob(&self, encrypted_blob: &str) -> Result<NonceBlob, AppError> {
         // Size check to prevent spam
         if encrypted_blob.len() > MAX_BLOB_SIZE {
-            return Err(format!(
-                "Blob too large: {} bytes (max {} bytes)",
-                encrypted_blob.len(),
-                MAX_BLOB_SIZE
-            ));
+            return Err(AppError::BlobTooLarge {
+                size: encrypted_blob.len(),
+                max: MAX_BLOB_SIZE,
+            });
         }
 
         let id = Uuid::new_v4();
@@ -61,88 +69,105 @@ impl DbHandler {
 
         sqlx::query(
             r#"
-            INSERT INTO nonce_blobs (id, encrypted_blob, created_at)
-            VALUES ($1, $2, $3)
+            INSERT INTO nonce_blobs (id, encrypted_blob, created_at, is_consumed)
+            VALUES ($1, $2, $3, FALSE)
             "#,
         )
         .bind(id)
         .bind(encrypted_blob)
         .bind(created_at)
         .execute(&self.pool)
-        .await
-        .map_err(|e| format!("Failed to create blob: {}", e))?;
+        .await?;
 
         Ok(NonceBlob {
             id: id.to_string(),
             encrypted_blob: encrypted_blob.to_string(),
             created_at,
+            is_consumed: false,
         })
     }
 
-    /// Delete a blob by ID
-    pub async fn delete_blob(&self, id: &str) -> Result<bool, String> {
-        let uuid = Uuid::parse_str(id).map_err(|e| format!("Invalid UUID: {}", e))?;
+    /// Delete a blob by ID (Now marks it as consumed instead of deleting to keep history)
+    pub async fn delete_blob(&self, id: &str) -> Result<bool, AppError> {
+        let uuid = Uuid::parse_str(id)?;
 
         let result = sqlx::query(
             r#"
-            DELETE FROM nonce_blobs WHERE id = $1
+            UPDATE nonce_blobs SET is_consumed = TRUE WHERE id = $1
             "#,
         )
         .bind(uuid)
         .execute(&self.pool)
-        .await
-        .map_err(|e| format!("Failed to delete blob: {}", e))?;
+        .await?;
 
         Ok(result.rows_affected() > 0)
     }
 
     /// Get a blob by ID
-    pub async fn get_blob(&self, id: &str) -> Result<NonceBlob, String> {
-        let uuid = Uuid::parse_str(id).map_err(|e| format!("Invalid UUID: {}", e))?;
+    pub async fn get_blob(&self, id: &str) -> Result<NonceBlob, AppError> {
+        let uuid = Uuid::parse_str(id)?;
 
         let row = sqlx::query(
             r#"
-            SELECT id, encrypted_blob, created_at
+            SELECT id, encrypted_blob, created_at, is_consumed
             FROM nonce_blobs
             WHERE id = $1
             "#,
         )
         .bind(uuid)
         .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| format!("Failed to fetch blob: {}", e))?;
+        .await?;
 
         match row {
             Some(row) => {
                 let id: Uuid = row.get("id");
                 let encrypted_blob: String = row.get("encrypted_blob");
                 let created_at: i64 = row.get("created_at");
+                let is_consumed: bool = row.get("is_consumed");
 
                 Ok(NonceBlob {
                     id: id.to_string(),
                     encrypted_blob,
                     created_at,
+                    is_consumed,
                 })
             }
-            None => Err("Blob not found".to_string()),
+            None => Err(AppError::NotFound),
         }
     }
 
-    /// List all blobs (for frontend to try decrypting each)
-    pub async fn list_blobs(&self, limit: i64, offset: i64) -> Result<Vec<NonceBlob>, String> {
-        let rows = sqlx::query(
-            r#"
-            SELECT id, encrypted_blob, created_at
-            FROM nonce_blobs
-            ORDER BY created_at DESC
-            LIMIT $1 OFFSET $2
-            "#,
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| format!("Failed to list blobs: {}", e))?;
+    /// List all blobs using keyset pagination
+    pub async fn list_blobs(&self, limit: i64, cursor: Option<i64>) -> Result<Vec<NonceBlob>, AppError> {
+        let query_str = match cursor {
+            Some(_) => {
+                r#"
+                SELECT id, encrypted_blob, created_at, is_consumed
+                FROM nonce_blobs
+                WHERE created_at < $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                "#
+            }
+            None => {
+                r#"
+                SELECT id, encrypted_blob, created_at, is_consumed
+                FROM nonce_blobs
+                
+                ORDER BY created_at DESC
+                LIMIT $1
+                "#
+            }
+        };
+
+        let mut query = sqlx::query(query_str);
+
+        if let Some(c) = cursor {
+            query = query.bind(c).bind(limit);
+        } else {
+            query = query.bind(limit);
+        }
+
+        let rows = query.fetch_all(&self.pool).await?;
 
         let blobs = rows
             .iter()
@@ -150,11 +175,13 @@ impl DbHandler {
                 let id: Uuid = row.get("id");
                 let encrypted_blob: String = row.get("encrypted_blob");
                 let created_at: i64 = row.get("created_at");
+                let is_consumed: bool = row.get("is_consumed");
 
                 NonceBlob {
                     id: id.to_string(),
                     encrypted_blob,
                     created_at,
+                    is_consumed,
                 }
             })
             .collect();
@@ -170,6 +197,7 @@ pub struct NonceBlob {
     pub id: String,
     pub encrypted_blob: String,
     pub created_at: i64,
+    pub is_consumed: bool,
 }
 
 /// Request to create a new blob
@@ -197,7 +225,11 @@ mod tests {
         let result = db.create_blob(&huge_blob).await;
         
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Blob too large"));
+        if let Err(AppError::BlobTooLarge { .. }) = result {
+            // expected
+        } else {
+            panic!("Expected BlobTooLarge error");
+        }
     }
 
     #[tokio::test]
@@ -215,8 +247,12 @@ mod tests {
         
         // Should be Err because DB connection fails, not "Blob too large"
         assert!(result.is_err());
-        let err_msg = result.unwrap_err();
-        assert!(!err_msg.contains("Blob too large"));
-        assert!(err_msg.contains("Failed to create blob"));
+        match result {
+            Err(AppError::Database(_)) => {
+                // Expected, since DB is fake
+            },
+            Err(e) => panic!("Expected Database error, got: {:?}", e),
+            Ok(_) => panic!("Expected error"),
+        }
     }
 }

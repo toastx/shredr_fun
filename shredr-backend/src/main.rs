@@ -1,3 +1,4 @@
+mod error;
 mod db;
 mod webhook;
 // mod websocket;
@@ -43,7 +44,7 @@ impl KeyExtractor for ForwardedIpKeyExtractor {
         let forwarded_ip = req.headers()
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.split(',').next())
+            .and_then(|s| s.split(',').last())
             .map(|s| s.trim())
             .and_then(|s| s.parse::<IpAddr>().ok())
             .or_else(|| {
