@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use super::db::{CreateBlobRequest, DbHandler};
+use crate::error::AppError;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -25,7 +26,7 @@ pub struct ListQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]
-    pub offset: i64,
+    pub cursor: Option<i64>,
 }
 
 fn default_limit() -> i64 {
@@ -35,62 +36,38 @@ fn default_limit() -> i64 {
 pub async fn create_blob_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateBlobRequest>,
-) -> impl IntoResponse {
-    match state.db.create_blob(&request.encrypted_blob).await {
-        Ok(blob) => (StatusCode::CREATED, Json(blob)).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })).into_response(),
-    }
+) -> Result<impl IntoResponse, AppError> {
+    let blob = state.db.create_blob(&request.encrypted_blob).await?;
+    Ok((StatusCode::CREATED, Json(blob)))
 }
 
 pub async fn delete_blob_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
-    match state.db.delete_blob(&id).await {
-        Ok(deleted) => {
-            if deleted {
-                (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
-            } else {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: "Blob not found".into(),
-                    }),
-                )
-                    .into_response()
-            }
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-            .into_response(),
+) -> Result<impl IntoResponse, AppError> {
+    let deleted = state.db.delete_blob(&id).await?;
+    if deleted {
+        Ok((StatusCode::OK, Json(serde_json::json!({ "success": true }))))
+    } else {
+        Err(AppError::NotFound)
     }
 }
 
 pub async fn get_blob_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
-    match state.db.get_blob(&id).await {
-        Ok(blob) => (StatusCode::OK, Json(blob)).into_response(),
-        Err(e) => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: e })).into_response(),
-    }
+) -> Result<impl IntoResponse, AppError> {
+    let blob = state.db.get_blob(&id).await?;
+    Ok((StatusCode::OK, Json(blob)))
 }
 
 pub async fn list_blobs_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<ListQuery>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let limit = query.limit.clamp(1, 100);
-    match state.db.list_blobs(limit, query.offset).await {
-        Ok(blobs) => (StatusCode::OK, Json(blobs)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error: e }),
-        )
-            .into_response(),
-    }
+    let blobs = state.db.list_blobs(limit, query.cursor).await?;
+    Ok((StatusCode::OK, Json(blobs)))
 }
 
 /// Build blob write router (POST/DELETE /api/blobs)
