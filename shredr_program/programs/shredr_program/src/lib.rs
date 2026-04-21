@@ -1,5 +1,8 @@
 use anchor_lang::prelude::*;
-
+pub mod instructions;
+pub mod state;
+use crate::instructions::*;
+use crate::state::*;
 declare_id!("A6aPwpTxFhQ9oSxdu1W8AH97LqjFwACXW81RkuTNAVEC");
 
 #[ephemeral]

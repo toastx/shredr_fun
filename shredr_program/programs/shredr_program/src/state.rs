@@ -70,7 +70,7 @@ pub struct StealthDelegated {
 }
 
 #[event]
-pub struct FlushedToVault {.
+pub struct FlushedToVault {
     pub slot: u64,
 }
 
