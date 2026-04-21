@@ -9,7 +9,7 @@ use ephemeral_rollups_sdk::access_control::instructions::{
 use ephemeral_rollups_sdk::access_control::structs::{Member, MembersArgs, AUTHORITY_FLAG};
 
 use crate::state::{
-    seeds, ProgramConfig, StealthAccount, UserVault,
+    seeds, ProgramConfig, StealthAccount, UserAddress,
     PrivacyError,
     StealthDeposited, StealthDelegated, FlushedToVault, VaultWithdrawn,
     TEE_VALIDATOR_MAINNET,
@@ -105,7 +105,7 @@ pub struct CreateStealthAccount<'info> {
         init,
         payer = relayer,
         space = 8 + StealthAccount::INIT_SPACE,
-        seeds = [seeds::STEALTH, owner.as_ref(), &salt],
+        seeds = [seeds::STEALTH_ADDRESS, owner.as_ref(), &salt],
         bump,
     )]
     pub stealth_account: Account<'info, StealthAccount>,
@@ -186,7 +186,7 @@ pub fn create_and_delegate_permission(
     stealth_owner: Pubkey,
 ) -> Result<()> {
     let stealth_seeds: &[&[u8]] = &[
-        seeds::STEALTH,
+        seeds::STEALTH_ADDRESS,
         stealth_owner.as_ref(),
         &stealth_salt,
         &[stealth_bump],
@@ -222,7 +222,7 @@ pub fn create_and_delegate_permission(
 
     ctx.accounts.delegate_pda(
         &ctx.accounts.relayer,
-        &[seeds::STEALTH, stealth_owner.as_ref(), &stealth_salt],
+        &[seeds::STEALTH_ADDRESS, stealth_owner.as_ref(), &stealth_salt],
         DelegateConfig {
             validator: validator_key,
             ..Default::default()
@@ -240,7 +240,7 @@ pub fn create_and_delegate_permission(
 
 #[commit]
 #[derive(Accounts)]
-pub struct FlushToUserVault<'info> {
+pub struct FlushToUserAddress<'info> {
     /// Relayer triggers the flush — no user wallet.
     #[account(mut)]
     pub relayer: Signer<'info>,
@@ -260,11 +260,11 @@ pub struct FlushToUserVault<'info> {
     #[account(
         init_if_needed,
         payer = relayer,
-        space = 8 + UserVault::INIT_SPACE,
-        seeds = [seeds::USER_VAULT, stealth_account.owner.as_ref()],
+        space = 8 + UserAddress::INIT_SPACE,
+        seeds = [seeds::USER_ADDRESS, stealth_account.owner.as_ref()],
         bump,
     )]
-    pub user_vault: Account<'info, UserVault>,
+    pub user_address: Account<'info, UserAddress>,
 
     #[account(mut)]
     pub permission: UncheckedAccount<'info>,
@@ -275,13 +275,13 @@ pub struct FlushToUserVault<'info> {
 
 }
 
-pub fn flush_to_user_vault(
-    ctx: Context<FlushToUserVault>,
+pub fn flush_to_user_address(
+    ctx: Context<FlushToUserAddress>,
     amount: u64,
 ) -> Result<()> {
     let config  = &ctx.accounts.program_config;
     let stealth = &mut ctx.accounts.stealth_account;
-    let vault   = &mut ctx.accounts.user_vault;
+    let vault   = &mut ctx.accounts.user_address;
     let clock   = Clock::get()?;
     
     require!(
@@ -297,7 +297,7 @@ pub fn flush_to_user_vault(
     // Initialize vault on first use.
     if vault.owner == Pubkey::default() {
         vault.owner = stealth.owner;
-        vault.bump  = ctx.bumps.user_vault;
+        vault.bump  = ctx.bumps.user_address;
     }
 
  
@@ -311,7 +311,7 @@ pub fn flush_to_user_vault(
     vault.total_ever_received  += amount;
 
     let stealth_seeds: &[&[u8]] = &[
-        seeds::STEALTH,
+        seeds::STEALTH_ADDRESS,
         stealth.owner.as_ref(),
         &stealth.salt,
         &[stealth.bump],
@@ -331,7 +331,7 @@ pub fn flush_to_user_vault(
         &ctx.accounts.relayer,
         vec![
             &ctx.accounts.stealth_account.to_account_info(),
-            &ctx.accounts.user_vault.to_account_info(),
+            &ctx.accounts.user_address.to_account_info(),
         ],
         &ctx.accounts.magic_context,
         &ctx.accounts.magic_program,
@@ -356,17 +356,17 @@ pub struct Withdraw<'info> {
     #[account(
         mut,
         has_one = owner @ PrivacyError::InvalidAdminAuthority,
-        seeds = [seeds::USER_VAULT, owner.key().as_ref()],
-        bump = user_vault.bump,
+        seeds = [seeds::USER_ADDRESS, owner.key().as_ref()],
+        bump = user_address.bump,
     )]
-    pub user_vault: Account<'info, UserVault>,
+    pub user_address: Account<'info, UserAddress>,
 
     #[account(mut)]
     pub destination: UncheckedAccount<'info>,
 }
 
 pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
-    let vault = &mut ctx.accounts.user_vault;
+    let vault = &mut ctx.accounts.user_address;
     require!(
         amount <= vault.available_balance,
         PrivacyError::InsufficientVaultBalance

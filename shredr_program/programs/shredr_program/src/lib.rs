@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 
 declare_id!("A6aPwpTxFhQ9oSxdu1W8AH97LqjFwACXW81RkuTNAVEC");
 
+#[ephemeral]
 #[program]
 pub mod shredr_program {
     use super::*;
