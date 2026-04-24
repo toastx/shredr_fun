@@ -40,3 +40,4 @@ Secrets*.toml
 shredr-backend/Cargo.lock
 shredr-backend/.env
 
+keypairs
