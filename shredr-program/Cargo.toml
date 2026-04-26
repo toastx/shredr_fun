@@ -1,0 +1,16 @@
+[package]
+name = "shredr-program"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+
+[dependencies]
+ephemeral-rollups-pinocchio = "0.11.2"
+pinocchio = "0.11.1"
+pinocchio-log = "0.5.1"
+pinocchio-pubkey = "0.3.0"
+pinocchio-system = "0.6.1"
+shank = "0.4.8"
