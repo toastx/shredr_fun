@@ -13,6 +13,7 @@ entrypoint!(process_instruction);
 pub mod instructions;
 pub mod helpers;
 pub mod constants;
+pub mod state;
 use crate::instructions::instructions::{Deposit,Withdraw};
 
 declare_id!("H64YCQTWdQkx9vjs1ZB2Uo24FyUBibnDxhKdznamybpZ");
