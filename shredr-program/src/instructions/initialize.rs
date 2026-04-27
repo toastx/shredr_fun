@@ -1,24 +1,21 @@
-use core::mem::MaybeUninit;
-use ephemeral_rollups_pinocchio::ID as DELEGATION_PROGRAM_ID;
-use ephemeral_rollups_pinocchio::consts::PERMISSION_PROGRAM_ID;
-use ephemeral_rollups_pinocchio::acl::MemberFlags;
-use ephemeral_rollups_pinocchio::instruction::delegate_account;
-use pinocchio::AccountView;
-use pinocchio::account::RuntimeAccount;
-use pinocchio::cpi::{invoke_signed,CpiAccount};
-use pinocchio::instruction::{InstructionView,InstructionAccount};
-use crate::ProgramError;
-use crate::Address;
-use crate::state::StealthAccount;
-use crate::ProgramResult;
+use crate::constants::{TEE_VALIDATOR_MAINNET, seeds};
 use crate::helpers::derive_stealth_account;
-use pinocchio::sysvars::Sysvar;
-use pinocchio::sysvars::clock::Clock;
-use crate::constants:: PROGRAM_ADDRESS, TEE_VALIDATOR_MAINNET, seeds};
-use ephemeral_rollups_pinocchio::acl::CreatePermissionCpiBuilder;
-use ephemeral_rollups_pinocchio::acl::MembersArgs;
-use ephemeral_rollups_pinocchio::acl::Member;
+use crate::state::StealthAccount;
+use crate::{Address, ProgramError, ProgramResult};
+
+use ephemeral_rollups_pinocchio::acl::{
+    consts::PERMISSION_PROGRAM_ID,
+    CreatePermissionCpiBuilder,
+    Member,
+    MemberFlags,
+    MembersArgs,
+};
+use ephemeral_rollups_pinocchio::instruction::delegate_account;
 use ephemeral_rollups_pinocchio::types::DelegateConfig;
+
+use pinocchio::sysvars::clock::Clock;
+use pinocchio::sysvars::Sysvar;
+use pinocchio::AccountView;
 
 
 
@@ -62,24 +59,24 @@ impl<'a> InitializeAndDelegate<'a> {
         
         // Write to StealthAccount (Assuming zero-copy/bytemuck layout)
         {
-            let mut stealth_state = unsafe { &mut *(stealth_account.borrow_unchecked_mut().as_mut_ptr().add(8) as *mut StealthAccount) };
+            let stealth_state = unsafe { &mut *(stealth_account.borrow_unchecked_mut().as_mut_ptr().add(8) as *mut StealthAccount) };
             let clock = Clock::get().unwrap();
     
-            stealth_state.owner = burner_pubkey;
+            stealth_state.owner = &burner_pubkey;
             stealth_state.salt = salt;
             stealth_state.deposited_amount = stealth_account.lamports();
             stealth_state.deposit_timestamp = clock.unix_timestamp;
             stealth_state.delegated = true;
             stealth_state.bump = bump;
         }
+        let burner_seeds = burner_pubkey.clone();
         
-        let permission_program = Address::from_str_const(PERMISSION_PROGRAM_ID);
-        let delegation_program = DELEGATION_PROGRAM_ID;
+        let permission_program = PERMISSION_PROGRAM_ID;
     
         // Seeds for signing
         let signer_seeds: &[&[u8]] = &[
             seeds::STEALTH_ADDRESS, 
-            burner_pubkey.as_ref(), 
+            burner_seeds.as_array(), 
             salt.as_ref(), 
             &[bump]
         ];
@@ -98,7 +95,7 @@ impl<'a> InitializeAndDelegate<'a> {
             permission_account,
             relayer,
             system_program,
-            permission_program.address(),
+            &permission_program,
         )
         .members(members)
         .seeds(signer_seeds)
@@ -117,7 +114,7 @@ impl<'a> InitializeAndDelegate<'a> {
             delegation_record,
             delegation_metadata,
             system_program
-        ], seeds, bump, config)?;
+        ], signer_seeds, bump, delegate_config)?;
 
         Ok(())
     }
@@ -137,7 +134,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
         let burner = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let owner_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let stealth_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let permission_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;;
+        let permission_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let delegation_buffer = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let delegation_record = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let delegation_metadata = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;

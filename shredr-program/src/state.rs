@@ -1,8 +1,8 @@
 use pinocchio::Address;
 
 #[repr(C)]
-pub struct StealthAccount {
-    pub owner: Address,
+pub struct StealthAccount<'a> {
+    pub owner: &'a Address,
     pub salt: [u8; 32],
     pub deposited_amount: u64,
     pub deposit_timestamp: i64,
