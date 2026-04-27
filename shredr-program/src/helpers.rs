@@ -2,6 +2,7 @@ use pinocchio::error::ProgramError;
 use pinocchio::Address;
 use pinocchio::AccountView;
 use crate::constants::PROGRAM_ADDRESS;
+use crate::constants::seeds;
 
 pub fn parse_amount(data: &[u8]) -> Result<u64, ProgramError> {
     if data.len() != core::mem::size_of::<u64>() {
@@ -14,7 +15,7 @@ pub fn parse_amount(data: &[u8]) -> Result<u64, ProgramError> {
     Ok(amt)
 }
 
-pub fn derive_stealth_account(owner: &AccountView) -> Result<(Address, u8), ProgramError> {
-    let vault_key = Address::derive_program_address(&[b"vault", owner.address().as_ref()], &PROGRAM_ADDRESS).ok_or(ProgramError::InvalidAccountData);
-    vault_key
+pub fn derive_stealth_account(owner: &AccountView,salt:&[u8;32]) -> Result<(Address, u8), ProgramError> {
+    let stealth_key = Address::derive_program_address(&[seeds::STEALTH_ADDRESS, owner.address().as_ref(),salt.as_ref()], &PROGRAM_ADDRESS).ok_or(ProgramError::InvalidAccountData);
+    stealth_key
 }
