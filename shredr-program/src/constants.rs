@@ -6,3 +6,5 @@ pub mod seeds {
     pub const STEALTH_ADDRESS:&[u8] = b"shredr_stealth_address";
     pub const USER_ADDRESS:&[u8] = b"shredr_user_address";
 }
+
+pub const TEE_VALIDATOR_MAINNET: &str = "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo";
