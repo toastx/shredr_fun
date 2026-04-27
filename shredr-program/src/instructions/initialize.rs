@@ -1,5 +1,10 @@
+use core::mem::MaybeUninit;
+use ephemeral_rollups_pinocchio::ID as DELEGATION_PROGRAM_ID;
+use ephemeral_rollups_pinocchio::consts::PERMISSION_PROGRAM_ID;
 use ephemeral_rollups_pinocchio::acl::MemberFlags;
+use ephemeral_rollups_pinocchio::instruction::delegate_account;
 use pinocchio::AccountView;
+use pinocchio::account::RuntimeAccount;
 use pinocchio::cpi::{invoke_signed,CpiAccount};
 use pinocchio::instruction::{InstructionView,InstructionAccount};
 use crate::ProgramError;
@@ -9,7 +14,7 @@ use crate::ProgramResult;
 use crate::helpers::derive_stealth_account;
 use pinocchio::sysvars::Sysvar;
 use pinocchio::sysvars::clock::Clock;
-use crate::constants::seeds;
+use crate::constants:: PROGRAM_ADDRESS, TEE_VALIDATOR_MAINNET, seeds};
 use ephemeral_rollups_pinocchio::acl::CreatePermissionCpiBuilder;
 use ephemeral_rollups_pinocchio::acl::MembersArgs;
 use ephemeral_rollups_pinocchio::acl::Member;
@@ -20,10 +25,12 @@ use ephemeral_rollups_pinocchio::types::DelegateConfig;
 pub struct InitializeAndDelegate<'a> {
     pub relayer: &'a AccountView,
     pub burner: &'a AccountView,
+    pub owner_program: &'a AccountView,
     pub stealth_account: &'a AccountView,
     pub permission_account: &'a AccountView,
-    pub permission_program: &'a AccountView,
-    pub delegation_program: &'a AccountView,
+    pub delegation_buffer: &'a AccountView,
+    pub delegation_record: &'a AccountView,
+    pub delegation_metadata: &'a AccountView,
     pub system_program: &'a AccountView,
     pub salt: [u8; 32],
     pub burner_pubkey: Address,
@@ -36,10 +43,12 @@ impl<'a> InitializeAndDelegate<'a> {
         let InitializeAndDelegate {
             relayer,
             burner,
+            owner_program,
             stealth_account,
             permission_account,
-            permission_program,
-            delegation_program,
+            delegation_buffer,
+            delegation_record,
+            delegation_metadata,
             system_program,
             salt,
             burner_pubkey
@@ -63,6 +72,9 @@ impl<'a> InitializeAndDelegate<'a> {
             stealth_state.delegated = true;
             stealth_state.bump = bump;
         }
+        
+        let permission_program = Address::from_str_const(PERMISSION_PROGRAM_ID);
+        let delegation_program = DELEGATION_PROGRAM_ID;
     
         // Seeds for signing
         let signer_seeds: &[&[u8]] = &[
@@ -91,32 +103,22 @@ impl<'a> InitializeAndDelegate<'a> {
         .members(members)
         .seeds(signer_seeds)
         .invoke()?;
-    
-        // 2. Wrap PDA with Permissions
-        // Manual instruction construction for the Permission Program
-        let create_perm_ix = Instruction {
-            program_id: permission_program.address(),
-            accounts: [
-                AccountMeta::writable(ctx.stealth_account.key(), false),
-                AccountMeta::writable(ctx.permission_account.key(), false),
-                AccountMeta::writable(ctx.relayer.key(), true), // Payer
-                AccountMeta::readonly(ctx.system_program.key(), false),
-            ],
-            data: build_permission_args(&ctx.burner_pubkey), // Helper to serialize args
+        
+        let delegate_config = DelegateConfig {
+            validator: Some(Address::from_str_const(TEE_VALIDATOR_MAINNET)),
+            ..Default::default()
         };
-        invoke_signed(&create_perm_ix, accounts, &[signer_seeds])?;
-    
-        // 3. Delegate to the Ephemeral Rollup
-        let delegate_ix = Instruction {
-            program_id: ctx.delegation_program.key(),
-            accounts: vec![
-                AccountMeta::writable(ctx.stealth_account.key(), false),
-                AccountMeta::readonly(ctx.relayer.key(), true),
-            ],
-            data: build_delegate_args(), // Helper to serialize DelegateConfig
-        };
-        invoke_signed(&delegate_ix, accounts, &[signer_seeds])?;
-    
+        
+        delegate_account(&[
+            burner,
+            stealth_account,
+            owner_program,
+            delegation_buffer,
+            delegation_record,
+            delegation_metadata,
+            system_program
+        ], seeds, bump, config)?;
+
         Ok(())
     }
 }
@@ -133,10 +135,12 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
         // Parse Accounts
         let relayer = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let burner = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let owner_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let stealth_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let permission_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let permission_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let delegation_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let permission_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;;
+        let delegation_buffer = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let delegation_record = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let delegation_metadata = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let system_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
 
         // Parse Instruction Data
@@ -157,8 +161,10 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             burner,
             stealth_account,
             permission_account,
-            permission_program,
-            delegation_program,
+            owner_program,
+            delegation_buffer,
+            delegation_record,
+            delegation_metadata,
             system_program,
             salt,
             burner_pubkey,
