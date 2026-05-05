@@ -1,8 +1,6 @@
 pub mod instructions;
 pub mod private_transfer;
-pub mod delegate;
-pub mod undelegate;
-pub mod initialize;
-pub mod commit;
+pub mod initialize_delegate;
+pub mod commit_undelegate;
 
 
