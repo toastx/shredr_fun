@@ -70,9 +70,11 @@ impl<'a> Withdraw<'a> {
             .checked_sub(amount)
             .ok_or(ProgramError::InsufficientFunds)?;
 
+        let default_address = Address::default();
+
         // If fully drained, zero out the account state
         if stealth_data.deposited_amount == 0 {
-            stealth_data.owner = &Address::default();
+            stealth_data.owner = &default_address;
             stealth_data.delegated = false;
             stealth_data.bump = 0;
         }
