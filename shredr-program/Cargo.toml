@@ -6,7 +6,6 @@ edition = "2024"
 [lib]
 crate-type = ["lib", "cdylib"]
 
-
 [dependencies]
 ephemeral-rollups-pinocchio = "0.11.2"
 pinocchio = "0.10.2"
