@@ -34,8 +34,6 @@ pub struct InitializeAndDelegate<'a> {
 }
 
 impl<'a> InitializeAndDelegate<'a> {
-    pub const DISCRIMINATOR: u8 = 0;
-
     pub fn process(self) -> ProgramResult {
         let InitializeAndDelegate {
             relayer,

@@ -21,8 +21,6 @@ pub struct CommitStealth<'a> {
 }
 
 impl<'a> CommitStealth<'a> {
-    pub const DISCRIMINATOR: u8 = 2; // pick whatever slot fits your router
-
     pub fn process(self) -> ProgramResult {
         let CommitStealth {
             relayer,
@@ -81,8 +79,6 @@ pub struct CommitAndUndelegateStealth<'a> {
 }
 
 impl<'a> CommitAndUndelegateStealth<'a> {
-    pub const DISCRIMINATOR: u8 = 3;
-
     pub fn process(self) -> ProgramResult {
         let CommitAndUndelegateStealth {
             relayer,
@@ -142,10 +138,6 @@ pub struct UndelegationCallback<'a> {
 }
 
 impl<'a> UndelegationCallback<'a> {
-    // MagicBlock calls this with a fixed discriminator — match whatever
-    // ephemeral_rollups_pinocchio expects (commonly 0xFF or a dedicated value).
-    pub const DISCRIMINATOR: u8 = 0xFF;
-
     pub fn process(self, program_id: &Address) -> ProgramResult {
         let UndelegationCallback {
             stealth_account,

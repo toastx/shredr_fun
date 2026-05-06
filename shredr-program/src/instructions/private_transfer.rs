@@ -12,8 +12,6 @@ pub struct PrivateTransfer<'a> {
 }
 
 impl<'a> PrivateTransfer<'a> {
-    pub const DISCRIMINATOR: u8 = 1;
-
     pub fn process(self) -> ProgramResult {
         let PrivateTransfer {
             source_pda,
