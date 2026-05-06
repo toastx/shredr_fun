@@ -31,23 +31,23 @@ fn process_instruction(
         .split_first()
         .ok_or(ProgramError::InvalidInstructionData)?;
 
-    match discriminator {
-        &InitializeAndDelegate::DISCRIMINATOR => {
+    match *discriminator {
+        InitializeAndDelegate::DISCRIMINATOR => {
             InitializeAndDelegate::try_from((accounts, data))?.process()
         }
-        &PrivateTransfer::DISCRIMINATOR => {
+        PrivateTransfer::DISCRIMINATOR => {
             PrivateTransfer::try_from((data, accounts))?.process()
         }
-        &CommitStealth::DISCRIMINATOR => {
+        CommitStealth::DISCRIMINATOR => {
             CommitStealth::try_from((accounts, data))?.process()
         }
-        &CommitAndUndelegateStealth::DISCRIMINATOR => {
+        CommitAndUndelegateStealth::DISCRIMINATOR => {
             CommitAndUndelegateStealth::try_from((accounts, data))?.process()
         }
-        &Withdraw::DISCRIMINATOR => {
+        Withdraw::DISCRIMINATOR => {
             Withdraw::try_from((accounts, data))?.process()
         }
-        &UndelegationCallback::DISCRIMINATOR => {
+        UndelegationCallback::DISCRIMINATOR => {
             UndelegationCallback::try_from((accounts, data))?.process(program_id)
         }
         _ => Err(ProgramError::InvalidInstructionData),
