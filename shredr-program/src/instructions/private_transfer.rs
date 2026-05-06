@@ -6,13 +6,13 @@ use crate::helpers::parse_amount;
 
 
 pub struct PrivateTransfer<'a> {
-    pub source_pda: &'a mut AccountView,
-    pub destination_pda: &'a mut AccountView,
+    pub source_pda: &'a AccountView,
+    pub destination_pda: &'a AccountView,
     pub amount: u64,
 }
 
 impl<'a> PrivateTransfer<'a> {
-    pub const DISCRIMINATOR: u8 = 0;
+    pub const DISCRIMINATOR: u8 = 1;
 
     pub fn process(self) -> ProgramResult {
         let PrivateTransfer {
@@ -54,17 +54,16 @@ impl<'a> PrivateTransfer<'a> {
     }
 }
 
-impl<'a> TryFrom<(&'a [u8], &'a mut [AccountView])> for PrivateTransfer<'a> {
+impl<'a> TryFrom<(&'a [u8], &'a [AccountView])> for PrivateTransfer<'a> {
     type Error = ProgramError;
 
-    fn try_from(value: (&'a [u8], &'a mut [AccountView])) -> Result<Self, Self::Error> {
+    fn try_from(value: (&'a [u8], &'a [AccountView])) -> Result<Self, Self::Error> {
         let (data, accounts) = value;
         if accounts.len() < 2 {
             return Err(ProgramError::NotEnoughAccountKeys);
         }
-        let mut iter = accounts.iter_mut();
-        let source_pda = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let destination_pda = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let source_pda = &accounts[0];
+        let destination_pda = &accounts[1];
         let amount = parse_amount(data)?;
         
         if !source_pda.is_signer() {
