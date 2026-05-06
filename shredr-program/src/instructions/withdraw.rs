@@ -13,8 +13,6 @@ pub struct Withdraw<'a> {
 }
 
 impl<'a> Withdraw<'a> {
-    pub const DISCRIMINATOR: u8 = 4;
-
     pub fn process(self) -> ProgramResult {
         let Withdraw {
             owner,

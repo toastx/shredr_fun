@@ -22,6 +22,38 @@ use crate::instructions::withdraw::Withdraw;
 
 declare_id!("H64YCQTWdQkx9vjs1ZB2Uo24FyUBibnDxhKdznamybpZ");
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum InstructionDiscriminator {
+    InitializeAndDelegate,
+    PrivateTransfer,
+    CommitStealth,
+    CommitAndUndelegateStealth,
+    Withdraw,
+    UndelegationCallback,
+}
+
+impl InstructionDiscriminator {
+    const INITIALIZE_AND_DELEGATE: u8 = 0;
+    const PRIVATE_TRANSFER: u8 = 1;
+    const COMMIT_STEALTH: u8 = 2;
+    const COMMIT_AND_UNDELEGATE_STEALTH: u8 = 3;
+    const WITHDRAW: u8 = 4;
+    // Undelegation callback called by the delegation program
+    const UNDELEGATION_CALLBACK: u8 = 0xFF;
+
+    fn from_byte(byte: u8) -> Result<Self, ProgramError> {
+        match byte {
+            Self::INITIALIZE_AND_DELEGATE => Ok(Self::InitializeAndDelegate),
+            Self::PRIVATE_TRANSFER => Ok(Self::PrivateTransfer),
+            Self::COMMIT_STEALTH => Ok(Self::CommitStealth),
+            Self::COMMIT_AND_UNDELEGATE_STEALTH => Ok(Self::CommitAndUndelegateStealth),
+            Self::WITHDRAW => Ok(Self::Withdraw),
+            Self::UNDELEGATION_CALLBACK => Ok(Self::UndelegationCallback),
+            _ => Err(ProgramError::InvalidInstructionData),
+        }
+    }
+}
+
 fn process_instruction(
     program_id: &Address,
     accounts: &[AccountView],
@@ -31,56 +63,54 @@ fn process_instruction(
         .split_first()
         .ok_or(ProgramError::InvalidInstructionData)?;
 
-    log_instruction(*discriminator);
+    let instruction = InstructionDiscriminator::from_byte(*discriminator)?;
 
-    match *discriminator {
-        InitializeAndDelegate::DISCRIMINATOR => {
+    log_instruction(instruction);
+
+    match instruction {
+        InstructionDiscriminator::InitializeAndDelegate => {
             InitializeAndDelegate::try_from((accounts, data))?.process()
         }
-        PrivateTransfer::DISCRIMINATOR => {
+        InstructionDiscriminator::PrivateTransfer => {
             PrivateTransfer::try_from((data, accounts))?.process()
         }
-        CommitStealth::DISCRIMINATOR => {
+        InstructionDiscriminator::CommitStealth => {
             CommitStealth::try_from((accounts, data))?.process()
         }
-        CommitAndUndelegateStealth::DISCRIMINATOR => {
+        InstructionDiscriminator::CommitAndUndelegateStealth => {
             CommitAndUndelegateStealth::try_from((accounts, data))?.process()
         }
-        Withdraw::DISCRIMINATOR => {
+        InstructionDiscriminator::Withdraw => {
             Withdraw::try_from((accounts, data))?.process()
         }
-        UndelegationCallback::DISCRIMINATOR => {
+        InstructionDiscriminator::UndelegationCallback => {
             UndelegationCallback::try_from((accounts, data))?.process(program_id)
         }
-        _ => Err(ProgramError::InvalidInstructionData),
     }
 }
 
 #[allow(unused_variables)]
-fn log_instruction(discriminator: u8) {
+fn log_instruction(instruction: InstructionDiscriminator) {
     #[cfg(feature = "logging")]
     {
-        match discriminator {
-            InitializeAndDelegate::DISCRIMINATOR => {
+        match instruction {
+            InstructionDiscriminator::InitializeAndDelegate => {
                 pinocchio_log::log!("InitializeAndDelegate");
             }
-            PrivateTransfer::DISCRIMINATOR => {
+            InstructionDiscriminator::PrivateTransfer => {
                 pinocchio_log::log!("PrivateTransfer");
             }
-            CommitStealth::DISCRIMINATOR => {
+            InstructionDiscriminator::CommitStealth => {
                 pinocchio_log::log!("CommitStealth");
             }
-            CommitAndUndelegateStealth::DISCRIMINATOR => {
+            InstructionDiscriminator::CommitAndUndelegateStealth => {
                 pinocchio_log::log!("CommitAndUndelegateStealth");
             }
-            Withdraw::DISCRIMINATOR => {
+            InstructionDiscriminator::Withdraw => {
                 pinocchio_log::log!("Withdraw");
             }
-            UndelegationCallback::DISCRIMINATOR => {
+            InstructionDiscriminator::UndelegationCallback => {
                 pinocchio_log::log!("UndelegationCallback");
-            }
-            _ => {
-                pinocchio_log::log!("UnknownInstruction");
             }
         }
     }
