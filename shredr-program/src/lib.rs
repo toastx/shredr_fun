@@ -31,6 +31,8 @@ fn process_instruction(
         .split_first()
         .ok_or(ProgramError::InvalidInstructionData)?;
 
+    log_instruction(*discriminator);
+
     match *discriminator {
         InitializeAndDelegate::DISCRIMINATOR => {
             InitializeAndDelegate::try_from((accounts, data))?.process()
@@ -51,5 +53,35 @@ fn process_instruction(
             UndelegationCallback::try_from((accounts, data))?.process(program_id)
         }
         _ => Err(ProgramError::InvalidInstructionData),
+    }
+}
+
+#[allow(unused_variables)]
+fn log_instruction(discriminator: u8) {
+    #[cfg(feature = "logging")]
+    {
+        match discriminator {
+            InitializeAndDelegate::DISCRIMINATOR => {
+                pinocchio_log::log!("InitializeAndDelegate");
+            }
+            PrivateTransfer::DISCRIMINATOR => {
+                pinocchio_log::log!("PrivateTransfer");
+            }
+            CommitStealth::DISCRIMINATOR => {
+                pinocchio_log::log!("CommitStealth");
+            }
+            CommitAndUndelegateStealth::DISCRIMINATOR => {
+                pinocchio_log::log!("CommitAndUndelegateStealth");
+            }
+            Withdraw::DISCRIMINATOR => {
+                pinocchio_log::log!("Withdraw");
+            }
+            UndelegationCallback::DISCRIMINATOR => {
+                pinocchio_log::log!("UndelegationCallback");
+            }
+            _ => {
+                pinocchio_log::log!("UnknownInstruction");
+            }
+        }
     }
 }
