@@ -1,8 +1,0 @@
-[dev-dependencies]
-litesvm = "0.1"
-solana-keypair = "2.0"
-solana-signer = "2.0"
-solana-message = "2.0"
-solana-transaction = "2.0"
-solana-address = "2.0"
-solana-system-interface = "2.0"
