@@ -55,6 +55,7 @@ pub fn derive_stealth_account_from_pubkey(burner_pubkey: &Address, salt: &[u8; 3
 /// # Safety
 /// The underlying cast is still `unsafe` but guarded by the validation above.
 /// The caller must ensure no aliasing mutable references exist.
+#[allow(clippy::mut_from_ref)]
 pub fn get_stealth_mut(account: &AccountView) -> Result<&mut StealthAccount, ProgramError> {
     // 1. Ownership check
     if !account.owned_by(&PROGRAM_ADDRESS) {
