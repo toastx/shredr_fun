@@ -1,8 +1,35 @@
+//! Withdraw lamports from a stealth PDA to any destination address.
+//!
+//! ## Accounts
+//!
+//! | # | Account          | Signer | Writable | Description                                      |
+//! |---|------------------|--------|----------|--------------------------------------------------|
+//! | 0 | owner            | ✓      | ✓        | Burner keypair that owns the stealth account     |
+//! | 1 | stealth_account  |        | ✓        | Stealth PDA holding the funds                    |
+//! | 2 | destination      |        | ✓        | Any destination address to receive lamports      |
+//!
+//! ## Instruction Data
+//!
+//! `[amount: u64]` — 8 bytes, little-endian.
+//!
+//! ## Security
+//!
+//! - The owner (burner) must sign.
+//! - The stealth account must be owned by the SHREDR program.
+//! - The stealth account must NOT be delegated (withdraw only on base layer).
+//! - The owner field in stealth state must match the signer's address.
+//!
+//! ## Note on lamport manipulation
+//!
+//! Direct `set_lamports` is used here because the stealth account is a
+//! program-owned PDA. The program has authority to debit its own accounts.
+
+use crate::errors::ShredrError;
+use crate::helpers::get_stealth_mut;
 use crate::ProgramError;
 use crate::AccountView;
 use crate::ProgramResult;
 use crate::Address;
-use crate::state::StealthAccount;
 use crate::helpers::parse_amount;
 
 pub struct Withdraw<'a> {
@@ -21,26 +48,17 @@ impl<'a> Withdraw<'a> {
             amount,
         } = self;
 
-        let stealth_data = unsafe {
-            &mut *(stealth_account
-                .borrow_unchecked_mut()
-                .as_mut_ptr()
-                .add(8) as *mut StealthAccount)
-        };
+        // Safe access with ownership/length/discriminator validation
+        let stealth_data = get_stealth_mut(stealth_account)?;
 
-        // Owner check
-        if stealth_data.owner != owner.address() {
+        // Owner check — stealth state owner must match the signer
+        if &stealth_data.owner != owner.address() {
             return Err(ProgramError::IllegalOwner);
         }
 
         // Must be undelegated — can only withdraw on base layer
         if stealth_data.delegated {
-            return Err(ProgramError::InvalidAccountData);
-        }
-
-        // Owner must sign
-        if !owner.is_signer() {
-            return Err(ProgramError::MissingRequiredSignature);
+            return Err(ShredrError::AlreadyDelegated.into());
         }
 
         // Amount check
@@ -68,11 +86,9 @@ impl<'a> Withdraw<'a> {
             .checked_sub(amount)
             .ok_or(ProgramError::InsufficientFunds)?;
 
-        let default_address = Address::default();
-
         // If fully drained, zero out the account state
         if stealth_data.deposited_amount == 0 {
-            stealth_data.owner = &default_address;
+            stealth_data.owner = Address::default();
             stealth_data.delegated = false;
             stealth_data.bump = 0;
         }
@@ -94,8 +110,9 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for Withdraw<'a> {
 
         let amount = parse_amount(instruction_data)?;
 
+        // Signer check — only in TryFrom (removed duplicate from process)
         if !owner.is_signer() {
-            return Err(ProgramError::MissingRequiredSignature);
+            return Err(ShredrError::MissingSigner.into());
         }
 
         Ok(Self {
