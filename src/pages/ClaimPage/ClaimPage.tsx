@@ -51,21 +51,21 @@ function ClaimPage({ onBack }: ClaimPageProps) {
 
     // ============ FETCH BALANCE (with debouncing) ============
 
-    const fetchShadowireBalance = useCallback(async (force: boolean = false) => {
+    const fetchStealthBalance = useCallback(async (force: boolean = false) => {
         // Debounce: skip if called too recently (unless forced)
         const now = Date.now();
         if (!force && now - lastBalanceFetchRef.current < BALANCE_FETCH_DEBOUNCE_MS) {
-            console.log('fetchShadowireBalance: Debounced - too soon since last fetch');
+            console.log('fetchStealthBalance: Debounced - too soon since last fetch');
             return;
         }
         lastBalanceFetchRef.current = now;
 
-        console.log('fetchShadowireBalance: Starting...');
-        console.log('fetchShadowireBalance: initialized =', shredrClient.initialized);
-        console.log('fetchShadowireBalance: shadowireAddress =', shredrClient.shadowireAddress);
+        console.log('fetchStealthBalance: Starting...');
+        console.log('fetchStealthBalance: initialized =', shredrClient.initialized);
+        console.log('fetchStealthBalance: stealthAddress =', shredrClient.stealthAddress);
         
-        if (!shredrClient.initialized || !shredrClient.shadowireAddress) {
-            console.log('fetchShadowireBalance: Skipping - not initialized or no address');
+        if (!shredrClient.initialized || !shredrClient.stealthAddress) {
+            console.log('fetchStealthBalance: Skipping - not initialized or no address');
             return;
         }
         
@@ -74,20 +74,20 @@ function ClaimPage({ onBack }: ClaimPageProps) {
         setPageState('loadingBalance');
         
         try {
-            console.log('fetchShadowireBalance: Calling getShadowireBalance()...');
-            const balance = await shredrClient.getShadowireBalance();
+            console.log('fetchStealthBalance: Calling getStealthBalance()...');
+            const balance = await shredrClient.getStealthBalance();
             
             if (!isMountedRef.current) return;
             
-            console.log('fetchShadowireBalance: Got balance:', {
+            console.log('fetchStealthBalance: Got balance:', {
                 available: balance.available,
                 availableLamports: balance.availableLamports,
-                poolAddress: balance.poolAddress
+                address: balance.address
             });
             setTotalBalance(balance.availableLamports);
             setPageState('ready');
         } catch (err) {
-            console.error('fetchShadowireBalance: Failed to fetch balance:', err);
+            console.error('fetchStealthBalance: Failed to fetch balance:', err);
             if (!isMountedRef.current) return;
             setTotalBalance(0);
             setPageState('ready');
@@ -98,12 +98,12 @@ function ClaimPage({ onBack }: ClaimPageProps) {
     useEffect(() => {
         if (connected && pageState === 'loadingBalance' && publicKey) {
             // Trigger balance fetch - force=true bypasses debounce for initial load
-            fetchShadowireBalance(true);
+            fetchStealthBalance(true);
         } else if (!connected) {
             setTotalBalance(0);
             setPageState('idle');
         }
-    }, [connected, pageState, publicKey, fetchShadowireBalance]);
+    }, [connected, pageState, publicKey, fetchStealthBalance]);
 
     // ============ ACTIONS ============
 
@@ -144,8 +144,8 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             return;
         }
         
-        if (pageState !== 'ready' || !shredrClient.shadowireBurner) {
-            setWithdrawError('Shadowire address not initialized');
+        if (pageState !== 'ready' || !shredrClient.stealthBurner) {
+            setWithdrawError('Stealth address not initialized');
             return;
         }
 
@@ -166,7 +166,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
 
             console.log('ClaimPage: Starting withdrawal to', destinationAddress);
 
-            // Withdraw via external transfer from Shadowire Address (burner[0]) to connected wallet
+            // Withdraw via external transfer from stealth address (burner[0]) to connected wallet
             const result = await shredrClient.withdrawToWallet(
                 destinationAddress,
                 'all'  // Withdraw full balance
@@ -178,7 +178,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             setWithdrawSuccess(`Withdrawn ${result.amount.toFixed(4)} SOL! Tx: ${result.signature.slice(0, 8)}...`);
             
             // Force refresh balance after successful withdrawal
-            await fetchShadowireBalance(true);
+            await fetchStealthBalance(true);
 
         } catch (err) {
             console.error('Withdrawal failed:', err);
@@ -186,7 +186,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             setWithdrawError(err instanceof Error ? err.message : 'Withdrawal failed');
             setPageState('ready');
         }
-    }, [publicKey, pageState, fetchShadowireBalance]);
+    }, [publicKey, pageState, fetchStealthBalance]);
 
     // ============ HELPERS ============
 
@@ -255,17 +255,17 @@ function ClaimPage({ onBack }: ClaimPageProps) {
 
                 {/* Balance Display */}
                 <div className="balance-section">
-                    <span className="balance-label">shadowire balance</span>
+                    <span className="balance-label">stealth balance</span>
                     <span className="balance-amount">
                         {pageState === 'loadingBalance' ? 'loading...' :
                          isInitialized ? `${formatBalance(totalBalance)} SOL` : '---'}
                     </span>
                 </div>
                 
-                {/* Shadowire Address Display */}
-                {isInitialized && shredrClient.shadowireAddress && (
+                {/* Stealth Address Display */}
+                {isInitialized && shredrClient.stealthAddress && (
                     <div className="burner-address-display">
-                        <small>From: {shredrClient.shadowireAddress.slice(0, 6)}...{shredrClient.shadowireAddress.slice(-6)}</small>
+                        <small>From: {shredrClient.stealthAddress.slice(0, 6)}...{shredrClient.stealthAddress.slice(-6)}</small>
                     </div>
                 )}
                 
@@ -301,7 +301,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                 <div className="claim-note">
                     {!isInitialized 
                         ? "Sign to recover your privacy keys and scan for funds." 
-                        : "Withdraw all funds from your Shadowire Address to your connected wallet."}
+                        : "Withdraw all funds from your stealth address to your connected wallet."}
                 </div>
             </div>
         </div>
