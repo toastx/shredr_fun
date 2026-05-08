@@ -1,20 +1,39 @@
 /**
  * ShredrClient - Main orchestrator for SHREDR privacy wallet
  *
- * Coordinates NonceService and BurnerService to provide:
+ * Coordinates NonceService, BurnerService, and ShredrProgram to provide:
  * - Initialization from wallet signature
  * - Burner address generation
+ * - On-chain deposits/withdrawals via the shredr_program
+ * - Stealth PDA management
  * - Transaction sweeping (auto/manual mode)
  * - State management
  */
 import { nonceService } from "./NonceService";
 import { burnerService } from "./BurnerService";
 import { apiClient } from "./ApiClient";
-import { Keypair, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import {
+  Connection,
+  Keypair,
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  Transaction,
+  sendAndConfirmTransaction,
+} from "@solana/web3.js";
 import {
   SWEEP_FEE_BUFFER_LAMPORTS,
   SWEEP_THRESHOLD_LAMPORTS,
+  HELIUS_RPC_URL,
 } from "./constants";
+import {
+  deriveStealthPDA,
+  deriveVaultPDA,
+  createStealthWithdrawInstruction,
+  createVaultDepositInstruction,
+  createVaultWithdrawInstruction,
+  getVaultBalance,
+  SHREDR_PROGRAM_ID,
+} from "./ShredrProgram";
 import type { GeneratedNonce, BurnerKeyPair, CreateBlobRequest } from "./types";
 
 // ============ TYPES ============
@@ -36,7 +55,7 @@ export interface ShredrState {
   initialized: boolean;
   currentNonce: GeneratedNonce | null;
   currentBurner: BurnerKeyPair | null;
-  shadowireAddress: string | null; // The stable receiving address (burner[0])
+  stealthAddress: string | null; // The stable receiving address (burner[0])
   signingMode: SigningMode;
   currentBlobId: string | null;
 }
@@ -46,11 +65,12 @@ export class ShredrClient {
   private _initialized = false;
   private _currentNonce: GeneratedNonce | null = null;
   private _currentBurner: BurnerKeyPair | null = null;
-  private _shadowireBurner: BurnerKeyPair | null = null; // burner[0] - stable receiving address
+  private _stealthBurner: BurnerKeyPair | null = null; // burner[0] - stable receiving address
   private _walletPubkey: Uint8Array | null = null;
   private _signingMode: SigningMode = "auto";
   private _currentBlobId: string | null = null;
   private _isNewUser = false;
+  private _connection: Connection | null = null;
 
   // ============ GETTERS ============
   get initialized(): boolean {
@@ -63,17 +83,25 @@ export class ShredrClient {
     return this._currentBurner?.address ?? null;
   }
   /**
-   * The user's stable "Shadowire Address" - burner[0]
+   * The user's stable stealth address - burner[0]
    * This is the address they share for receiving private payments.
    */
+  get stealthAddress(): string | null {
+    return this._stealthBurner?.address ?? null;
+  }
+  /** @deprecated Use stealthAddress instead */
   get shadowireAddress(): string | null {
-    return this._shadowireBurner?.address ?? null;
+    return this.stealthAddress;
   }
   /**
-   * The full burner keypair for Shadowire Address (needed for withdrawals)
+   * The full burner keypair for stealth address (needed for withdrawals)
    */
+  get stealthBurner(): BurnerKeyPair | null {
+    return this._stealthBurner;
+  }
+  /** @deprecated Use stealthBurner instead */
   get shadowireBurner(): BurnerKeyPair | null {
-    return this._shadowireBurner;
+    return this.stealthBurner;
   }
   get signingMode(): SigningMode {
     return this._signingMode;
@@ -86,10 +114,24 @@ export class ShredrClient {
       initialized: this._initialized,
       currentNonce: this._currentNonce,
       currentBurner: this._currentBurner,
-      shadowireAddress: this._shadowireBurner?.address ?? null,
+      stealthAddress: this._stealthBurner?.address ?? null,
       signingMode: this._signingMode,
       currentBlobId: this._currentBlobId,
     };
+  }
+
+  /** Get or create a Solana RPC connection */
+  private getConnection(rpcUrl?: string): Connection {
+    if (rpcUrl) return new Connection(rpcUrl, "confirmed");
+    if (!this._connection) {
+      this._connection = new Connection(HELIUS_RPC_URL, "confirmed");
+    }
+    return this._connection;
+  }
+
+  /** Build a Keypair from a BurnerKeyPair's secretKey */
+  private burnerToKeypair(burner: BurnerKeyPair): Keypair {
+    return Keypair.fromSecretKey(burner.secretKey);
   }
 
   // ============ USER STATUS CHECK ============
@@ -177,16 +219,16 @@ export class ShredrClient {
     await burnerService.initFromSignature(signature);
     console.log("[initFromSignature] Services initialized");
 
-    // Store wallet pubkey for Shadowire Address derivation
+    // Store wallet pubkey for stealth address derivation
     this._walletPubkey = walletPubkey;
 
-    // 2. Derive the Shadowire Address (burner[0]) - always same for this wallet
+    // 2. Derive the stealth address (burner[0]) - always same for this wallet
     const baseNonce = await nonceService.generateNonceAtIndex(0, walletPubkey);
-    this._shadowireBurner =
+    this._stealthBurner =
       await burnerService.deriveShadowireAddress(baseNonce);
     console.log(
-      "[initFromSignature] Shadowire address derived:",
-      this._shadowireBurner?.address,
+      "[initFromSignature] Stealth address derived:",
+      this._stealthBurner?.address,
     );
 
     // 3. Try local storage first for current spending nonce
@@ -275,7 +317,7 @@ export class ShredrClient {
 
     if (isSameAsBaseNonce) {
       console.warn(
-        "Current nonce matches burner[0] - incrementing to protect Shadowire Address",
+        "Current nonce matches burner[0] - incrementing to protect stealth address",
       );
       nonce = await nonceService.incrementNonce();
     }
@@ -331,8 +373,11 @@ export class ShredrClient {
     return this._currentBurner;
   }
 
-  // ============ PENDING POOL TRANSFER RECOVERY ============
+  // ============ VAULT BALANCE & OPERATIONS ============
 
+  /**
+   * Check balance of a vault PDA for the current burner.
+   */
   async checkPendingPoolBalance(rpcUrl?: string): Promise<{
     hasPending: boolean;
     poolBalanceSol: number;
@@ -342,23 +387,33 @@ export class ShredrClient {
       return { hasPending: false, poolBalanceSol: 0, poolBalanceLamports: 0 };
     }
 
-    // TODO: implement with new provider
-    return {
-      hasPending: false,
-      poolBalanceSol: 0,
-      poolBalanceLamports: 0,
-    };
+    try {
+      const connection = this.getConnection(rpcUrl);
+      const burnerPubkey = new PublicKey(this._currentBurner.publicKey);
+      const { lamports } = await getVaultBalance(connection, burnerPubkey);
+
+      return {
+        hasPending: lamports > 0,
+        poolBalanceSol: lamports / LAMPORTS_PER_SOL,
+        poolBalanceLamports: lamports,
+      };
+    } catch (err) {
+      console.warn("Failed to check pool balance:", err);
+      return { hasPending: false, poolBalanceSol: 0, poolBalanceLamports: 0 };
+    }
   }
 
+  /**
+   * Complete a pending pool transfer by withdrawing from vault to stealth address.
+   */
   async completePendingPoolTransfer(rpcUrl?: string): Promise<string | null> {
     if (!this._initialized || !this._currentBurner) {
       throw new Error("ShredrClient not initialized");
     }
-    if (!this._shadowireBurner) {
-      throw new Error("Shadowire burner not available");
+    if (!this._stealthBurner) {
+      throw new Error("Stealth burner not available");
     }
 
-    // Check pool balance
     const { hasPending, poolBalanceSol } =
       await this.checkPendingPoolBalance(rpcUrl);
 
@@ -371,14 +426,27 @@ export class ShredrClient {
       `Found ${poolBalanceSol} SOL in burner pool - completing transfer...`,
     );
 
-    // TODO: implement with new provider
-    const transferSig = "dummy_transfer_sig";
-    console.log(`Pool transfer completed: ${transferSig}`);
+    try {
+      const connection = this.getConnection(rpcUrl);
+      const burnerKeypair = this.burnerToKeypair(this._currentBurner);
+      const ix = createVaultWithdrawInstruction(burnerKeypair.publicKey);
+      const tx = new Transaction().add(ix);
+      const transferSig = await sendAndConfirmTransaction(
+        connection,
+        tx,
+        [burnerKeypair],
+        { commitment: "confirmed" },
+      );
+      console.log(`Pool transfer completed: ${transferSig}`);
 
-    // Rotate to new burner after successful transfer
-    await this.consumeAndGenerateNew();
+      // Rotate to new burner after successful transfer
+      await this.consumeAndGenerateNew();
 
-    return transferSig;
+      return transferSig;
+    } catch (err) {
+      console.error("Pool transfer failed:", err);
+      throw err;
+    }
   }
 
   // ============ TRANSACTION HANDLING ============
@@ -422,6 +490,9 @@ export class ShredrClient {
     return await this.executeSweep(pendingTx.amount);
   }
 
+  /**
+   * Execute a sweep: deposit burner balance into a vault PDA, then rotate burner.
+   */
   async executeSweep(
     amountInLamports: number,
     rpcUrl?: string,
@@ -430,9 +501,12 @@ export class ShredrClient {
     if (!this._initialized || !this._currentBurner) {
       throw new Error("ShredrClient not initialized");
     }
-    if (!this._shadowireBurner) {
-      throw new Error("Shadowire burner not available");
+    if (!this._stealthBurner) {
+      throw new Error("Stealth burner not available");
     }
+
+    const connection = this.getConnection(rpcUrl);
+    const burnerKeypair = this.burnerToKeypair(this._currentBurner);
 
     console.log(`Sweep: Using burner address ${this._currentBurner.address}`);
 
@@ -444,8 +518,9 @@ export class ShredrClient {
         `Sweep: Trusting WebSocket balance: ${amountInLamports}, depositing: ${amountToDeposit}`,
       );
     } else {
-      // TODO: Get actual wallet balance from new provider
-      const walletBalance = amountInLamports;
+      const walletBalance = await connection.getBalance(
+        burnerKeypair.publicKey,
+      );
       console.log(`Sweep: RPC wallet balance: ${walletBalance} lamports`);
       const maxSweepable = walletBalance - SWEEP_FEE_BUFFER_LAMPORTS;
       amountToDeposit = Math.min(amountInLamports, maxSweepable);
@@ -457,10 +532,20 @@ export class ShredrClient {
       );
     }
 
-    const shadowireAddress = this._shadowireBurner.address;
+    // Deposit into vault PDA via the shredr_program
+    const ix = createVaultDepositInstruction(
+      burnerKeypair.publicKey,
+      BigInt(amountToDeposit),
+    );
+    const tx = new Transaction().add(ix);
+    const transferSig = await sendAndConfirmTransaction(
+      connection,
+      tx,
+      [burnerKeypair],
+      { commitment: "confirmed" },
+    );
 
-    // TODO: implement with new provider
-    const transferSig = "dummy_transfer_sig";
+    console.log(`Sweep deposited to vault: ${transferSig}`);
 
     // Clear any pending sweep state since we succeeded
     this._pendingSweep = null;
@@ -500,8 +585,8 @@ export class ShredrClient {
     if (!this._pendingSweep) {
       throw new Error("No pending sweep to recover");
     }
-    if (!this._shadowireBurner) {
-      throw new Error("Shadowire burner not available");
+    if (!this._stealthBurner) {
+      throw new Error("Stealth burner not available");
     }
     if (!this._walletPubkey) {
       throw new Error(
@@ -527,8 +612,18 @@ export class ShredrClient {
     }
 
     try {
-      // TODO: implement with new provider
-      const transferSig = "dummy_recovery_transfer_sig";
+      const connection = this.getConnection(rpcUrl);
+      const recoveryKeypair = this.burnerToKeypair(recoveryBurner);
+
+      // Withdraw from vault PDA
+      const ix = createVaultWithdrawInstruction(recoveryKeypair.publicKey);
+      const tx = new Transaction().add(ix);
+      const transferSig = await sendAndConfirmTransaction(
+        connection,
+        tx,
+        [recoveryKeypair],
+        { commitment: "confirmed" },
+      );
 
       // Clear pending state (burner cleanup happens in finally)
       this._pendingSweep = null;
@@ -542,67 +637,132 @@ export class ShredrClient {
     }
   }
 
-  // ============ SHADOWIRE BALANCE & WITHDRAW ============
+  // ============ STEALTH BALANCE & WITHDRAW ============
 
-  async getShadowireBalance(rpcUrl?: string): Promise<{
+  /**
+   * Get balance of the stealth address (burner[0]).
+   * Queries direct lamport balance on the stealth burner address.
+   */
+  async getStealthBalance(rpcUrl?: string): Promise<{
     available: number; // SOL amount (human readable)
     availableLamports: number; // Raw lamports
-    poolAddress: string;
+    address: string;
   }> {
-    if (!this._shadowireBurner) {
+    if (!this._stealthBurner) {
       throw new Error(
-        "Shadowire Address not derived. Call initFromSignature first.",
+        "Stealth address not derived. Call initFromSignature first.",
       );
     }
 
+    const connection = this.getConnection(rpcUrl);
+    const stealthPubkey = new PublicKey(this._stealthBurner.publicKey);
+
     console.log(
-      `getShadowireBalance: Querying balance for address: ${this._shadowireBurner.address}`,
+      `getStealthBalance: Querying balance for address: ${this._stealthBurner.address}`,
     );
 
-    // TODO: implement with new provider
-    const balance = {
-      available: 0,
-      availableLamports: 0,
-      poolAddress: "dummy_pool",
-    };
+    const lamports = await connection.getBalance(stealthPubkey);
 
-    return balance;
+    return {
+      available: lamports / LAMPORTS_PER_SOL,
+      availableLamports: lamports,
+      address: this._stealthBurner.address,
+    };
   }
 
+  /** @deprecated Use getStealthBalance instead */
+  async getShadowireBalance(rpcUrl?: string) {
+    const result = await this.getStealthBalance(rpcUrl);
+    return {
+      available: result.available,
+      availableLamports: result.availableLamports,
+      poolAddress: result.address,
+    };
+  }
+
+  /**
+   * Get balance of the current spending burner's shielded (vault) PDA.
+   */
   async getCurrentBurnerShieldedBalance(rpcUrl?: string): Promise<{
     available: number;
     availableLamports: number;
-    poolAddress: string;
+    vaultAddress: string;
   } | null> {
     if (!this._currentBurner) return null;
 
-    // TODO: implement with new provider
-    return {
-      available: 0,
-      availableLamports: 0,
-      poolAddress: "dummy_pool",
-    };
+    try {
+      const connection = this.getConnection(rpcUrl);
+      const burnerPubkey = new PublicKey(this._currentBurner.publicKey);
+      const { lamports, vault } = await getVaultBalance(
+        connection,
+        burnerPubkey,
+      );
+
+      return {
+        available: lamports / LAMPORTS_PER_SOL,
+        availableLamports: lamports,
+        vaultAddress: vault.toBase58(),
+      };
+    } catch (err) {
+      console.warn("Failed to get shielded balance:", err);
+      return null;
+    }
   }
 
+  /**
+   * Withdraw SOL from stealth address (burner[0]) to any destination wallet.
+   *
+   * This performs a standard SOL transfer from the stealth burner to the destination.
+   */
   async withdrawToWallet(
     destinationAddress: string,
     amountInSol: number | "all",
     rpcUrl?: string,
   ): Promise<{ signature: string; amount: number }> {
-    if (!this._shadowireBurner) {
+    if (!this._stealthBurner) {
       throw new Error(
-        "Shadowire Address not derived. Call initFromSignature first.",
+        "Stealth address not derived. Call initFromSignature first.",
       );
     }
 
-    // TODO: implement with new provider
-    let withdrawAmount: number = amountInSol === "all" ? 0 : amountInSol;
+    const connection = this.getConnection(rpcUrl);
+    const stealthKeypair = this.burnerToKeypair(this._stealthBurner);
+    const destination = new PublicKey(destinationAddress);
 
-    const signature = "dummy_withdraw_sig";
+    // Get current balance
+    const balance = await connection.getBalance(stealthKeypair.publicKey);
+
+    let withdrawLamports: number;
+    if (amountInSol === "all") {
+      // Leave enough for tx fee
+      withdrawLamports = balance - 5000;
+    } else {
+      withdrawLamports = Math.floor(amountInSol * LAMPORTS_PER_SOL);
+    }
+
+    if (withdrawLamports <= 0) {
+      throw new Error("Insufficient balance for withdrawal");
+    }
+
+    // Use SystemProgram transfer (simple SOL transfer from burner[0] to destination)
+    const { SystemProgram } = await import("@solana/web3.js");
+    const ix = SystemProgram.transfer({
+      fromPubkey: stealthKeypair.publicKey,
+      toPubkey: destination,
+      lamports: withdrawLamports,
+    });
+
+    const tx = new Transaction().add(ix);
+    const signature = await sendAndConfirmTransaction(
+      connection,
+      tx,
+      [stealthKeypair],
+      { commitment: "confirmed" },
+    );
 
     return {
       signature,
-      amount: withdrawAmount,
+      amount: withdrawLamports / LAMPORTS_PER_SOL,
     };
   }
 
@@ -611,8 +771,8 @@ export class ShredrClient {
     if (this._currentBurner) {
       burnerService.clearBurner(this._currentBurner);
     }
-    if (this._shadowireBurner) {
-      burnerService.clearBurner(this._shadowireBurner);
+    if (this._stealthBurner) {
+      burnerService.clearBurner(this._stealthBurner);
     }
 
     nonceService.destroy();
@@ -620,11 +780,12 @@ export class ShredrClient {
     this._initialized = false;
     this._currentNonce = null;
     this._currentBurner = null;
-    this._shadowireBurner = null;
+    this._stealthBurner = null;
     this._walletPubkey = null;
     this._currentBlobId = null;
     this._pendingSweep = null;
     this._isNewUser = false;
+    this._connection = null;
   }
 }
 

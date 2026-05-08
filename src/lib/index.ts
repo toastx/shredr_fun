@@ -1,5 +1,4 @@
 // Services
-export { ShadowWireClient, TokenUtils } from './ShadowWireClient';
 export { BurnerService, burnerService } from './BurnerService';
 export { NonceService, nonceService } from './NonceService';
 export { StorageService } from './StorageService';
@@ -7,8 +6,27 @@ export { ShredrClient, shredrClient } from './ShredrClient';
 export { ApiClient, apiClient } from './ApiClient';
 export { WebSocketClient, webSocketClient } from './WebSocketClient';
 
+// On-chain program client
+export {
+    SHREDR_PROGRAM_ID,
+    SEEDS,
+    deriveStealthPDA,
+    deriveVaultPDA,
+    createInitializeAndDelegateInstruction,
+    createPrivateTransferInstruction,
+    createStealthWithdrawInstruction,
+    createVaultDepositInstruction,
+    createVaultWithdrawInstruction,
+    parseStealthAccount,
+    getStealthBalance,
+    getVaultBalance,
+    withdrawFromStealth,
+    depositToVault,
+    withdrawFromVault,
+} from './ShredrProgram';
+export type { StealthAccountData } from './ShredrProgram';
+
 export type { SigningMode, PendingTransaction, ShredrState } from './ShredrClient';
-export { BurnerService as EncryptionService, burnerService as encryptionService } from './BurnerService';
 
 // Types
 export { DecryptionError } from './types';
