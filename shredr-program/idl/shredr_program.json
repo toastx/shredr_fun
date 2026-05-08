@@ -16,7 +16,7 @@
         {
           "name": "burner",
           "isMut": true,
-          "isSigner": true,
+          "isSigner": false,
           "docs": [
             "One-time burner keypair derived from mainKey+nonce"
           ]

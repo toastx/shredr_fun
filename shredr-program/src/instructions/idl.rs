@@ -5,7 +5,7 @@ use shank::ShankInstruction;
 pub enum StealthInstruction {
     /// Initialize a stealth PDA and delegate it to MagicBlock rollup
     #[account(0, signer, writable, name = "relayer", desc = "Relayer paying for the transaction")]
-    #[account(1, signer, writable, name = "burner", desc = "One-time burner keypair derived from mainKey+nonce")]
+    #[account(1, writable, name = "burner", desc = "One-time burner keypair derived from mainKey+nonce")]
     #[account(2, name = "owner_program", desc = "This program's address")]
     #[account(3, writable, name = "stealth_account", desc = "Stealth PDA derived from burner+salt")]
     #[account(4, writable, name = "permission_account", desc = "ACL permission account")]
