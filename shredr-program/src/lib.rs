@@ -1,4 +1,41 @@
-// lib.rs
+//! # SHREDR Privacy Program
+//!
+//! A Solana program implementing stealth account functionality with MagicBlock
+//! ephemeral rollup delegation for private transfers.
+//!
+//! ## Architecture
+//!
+//! The program manages **stealth PDAs** derived from one-time burner keypairs.
+//! Each stealth PDA tracks deposited lamports, ownership, and delegation status.
+//!
+//! ### Instruction Flow
+//!
+//! 1. **InitializeAndDelegate**: Creates a stealth PDA from a burner + salt,
+//!    writes initial state, sets up ACL permissions, and delegates to a
+//!    MagicBlock TEE validator for ephemeral rollup processing.
+//!
+//! 2. **PrivateTransfer**: Moves lamports between two stealth PDAs inside
+//!    the rollup. Both accounts must be program-owned and the source must sign.
+//!
+//! 3. **CommitStealth**: Flushes rollup state to the base layer while keeping
+//!    the account delegated.
+//!
+//! 4. **CommitAndUndelegateStealth**: Flushes state AND releases the account
+//!    back to the base layer.
+//!
+//! 5. **Withdraw**: After undelegation, the owner (burner) can withdraw
+//!    lamports to any destination address.
+//!
+//! 6. **UndelegationCallback**: Called by the MagicBlock delegation program
+//!    after finalization. Not user-invoked.
+//!
+//! ### Security Model
+//!
+//! - Stealth PDAs are derived deterministically: `[STEALTH_ADDRESS, burner_pubkey, salt]`.
+//! - The burner keypair is a one-time key derived client-side from `mainKey + nonce`.
+//! - Private transfers happen inside the MagicBlock ephemeral rollup (TEE-secured).
+//! - Withdrawals require the burner to sign and the account to be undelegated.
+
 #![no_std]
 #![allow(unexpected_cfgs)]
 
@@ -14,6 +51,7 @@ pub mod instructions;
 pub mod helpers;
 pub mod constants;
 pub mod state;
+pub mod errors;
 
 use crate::instructions::initialize_delegate::InitializeAndDelegate;
 use crate::instructions::private_transfer::PrivateTransfer;
@@ -67,12 +105,13 @@ fn process_instruction(
 
     log_instruction(instruction);
 
+    // All TryFrom implementations use the standardized (accounts, data) signature.
     match instruction {
         InstructionDiscriminator::InitializeAndDelegate => {
             InitializeAndDelegate::try_from((accounts, data))?.process()
         }
         InstructionDiscriminator::PrivateTransfer => {
-            PrivateTransfer::try_from((data, accounts))?.process()
+            PrivateTransfer::try_from((accounts, data))?.process()
         }
         InstructionDiscriminator::CommitStealth => {
             CommitStealth::try_from((accounts, data))?.process()

@@ -153,6 +153,9 @@ name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+dependencies = [
+ "bytemuck_derive",
+]
 
 [[package]]
 name = "bytemuck_derive"
@@ -1005,6 +1008,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 name = "shredr-program"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "ephemeral-rollups-pinocchio",
  "pinocchio 0.10.2",
  "pinocchio-log",

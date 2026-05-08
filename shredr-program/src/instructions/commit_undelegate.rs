@@ -1,3 +1,17 @@
+//! Commit and undelegate instructions for stealth PDAs.
+//!
+//! These instructions manage the lifecycle of delegated stealth accounts
+//! in the MagicBlock ephemeral rollup:
+//!
+//! - **CommitStealth**: Flush rollup state to base layer, keeping delegation active.
+//! - **CommitAndUndelegateStealth**: Flush state AND release the account back to base layer.
+//! - **UndelegationCallback**: Called by the delegation program after finalization (not user-invoked).
+//!
+//! ## Security
+//!
+//! - Commit operations require the relayer to sign.
+//! - UndelegationCallback is invoked by the MagicBlock delegation program via CPI.
+
 use crate::ProgramError;
 use crate::AccountView;
 use crate::ProgramResult;
