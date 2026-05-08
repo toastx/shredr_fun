@@ -171,9 +171,6 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
         if !relayer.is_signer() {
             return Err(ShredrError::MissingSigner.into());
         }
-        if !burner.is_signer() {
-            return Err(ShredrError::MissingSigner.into());
-        }
 
         // Parse Instruction Data
         // Expecting: [salt(32) + burner_pubkey(32)] = 64 bytes
