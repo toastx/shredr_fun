@@ -1,12 +1,11 @@
 /**
  * ShredrClient - Main orchestrator for SHREDR privacy wallet
  *
- * Coordinates NonceService, BurnerService, and ShredrProgram to provide:
+ * Coordinates NonceService, BurnerService, and on-chain helpers to provide:
  * - Initialization from wallet signature
  * - Burner address generation
- * - On-chain deposits/withdrawals via the shredr_program
- * - Stealth PDA management
- * - Transaction sweeping (auto/manual mode)
+ * - Stealth (burner[0]) balance lookup
+ * - Withdrawal from stealth address to any wallet
  * - State management
  */
 import { nonceService } from "./NonceService";
@@ -20,36 +19,11 @@ import {
   Transaction,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
-import {
-  SWEEP_FEE_BUFFER_LAMPORTS,
-  SWEEP_THRESHOLD_LAMPORTS,
-  HELIUS_RPC_URL,
-} from "./constants";
-import {
-  deriveStealthPDA,
-  deriveVaultPDA,
-  createStealthWithdrawInstruction,
-  createVaultDepositInstruction,
-  createVaultWithdrawInstruction,
-  getVaultBalance,
-  SHREDR_PROGRAM_ID,
-} from "./ShredrProgram";
+import { HELIUS_RPC_URL } from "./constants";
 import type { GeneratedNonce, BurnerKeyPair, CreateBlobRequest } from "./types";
 
 // ============ TYPES ============
 export type SigningMode = "auto" | "manual";
-export interface PendingTransaction {
-  amount: number; // SOL amount (lamports)
-  signature: string; // Transaction signature
-  from: string; // Sender address
-  timestamp: number; // Unix timestamp
-}
-
-export interface IncomingTxResult {
-  needsApproval: boolean;
-  pendingTx?: PendingTransaction;
-  sweepSignature?: string;
-}
 
 export interface ShredrState {
   initialized: boolean;
@@ -373,270 +347,6 @@ export class ShredrClient {
     return this._currentBurner;
   }
 
-  // ============ VAULT BALANCE & OPERATIONS ============
-
-  /**
-   * Check balance of a vault PDA for the current burner.
-   */
-  async checkPendingPoolBalance(rpcUrl?: string): Promise<{
-    hasPending: boolean;
-    poolBalanceSol: number;
-    poolBalanceLamports: number;
-  }> {
-    if (!this._initialized || !this._currentBurner) {
-      return { hasPending: false, poolBalanceSol: 0, poolBalanceLamports: 0 };
-    }
-
-    try {
-      const connection = this.getConnection(rpcUrl);
-      const burnerPubkey = new PublicKey(this._currentBurner.publicKey);
-      const { lamports } = await getVaultBalance(connection, burnerPubkey);
-
-      return {
-        hasPending: lamports > 0,
-        poolBalanceSol: lamports / LAMPORTS_PER_SOL,
-        poolBalanceLamports: lamports,
-      };
-    } catch (err) {
-      console.warn("Failed to check pool balance:", err);
-      return { hasPending: false, poolBalanceSol: 0, poolBalanceLamports: 0 };
-    }
-  }
-
-  /**
-   * Complete a pending pool transfer by withdrawing from vault to stealth address.
-   */
-  async completePendingPoolTransfer(rpcUrl?: string): Promise<string | null> {
-    if (!this._initialized || !this._currentBurner) {
-      throw new Error("ShredrClient not initialized");
-    }
-    if (!this._stealthBurner) {
-      throw new Error("Stealth burner not available");
-    }
-
-    const { hasPending, poolBalanceSol } =
-      await this.checkPendingPoolBalance(rpcUrl);
-
-    if (!hasPending || poolBalanceSol <= 0) {
-      console.log("No pending pool balance to transfer");
-      return null;
-    }
-
-    console.log(
-      `Found ${poolBalanceSol} SOL in burner pool - completing transfer...`,
-    );
-
-    try {
-      const connection = this.getConnection(rpcUrl);
-      const burnerKeypair = this.burnerToKeypair(this._currentBurner);
-      const ix = createVaultWithdrawInstruction(burnerKeypair.publicKey);
-      const tx = new Transaction().add(ix);
-      const transferSig = await sendAndConfirmTransaction(
-        connection,
-        tx,
-        [burnerKeypair],
-        { commitment: "confirmed" },
-      );
-      console.log(`Pool transfer completed: ${transferSig}`);
-
-      // Rotate to new burner after successful transfer
-      await this.consumeAndGenerateNew();
-
-      return transferSig;
-    } catch (err) {
-      console.error("Pool transfer failed:", err);
-      throw err;
-    }
-  }
-
-  // ============ TRANSACTION HANDLING ============
-
-  async incomingTx(balanceLamports: number): Promise<IncomingTxResult> {
-    if (!this._initialized || !this._currentBurner) {
-      throw new Error("ShredrClient not initialized");
-    }
-
-    // Check threshold
-    if (balanceLamports < SWEEP_THRESHOLD_LAMPORTS) {
-      return { needsApproval: false };
-    }
-
-    const pendingTx: PendingTransaction = {
-      amount: balanceLamports,
-      signature: "",
-      from: "unknown",
-      timestamp: Date.now(),
-    };
-
-    if (this._signingMode === "auto") {
-      console.log(
-        `Auto-sweep triggered: ${balanceLamports / LAMPORTS_PER_SOL} SOL`,
-      );
-      const sweepSig = await this.executeSweep(
-        balanceLamports,
-        undefined,
-        true,
-      );
-      return { needsApproval: false, sweepSignature: sweepSig };
-    } else {
-      return { needsApproval: true, pendingTx };
-    }
-  }
-
-  async approveSweep(pendingTx: PendingTransaction): Promise<string> {
-    if (!this._initialized || !this._currentBurner) {
-      throw new Error("ShredrClient not initialized");
-    }
-    return await this.executeSweep(pendingTx.amount);
-  }
-
-  /**
-   * Execute a sweep: deposit burner balance into a vault PDA, then rotate burner.
-   */
-  async executeSweep(
-    amountInLamports: number,
-    rpcUrl?: string,
-    trustBalance: boolean = false,
-  ): Promise<string> {
-    if (!this._initialized || !this._currentBurner) {
-      throw new Error("ShredrClient not initialized");
-    }
-    if (!this._stealthBurner) {
-      throw new Error("Stealth burner not available");
-    }
-
-    const connection = this.getConnection(rpcUrl);
-    const burnerKeypair = this.burnerToKeypair(this._currentBurner);
-
-    console.log(`Sweep: Using burner address ${this._currentBurner.address}`);
-
-    let amountToDeposit: number;
-
-    if (trustBalance) {
-      amountToDeposit = amountInLamports - SWEEP_FEE_BUFFER_LAMPORTS;
-      console.log(
-        `Sweep: Trusting WebSocket balance: ${amountInLamports}, depositing: ${amountToDeposit}`,
-      );
-    } else {
-      const walletBalance = await connection.getBalance(
-        burnerKeypair.publicKey,
-      );
-      console.log(`Sweep: RPC wallet balance: ${walletBalance} lamports`);
-      const maxSweepable = walletBalance - SWEEP_FEE_BUFFER_LAMPORTS;
-      amountToDeposit = Math.min(amountInLamports, maxSweepable);
-    }
-
-    if (amountToDeposit <= 0) {
-      throw new Error(
-        `Insufficient funds after fees: need > ${SWEEP_FEE_BUFFER_LAMPORTS} lamports`,
-      );
-    }
-
-    // Deposit into vault PDA via the shredr_program
-    const ix = createVaultDepositInstruction(
-      burnerKeypair.publicKey,
-      BigInt(amountToDeposit),
-    );
-    const tx = new Transaction().add(ix);
-    const transferSig = await sendAndConfirmTransaction(
-      connection,
-      tx,
-      [burnerKeypair],
-      { commitment: "confirmed" },
-    );
-
-    console.log(`Sweep deposited to vault: ${transferSig}`);
-
-    // Clear any pending sweep state since we succeeded
-    this._pendingSweep = null;
-
-    // Step 4: Rotate nonce/burner after successful sweep
-    await this.consumeAndGenerateNew();
-
-    return transferSig;
-  }
-
-  // Pending sweep state for recovery
-  private _pendingSweep: {
-    burnerAddress: string;
-    burnerNonceIndex: number;
-    poolBalance: number;
-    timestamp: number;
-  } | null = null;
-
-  get hasPendingSweep(): boolean {
-    return this._pendingSweep !== null;
-  }
-
-  get pendingSweepInfo(): {
-    burnerAddress: string;
-    poolBalance: number;
-    timestamp: number;
-  } | null {
-    if (!this._pendingSweep) return null;
-    return {
-      burnerAddress: this._pendingSweep.burnerAddress,
-      poolBalance: this._pendingSweep.poolBalance,
-      timestamp: this._pendingSweep.timestamp,
-    };
-  }
-
-  async recoverPendingSweep(rpcUrl?: string): Promise<string> {
-    if (!this._pendingSweep) {
-      throw new Error("No pending sweep to recover");
-    }
-    if (!this._stealthBurner) {
-      throw new Error("Stealth burner not available");
-    }
-    if (!this._walletPubkey) {
-      throw new Error(
-        "Wallet pubkey not available - call initFromSignature first",
-      );
-    }
-
-    console.log(
-      `Recovery: Attempting to recover sweep for nonce index ${this._pendingSweep.burnerNonceIndex}...`,
-    );
-
-    const recoveryNonce = await nonceService.generateNonceAtIndex(
-      this._pendingSweep.burnerNonceIndex,
-      this._walletPubkey,
-    );
-    const recoveryBurner =
-      await burnerService.deriveBurnerFromNonce(recoveryNonce);
-
-    if (recoveryBurner.address !== this._pendingSweep.burnerAddress) {
-      console.warn(
-        `Recovery: Derived address ${recoveryBurner.address} doesn't match expected ${this._pendingSweep.burnerAddress}`,
-      );
-    }
-
-    try {
-      const connection = this.getConnection(rpcUrl);
-      const recoveryKeypair = this.burnerToKeypair(recoveryBurner);
-
-      // Withdraw from vault PDA
-      const ix = createVaultWithdrawInstruction(recoveryKeypair.publicKey);
-      const tx = new Transaction().add(ix);
-      const transferSig = await sendAndConfirmTransaction(
-        connection,
-        tx,
-        [recoveryKeypair],
-        { commitment: "confirmed" },
-      );
-
-      // Clear pending state (burner cleanup happens in finally)
-      this._pendingSweep = null;
-
-      // Rotate nonce/burner
-      await this.consumeAndGenerateNew();
-
-      return transferSig;
-    } finally {
-      burnerService.clearBurner(recoveryBurner);
-    }
-  }
-
   // ============ STEALTH BALANCE & WITHDRAW ============
 
   /**
@@ -678,35 +388,6 @@ export class ShredrClient {
       availableLamports: result.availableLamports,
       poolAddress: result.address,
     };
-  }
-
-  /**
-   * Get balance of the current spending burner's shielded (vault) PDA.
-   */
-  async getCurrentBurnerShieldedBalance(rpcUrl?: string): Promise<{
-    available: number;
-    availableLamports: number;
-    vaultAddress: string;
-  } | null> {
-    if (!this._currentBurner) return null;
-
-    try {
-      const connection = this.getConnection(rpcUrl);
-      const burnerPubkey = new PublicKey(this._currentBurner.publicKey);
-      const { lamports, vault } = await getVaultBalance(
-        connection,
-        burnerPubkey,
-      );
-
-      return {
-        available: lamports / LAMPORTS_PER_SOL,
-        availableLamports: lamports,
-        vaultAddress: vault.toBase58(),
-      };
-    } catch (err) {
-      console.warn("Failed to get shielded balance:", err);
-      return null;
-    }
   }
 
   /**
@@ -783,7 +464,6 @@ export class ShredrClient {
     this._stealthBurner = null;
     this._walletPubkey = null;
     this._currentBlobId = null;
-    this._pendingSweep = null;
     this._isNewUser = false;
     this._connection = null;
   }
