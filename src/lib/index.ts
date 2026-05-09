@@ -11,22 +11,18 @@ export {
     SHREDR_PROGRAM_ID,
     SEEDS,
     deriveStealthPDA,
-    deriveVaultPDA,
     createInitializeAndDelegateInstruction,
     createPrivateTransferInstruction,
+    createCommitStealthInstruction,
+    createCommitAndUndelegateStealthInstruction,
     createStealthWithdrawInstruction,
-    createVaultDepositInstruction,
-    createVaultWithdrawInstruction,
     parseStealthAccount,
     getStealthBalance,
-    getVaultBalance,
     withdrawFromStealth,
-    depositToVault,
-    withdrawFromVault,
 } from './ShredrProgram';
 export type { StealthAccountData } from './ShredrProgram';
 
-export type { SigningMode, PendingTransaction, ShredrState } from './ShredrClient';
+export type { SigningMode, ShredrState } from './ShredrClient';
 
 // Types
 export { DecryptionError } from './types';

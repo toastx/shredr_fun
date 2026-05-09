@@ -3,12 +3,10 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { shredrClient, webSocketClient } from "../../lib";
-import { MASTER_MESSAGE, HELIUS_RPC_URL, SWEEP_THRESHOLD_LAMPORTS } from "../../lib/constants";
+import { MASTER_MESSAGE, HELIUS_RPC_URL } from "../../lib/constants";
 import type { WebSocketMessage } from "../../lib/types";
-import type { PendingTransaction, SigningMode } from "../../lib/ShredrClient";
 import AddressDisplay from "../../components/AddressDisplay";
 import { TransactionMonitor } from "../../components/TransactionMonitor";
-import { TransactionApprovalModal } from "../../components/TransactionApprovalModal";
 import "./GeneratorPage.css";
 
 // ============ STATE TYPES ============
@@ -33,13 +31,9 @@ function GeneratorPage() {
     const [burnerAddress, setBurnerAddress] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [burnerBalance, setBurnerBalance] = useState<number>(0);
-    const [pendingTransaction, setPendingTransaction] = useState<PendingTransaction | null>(null);
-    const [isShielding, setIsShielding] = useState(false);
     const [copied, setCopied] = useState(false);
-    const [isAutoMode, setIsAutoMode] = useState(true);
 
     // Refs
-    const hasTriggeredSweep = useRef<boolean>(false);
     const copiedTimeout = useRef<NodeJS.Timeout | null>(null);
     const burnerAddressRef = useRef<string | null>(null);
     const wsMessageHandlerRef = useRef<((data: WebSocketMessage) => void) | null>(null);
@@ -65,63 +59,6 @@ function GeneratorPage() {
         }
     }, []);
 
-    // ============ SWEEP HANDLER ============
-
-    const handleBalanceUpdate = useCallback(async (balanceLamports: number) => {
-        // Only sweep if balance exceeds threshold
-        if (balanceLamports < SWEEP_THRESHOLD_LAMPORTS) {
-            console.log(`Balance ${balanceLamports} below threshold, skipping sweep`);
-            return;
-        }
-
-        if (hasTriggeredSweep.current) return;
-        hasTriggeredSweep.current = true;
-        setIsShielding(true);
-
-        try {
-            const result = await shredrClient.incomingTx(balanceLamports);
-            if (result.sweepSignature) {
-                // Rotate to new burner
-                const newAddress = shredrClient.currentBurnerAddress;
-                if (newAddress && newAddress !== burnerAddressRef.current) {
-                    setBurnerAddress(newAddress);
-                    webSocketClient.subscribeToAccount(newAddress);
-                    await refreshBalance(newAddress);
-                }
-            } else if (result.needsApproval && result.pendingTx) {
-                setPendingTransaction(result.pendingTx);
-                setIsShielding(false);
-                return;
-            }
-        } catch (err) {
-            console.error("Sweep failed:", err);
-            
-            // Check if this was an internal transfer failure (recoverable)
-            if (shredrClient.hasPendingSweep) {
-                console.log("Attempting recovery of pending sweep...");
-                try {
-                    const recoverySig = await shredrClient.recoverPendingSweep();
-                    console.log("Recovery successful:", recoverySig);
-                    
-                    // Rotate to new burner after successful recovery
-                    const newAddress = shredrClient.currentBurnerAddress;
-                    if (newAddress && newAddress !== burnerAddressRef.current) {
-                        setBurnerAddress(newAddress);
-                        webSocketClient.subscribeToAccount(newAddress);
-                        await refreshBalance(newAddress);
-                    }
-                } catch (recoveryErr) {
-                    console.error("Recovery also failed:", recoveryErr);
-                    setError(`Sweep recovery failed. Your funds are safe in the pool. Try again later.`);
-                }
-            } else {
-                setError(err instanceof Error ? err.message : "Sweep failed");
-            }
-        }
-        setIsShielding(false);
-        hasTriggeredSweep.current = false;
-    }, [refreshBalance]);
-
     // ============ WALLET EFFECTS ============
 
     useEffect(() => {
@@ -130,7 +67,6 @@ function GeneratorPage() {
             setBurnerAddress(null);
             setCopied(false);
             setError(null);
-            setPendingTransaction(null);
             // IMPORTANT: Disconnect WebSocket BEFORE destroying client
             // to prevent any callbacks from firing during cleanup
             webSocketClient.disconnect();
@@ -194,35 +130,8 @@ function GeneratorPage() {
                 // Subscribe to account updates (auto-connects WebSocket)
                 webSocketClient.subscribeToAccount(address);
 
-                // Check for any pending pool balance that wasn't transferred
-                // (e.g., from a previous failed internal transfer)
-                const pendingCheck = await shredrClient.checkPendingPoolBalance();
-                if (pendingCheck.hasPending) {
-                    console.log(`Found ${pendingCheck.poolBalanceSol} SOL in pool - completing transfer...`);
-                    setIsShielding(true);
-                    try {
-                        const transferSig = await shredrClient.completePendingPoolTransfer();
-                        if (transferSig) {
-                            console.log("Pending pool transfer completed:", transferSig);
-                            // Update to new burner after rotation
-                            const newAddress = shredrClient.currentBurnerAddress;
-                            if (newAddress) {
-                                setBurnerAddress(newAddress);
-                                webSocketClient.subscribeToAccount(newAddress);
-                            }
-                        }
-                    } catch (pendingErr) {
-                        console.error("Failed to complete pending transfer:", pendingErr);
-                        setError(`Pending transfer failed: ${pendingErr instanceof Error ? pendingErr.message : String(pendingErr)}`);
-                    }
-                    setIsShielding(false);
-                }
-
-                // Fetch initial balance and check for sweep
-                const lamports = await refreshBalance(shredrClient.currentBurnerAddress || address);
-                if (lamports >= SWEEP_THRESHOLD_LAMPORTS) {
-                    handleBalanceUpdate(lamports);
-                }
+                // Fetch initial balance
+                await refreshBalance(shredrClient.currentBurnerAddress || address);
 
                 // Listen for account updates
                 // Store handler ref for cleanup
@@ -232,14 +141,14 @@ function GeneratorPage() {
                         console.warn("Invalid WebSocket message: not an object");
                         return;
                     }
-                    
+
                     if (data.type !== "accountUpdate") {
                         return; // Skip non-account-update messages
                     }
 
                     // Validate lamports value with strict type checking
                     const lamportsFromWs = (data as { lamports?: unknown }).lamports;
-                    
+
                     // SECURITY: Validate lamports is a safe positive integer
                     if (
                         typeof lamportsFromWs !== "number" ||
@@ -255,11 +164,9 @@ function GeneratorPage() {
                         console.log(`WebSocket balance update: ${lamportsFromWs} lamports`);
                         // Update UI balance
                         setBurnerBalance(lamportsFromWs / LAMPORTS_PER_SOL);
-                        // Trigger sweep if above threshold
-                        handleBalanceUpdate(lamportsFromWs);
                     }
                 };
-                
+
                 // Store ref for cleanup and register handler
                 wsMessageHandlerRef.current = messageHandler;
                 webSocketClient.onMessage(messageHandler);
@@ -275,7 +182,7 @@ function GeneratorPage() {
                 setPageState("error");
             }
         }
-    }, [publicKey, signMessage, refreshBalance, handleBalanceUpdate]);
+    }, [publicKey, signMessage, refreshBalance]);
 
     const handleCopy = useCallback(async () => {
         if (!burnerAddress) return;
@@ -294,34 +201,6 @@ function GeneratorPage() {
         setError(null);
         setPageState("connected");
     }, []);
-
-    const handleApproveTransaction = useCallback(async () => {
-        if (!pendingTransaction) return;
-        try {
-            await shredrClient.approveSweep(pendingTransaction);
-            const newAddress = shredrClient.currentBurnerAddress;
-            if (newAddress) {
-                setBurnerAddress(newAddress);
-                webSocketClient.subscribeToAccount(newAddress);
-                await refreshBalance(newAddress);
-            }
-        } catch (err) {
-            console.error("Manual sweep failed:", err);
-        }
-        setPendingTransaction(null);
-        hasTriggeredSweep.current = false;
-    }, [pendingTransaction, refreshBalance]);
-
-    const handleRejectTransaction = useCallback(() => {
-        setPendingTransaction(null);
-        hasTriggeredSweep.current = false;
-    }, []);
-
-    const handleModeToggle = useCallback(() => {
-        const newMode: SigningMode = isAutoMode ? "manual" : "auto";
-        setIsAutoMode(!isAutoMode);
-        shredrClient.setSigningMode(newMode);
-    }, [isAutoMode]);
 
     // ============ RENDER ============
 
@@ -361,15 +240,6 @@ function GeneratorPage() {
                     <div className="results-section">
                         <div className="results-header">
                             <span className="results-title">burner address</span>
-                            <label className="mode-toggle">
-                                <input
-                                    type="checkbox"
-                                    checked={isAutoMode}
-                                    onChange={handleModeToggle}
-                                />
-                                <span className="toggle-slider"></span>
-                                <span className="toggle-label">{isAutoMode ? "auto" : "manual"}</span>
-                            </label>
                         </div>
 
                         <AddressDisplay
@@ -413,24 +283,6 @@ function GeneratorPage() {
         <div className="generator-page">
             <div className="generator-card">
                 {renderContent()}
-
-                {isShielding && (
-                    <div className="shielding-dialog">
-                        <div className="shielding-content">
-                            <span className="shielding-icon">🛡️</span>
-                            <span className="shielding-text">shielding funds...</span>
-                        </div>
-                    </div>
-                )}
-
-                {pendingTransaction && burnerAddress && (
-                    <TransactionApprovalModal
-                        transaction={pendingTransaction}
-                        burnerAddress={burnerAddress}
-                        onApprove={handleApproveTransaction}
-                        onReject={handleRejectTransaction}
-                    />
-                )}
             </div>
         </div>
     );

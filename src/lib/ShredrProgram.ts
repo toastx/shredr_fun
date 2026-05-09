@@ -11,10 +11,6 @@
  *   3 - CommitAndUndelegateStealth: Flush state + release back to base layer
  *   4 - Withdraw (stealth): Withdraw from stealth PDA after undelegation
  *   5 - UndelegationCallback: Called by delegation program (not user-invoked)
- *
- * Vault instructions (separate discriminator space):
- *   0 - Deposit: Deposit SOL into a vault PDA
- *   1 - Withdraw (vault): Withdraw all SOL from a vault PDA
  */
 
 import {
@@ -52,12 +48,6 @@ export const StealthInstruction = {
   UndelegationCallback: 0xff,
 } as const;
 
-/** Vault instruction discriminators (separate instruction space from IDL) */
-export const VaultInstruction = {
-  Deposit: 0,
-  Withdraw: 1,
-} as const;
-
 // ============ MagicBlock Constants ============
 
 /** MagicBlock Delegation Program ID */
@@ -81,19 +71,6 @@ export function deriveStealthPDA(
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [SEEDS.STEALTH_ADDRESS, burnerPubkey.toBuffer(), Buffer.from(salt)],
-    SHREDR_PROGRAM_ID
-  );
-}
-
-/**
- * Derive a vault PDA for a given owner.
- * Seeds: [owner_pubkey]
- */
-export function deriveVaultPDA(
-  ownerPubkey: PublicKey
-): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync(
-    [ownerPubkey.toBuffer()],
     SHREDR_PROGRAM_ID
   );
 }
@@ -321,67 +298,6 @@ export function createStealthWithdrawInstruction(
   });
 }
 
-/**
- * Build a Deposit instruction (vault deposit).
- *
- * Deposits SOL from the owner into a vault PDA.
- *
- * @param owner  - Vault owner and payer (signer)
- * @param amount - Amount in lamports (u64)
- */
-export function createVaultDepositInstruction(
-  owner: PublicKey,
-  amount: bigint
-): TransactionInstruction {
-  const [vault] = deriveVaultPDA(owner);
-
-  // Instruction data: [discriminator(1)] [amount(8)]
-  const data = Buffer.alloc(1 + 8);
-  data.writeUInt8(VaultInstruction.Deposit, 0);
-  data.writeBigUInt64LE(amount, 1);
-
-  return new TransactionInstruction({
-    programId: SHREDR_PROGRAM_ID,
-    keys: [
-      { pubkey: owner, isSigner: true, isWritable: true },
-      { pubkey: vault, isSigner: false, isWritable: true },
-      { pubkey: SHREDR_PROGRAM_ID, isSigner: false, isWritable: false },
-      {
-        pubkey: SystemProgram.programId,
-        isSigner: false,
-        isWritable: false,
-      },
-    ],
-    data,
-  });
-}
-
-/**
- * Build a Withdraw instruction (vault withdrawal).
- *
- * Withdraws all SOL from a vault PDA back to the owner.
- *
- * @param owner - Vault owner and authority (signer)
- */
-export function createVaultWithdrawInstruction(
-  owner: PublicKey
-): TransactionInstruction {
-  const [vault] = deriveVaultPDA(owner);
-
-  const data = Buffer.alloc(1);
-  data.writeUInt8(VaultInstruction.Withdraw, 0);
-
-  return new TransactionInstruction({
-    programId: SHREDR_PROGRAM_ID,
-    keys: [
-      { pubkey: owner, isSigner: true, isWritable: true },
-      { pubkey: vault, isSigner: false, isWritable: true },
-      { pubkey: SHREDR_PROGRAM_ID, isSigner: false, isWritable: false },
-    ],
-    data,
-  });
-}
-
 // ============ ACCOUNT DATA PARSING ============
 
 /** StealthAccount discriminator bytes (must match on-chain) */
@@ -463,21 +379,6 @@ export async function getStealthBalance(
 }
 
 /**
- * Get balance of a vault PDA.
- */
-export async function getVaultBalance(
-  connection: Connection,
-  ownerPubkey: PublicKey
-): Promise<{ lamports: number; vault: PublicKey }> {
-  const [vault] = deriveVaultPDA(ownerPubkey);
-  const accountInfo = await connection.getAccountInfo(vault);
-  return {
-    lamports: accountInfo?.lamports ?? 0,
-    vault,
-  };
-}
-
-/**
  * Send a transaction with one or more instructions, signing with the provided signers.
  */
 export async function sendShredrTransaction(
@@ -521,38 +422,4 @@ export async function withdrawFromStealth(
   );
 
   return sendShredrTransaction(connection, [ix], [burner]);
-}
-
-/**
- * Deposit SOL into a vault PDA.
- *
- * Convenience function that builds the instruction and sends the transaction.
- *
- * @param connection - Solana RPC connection
- * @param owner      - Vault owner Keypair (signer)
- * @param amount     - Amount in lamports
- */
-export async function depositToVault(
-  connection: Connection,
-  owner: Keypair,
-  amount: bigint
-): Promise<string> {
-  const ix = createVaultDepositInstruction(owner.publicKey, amount);
-  return sendShredrTransaction(connection, [ix], [owner]);
-}
-
-/**
- * Withdraw all SOL from a vault PDA.
- *
- * Convenience function that builds the instruction and sends the transaction.
- *
- * @param connection - Solana RPC connection
- * @param owner      - Vault owner Keypair (signer)
- */
-export async function withdrawFromVault(
-  connection: Connection,
-  owner: Keypair
-): Promise<string> {
-  const ix = createVaultWithdrawInstruction(owner.publicKey);
-  return sendShredrTransaction(connection, [ix], [owner]);
 }
