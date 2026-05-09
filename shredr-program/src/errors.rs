@@ -28,6 +28,8 @@ pub enum ShredrError {
     ClockUnavailable = 6008,
     /// Deposited amount would desync from actual lamports.
     BalanceInvariantViolation = 6009,
+    /// Attempted to initialize an account that already exists.
+    AccountAlreadyInitialized = 6010,
 }
 
 impl From<ShredrError> for ProgramError {
