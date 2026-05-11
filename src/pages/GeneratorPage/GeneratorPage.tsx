@@ -26,22 +26,23 @@ function GeneratorPage() {
     const { publicKey, signMessage, connected } = useWallet();
     const { setVisible } = useWalletModal();
 
-    // Core state
+    // Core state — `stealthPdaAddress` is the *PDA* shared with senders
+    // (derived from the current one-time burner). It is NOT the burner pubkey.
     const [pageState, setPageState] = useState<PageState>("disconnected");
-    const [burnerAddress, setBurnerAddress] = useState<string | null>(null);
+    const [stealthPdaAddress, setStealthPdaAddress] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [burnerBalance, setBurnerBalance] = useState<number>(0);
+    const [pdaBalance, setPdaBalance] = useState<number>(0);
     const [copied, setCopied] = useState(false);
 
     // Refs
     const copiedTimeout = useRef<NodeJS.Timeout | null>(null);
-    const burnerAddressRef = useRef<string | null>(null);
+    const stealthPdaRef = useRef<string | null>(null);
     const wsMessageHandlerRef = useRef<((data: WebSocketMessage) => void) | null>(null);
 
     // Sync ref with state
     useEffect(() => {
-        burnerAddressRef.current = burnerAddress;
-    }, [burnerAddress]);
+        stealthPdaRef.current = stealthPdaAddress;
+    }, [stealthPdaAddress]);
 
     // ============ BALANCE ============
 
@@ -51,7 +52,7 @@ function GeneratorPage() {
             const pubkey = new PublicKey(address);
             const accountInfo = await connection.getAccountInfo(pubkey);
             const lamports = accountInfo?.lamports || 0;
-            setBurnerBalance(lamports / LAMPORTS_PER_SOL);
+            setPdaBalance(lamports / LAMPORTS_PER_SOL);
             return lamports;
         } catch (err) {
             console.error("Failed to fetch balance:", err);
@@ -64,7 +65,7 @@ function GeneratorPage() {
     useEffect(() => {
         if (!connected) {
             setPageState("disconnected");
-            setBurnerAddress(null);
+            setStealthPdaAddress(null);
             setCopied(false);
             setError(null);
             // IMPORTANT: Disconnect WebSocket BEFORE destroying client
@@ -121,17 +122,19 @@ function GeneratorPage() {
             const walletPubkeyBytes = publicKey.toBytes();
             await shredrClient.initFromSignature(signature, walletPubkeyBytes);
 
-            // Get burner address
-            const address = shredrClient.currentBurnerAddress;
-            if (address) {
-                setBurnerAddress(address);
+            // The stealth PDA (not the burner pubkey) is what the user shares
+            // with senders. It is a program-owned account derived deterministically
+            // from the current one-time burner + fixed salt.
+            const pda = shredrClient.stealthAddress;
+            if (pda) {
+                setStealthPdaAddress(pda);
                 setPageState("ready");
 
-                // Subscribe to account updates (auto-connects WebSocket)
-                webSocketClient.subscribeToAccount(address);
+                // Subscribe to account updates on the stealth PDA
+                webSocketClient.subscribeToAccount(pda);
 
-                // Fetch initial balance
-                await refreshBalance(shredrClient.currentBurnerAddress || address);
+                // Fetch initial balance of the stealth PDA
+                await refreshBalance(pda);
 
                 // Listen for account updates
                 // Store handler ref for cleanup
@@ -163,7 +166,7 @@ function GeneratorPage() {
                     if (lamportsFromWs > 0) {
                         console.log(`WebSocket balance update: ${lamportsFromWs} lamports`);
                         // Update UI balance
-                        setBurnerBalance(lamportsFromWs / LAMPORTS_PER_SOL);
+                        setPdaBalance(lamportsFromWs / LAMPORTS_PER_SOL);
                     }
                 };
 
@@ -171,7 +174,7 @@ function GeneratorPage() {
                 wsMessageHandlerRef.current = messageHandler;
                 webSocketClient.onMessage(messageHandler);
             } else {
-                throw new Error("Failed to derive burner address");
+                throw new Error("Failed to derive stealth PDA address");
             }
         } catch (err) {
             console.error("Failed to initialize:", err);
@@ -185,9 +188,9 @@ function GeneratorPage() {
     }, [publicKey, signMessage, refreshBalance]);
 
     const handleCopy = useCallback(async () => {
-        if (!burnerAddress) return;
+        if (!stealthPdaAddress) return;
         try {
-            await navigator.clipboard.writeText(burnerAddress);
+            await navigator.clipboard.writeText(stealthPdaAddress);
             setCopied(true);
             setPageState("monitoring");
             if (copiedTimeout.current) clearTimeout(copiedTimeout.current);
@@ -195,7 +198,7 @@ function GeneratorPage() {
         } catch (err) {
             console.error("Failed to copy:", err);
         }
-    }, [burnerAddress]);
+    }, [stealthPdaAddress]);
 
     const handleRetry = useCallback(() => {
         setError(null);
@@ -239,27 +242,27 @@ function GeneratorPage() {
                 return (
                     <div className="results-section">
                         <div className="results-header">
-                            <span className="results-title">burner address</span>
+                            <span className="results-title">stealth address</span>
                         </div>
 
                         <AddressDisplay
                             label=""
-                            value={burnerAddress || ""}
+                            value={stealthPdaAddress || ""}
                             placeholder=""
                             isCopied={copied}
-                            hasValue={!!burnerAddress}
+                            hasValue={!!stealthPdaAddress}
                             onCopy={handleCopy}
                         />
 
                         <div className="balance-display">
-                            <span className="balance-label">burner balance</span>
+                            <span className="balance-label">pda balance</span>
                             <span className="balance-amount">
-                                {burnerBalance.toFixed(4)} SOL
+                                {pdaBalance.toFixed(2)} SOL
                             </span>
                         </div>
 
-                        {pageState === "monitoring" && burnerAddress && (
-                            <TransactionMonitor burnerAddress={burnerAddress} />
+                        {pageState === "monitoring" && stealthPdaAddress && (
+                            <TransactionMonitor burnerAddress={stealthPdaAddress} />
                         )}
                     </div>
                 );

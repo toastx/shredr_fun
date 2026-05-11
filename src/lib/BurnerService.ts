@@ -11,8 +11,9 @@
 
 import { Keypair } from '@solana/web3.js';
 import { zeroMemory } from './utils';
-import { 
+import {
     DOMAIN_BURNER_MASTER,
+    DOMAIN_MAIN_BURNER,
     CONSECUTIVE_EMPTY_THRESHOLD,
 } from './constants';
 import type { 
@@ -101,6 +102,45 @@ export class BurnerService {
             console.warn('deriveShadowireAddress called with non-zero index. Expected index 0 for Shadowire Address.');
         }
         return this.deriveBurnerFromNonce(baseNonce);
+    }
+
+    /**
+     * Derive the *main burner* keypair. This is the **persistent** keypair
+     * that owns the user's `main_pda` — i.e. the consolidation account that
+     * funds end up on after the rollup commit.
+     *
+     * Derivation:  SHA256(signature || DOMAIN_MAIN_BURNER) -> ed25519 seed
+     *
+     * The mainKeypair (user's wallet) NEVER appears on-chain; instead we use
+     * this deterministic derived keypair to sign the program's `Withdraw`
+     * instruction. The pubkey of the main burner is what the SHREDR program
+     * verifies as the owner of the main PDA.
+     *
+     * @param signature  Wallet signature (already used by initFromSignature)
+     */
+    async deriveMainBurner(signature: Uint8Array): Promise<BurnerKeyPair> {
+        const suffix = new TextEncoder().encode(DOMAIN_MAIN_BURNER);
+        const input = new Uint8Array(signature.length + suffix.length);
+        input.set(signature, 0);
+        input.set(suffix, signature.length);
+
+        const seedBuffer = await crypto.subtle.digest('SHA-256', input);
+        zeroMemory(input);
+
+        const seed = new Uint8Array(seedBuffer);
+        const keypair = Keypair.fromSeed(seed);
+        zeroMemory(seed);
+
+        const secretKeyCopy = new Uint8Array(keypair.secretKey);
+
+        // Use a sentinel nonce/index to mark this as a non-rotating burner.
+        return {
+            publicKey: keypair.publicKey.toBytes(),
+            secretKey: secretKeyCopy,
+            address: keypair.publicKey.toBase58(),
+            nonce: new Uint8Array(0),
+            nonceIndex: -1,
+        };
     }
 
     /**

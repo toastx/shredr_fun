@@ -116,6 +116,8 @@ function TransactionMonitor({ burnerAddress }: TransactionMonitorProps) {
 
     const getTxLink = (sig: string) => `https://orbmarkets.io/tx/${sig}`;
 
+    const displayTransactions = transactions
+
     return (
         <div className="transaction-monitor">
             <div className="monitor-header">
@@ -129,13 +131,13 @@ function TransactionMonitor({ burnerAddress }: TransactionMonitorProps) {
                 <div className="no-transactions">loading transactions...</div>
             )}
 
-            {transactions.length > 0 && (
+            {!isLoading && (
                 <div className="transaction-list">
-                    {transactions.map((tx, index) => (
-                        <div key={index} className={`tx-row ${tx.type}`}>
+                    {displayTransactions.map((tx, index) => (
+                        <div key={index} className={`tx-row ${tx.type}${transactions.length === 0 ? ' dummy' : ''}`}>
                             <span className="tx-text">
                                 {tx.type === 'received' ? 'YOU received' : 'YOU sent'}{' '}
-                                <strong>{tx.amount?.toFixed(4)} SOL</strong>
+                                <strong>{tx.amount?.toFixed(2)} SOL</strong>
                             </span>
                             <a 
                                 href={getTxLink(tx.signature)} 
@@ -148,10 +150,6 @@ function TransactionMonitor({ burnerAddress }: TransactionMonitorProps) {
                         </div>
                     ))}
                 </div>
-            )}
-
-            {!isLoading && transactions.length === 0 && (
-                <div className="no-transactions">no transactions yet</div>
             )}
         </div>
     );

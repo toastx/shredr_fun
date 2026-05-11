@@ -159,6 +159,24 @@ export interface WebSocketAccountUpdateMessage {
 
 export type WebSocketMessage = WebSocketTransactionMessage | WebSocketStatusMessage | WebSocketAccountUpdateMessage;
 
+// ============ TRANSACTION APPROVAL ============
+
+/**
+ * Lightweight pending-transaction descriptor surfaced to the UI when a
+ * relayer-style action (sweep / private transfer / withdraw) needs explicit
+ * user confirmation before being signed.
+ */
+export interface PendingTransaction {
+    /** Lamports involved. */
+    amount: number;
+    /** Optional destination address (where funds will end up). */
+    destination?: string;
+    /** Optional source / burner pubkey relevant to this transaction. */
+    source?: string;
+    /** Optional kind tag — useful for differentiating in the UI. */
+    kind?: 'sweep' | 'withdraw' | 'private-transfer' | 'init-delegate' | 'commit-undelegate';
+}
+
 // ============ ERROR TYPES ============
 
 export class DecryptionError extends Error {

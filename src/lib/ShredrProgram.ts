@@ -9,7 +9,7 @@
  *   1 - PrivateTransfer: Move lamports between stealth PDAs inside rollup
  *   2 - CommitStealth: Flush rollup state, keep delegated
  *   3 - CommitAndUndelegateStealth: Flush state + release back to base layer
- *   4 - Withdraw (stealth): Withdraw from stealth PDA after undelegation
+ *   4 - Withdraw: Withdraw from stealth/main PDA after undelegation
  *   5 - UndelegationCallback: Called by delegation program (not user-invoked)
  */
 
@@ -17,18 +17,19 @@ import {
   PublicKey,
   TransactionInstruction,
   SystemProgram,
-  Connection,
-  Transaction,
-  Keypair,
-  sendAndConfirmTransaction,
-  type Signer,
 } from "@solana/web3.js";
+import {
+  MAGIC_BLOCK_PROGRAM_ID as MAGIC_BLOCK_PROGRAM_ID_STR,
+  MAGIC_CONTEXT as MAGIC_CONTEXT_STR,
+  PERMISSION_PROGRAM_ID as PERMISSION_PROGRAM_ID_STR,
+} from "./constants";
+import { Buffer } from "buffer";
 
 // ============ PROGRAM CONSTANTS ============
 
 /** The on-chain program address */
 export const SHREDR_PROGRAM_ID = new PublicKey(
-  "H64YCQTWdQkx9vjs1ZB2Uo24FyUBibnDxhKdznamybpZ"
+  "H64YCQTWdQkx9vjs1ZB2Uo24FyUBibnDxhKdznamybpZ",
 );
 
 /** PDA seed prefixes (must match on-chain constants.rs) */
@@ -51,52 +52,69 @@ export const StealthInstruction = {
 // ============ MagicBlock Constants ============
 
 /** MagicBlock Delegation Program ID */
-export const MAGIC_BLOCK_PROGRAM_ID = new PublicKey(
-  "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS"
-);
+export const MAGIC_BLOCK_PROGRAM_ID = new PublicKey(MAGIC_BLOCK_PROGRAM_ID_STR);
 
-/** MagicBlock Delegation Metadata seed */
-const DELEGATION_METADATA_SEED = Buffer.from("delegation_metadata");
-const DELEGATION_RECORD_SEED = Buffer.from("delegation_record");
+/** MagicBlock context account (singleton, used by Commit/Undelegate). */
+export const MAGIC_CONTEXT = new PublicKey(MAGIC_CONTEXT_STR);
+
+/** ACL Permission program (used by InitializeAndDelegate). */
+export const PERMISSION_PROGRAM_ID = new PublicKey(PERMISSION_PROGRAM_ID_STR);
+
+/** MagicBlock SDK seed prefixes (matches ephemeral-rollups-sdk). */
+const BUFFER_SEED = Buffer.from("buffer");
+const DELEGATION_SEED = Buffer.from("delegation");
+const DELEGATION_METADATA_SEED = Buffer.from("delegation-metadata");
+const PERMISSION_SEED = Buffer.from("permission");
 
 // ============ PDA DERIVATION ============
 
 /**
  * Derive a stealth account PDA from burner pubkey and salt.
  * Seeds: [STEALTH_ADDRESS, burner_pubkey, salt]
+ *
+ * Used for both:
+ *   - Stealth PDA (one-time burner per receive)
+ *   - Main PDA (persistent main burner)
  */
 export function deriveStealthPDA(
   burnerPubkey: PublicKey,
-  salt: Uint8Array
+  salt: Uint8Array,
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [SEEDS.STEALTH_ADDRESS, burnerPubkey.toBuffer(), Buffer.from(salt)],
-    SHREDR_PROGRAM_ID
+    SHREDR_PROGRAM_ID,
   );
 }
 
 /**
  * Derive MagicBlock delegation-related PDAs.
+ *
+ * MagicBlock conventions (from ephemeral-rollups-sdk):
+ *   - delegation_record:   PDA(["delegation", account.key], DELEGATION_PROGRAM_ID)
+ *   - delegation_metadata: PDA(["delegation-metadata", account.key], DELEGATION_PROGRAM_ID)
+ *   - delegation_buffer:   PDA(["buffer", account.key], OWNER_PROGRAM_ID)  ← under owner program
+ *   - permission_account:  PDA(["permission", account.key], PERMISSION_PROGRAM_ID)
  */
 export function deriveDelegationPDAs(stealthPda: PublicKey) {
   const [permissionAccount] = PublicKey.findProgramAddressSync(
-    [Buffer.from("permission"), stealthPda.toBuffer()],
-    MAGIC_BLOCK_PROGRAM_ID
+    [PERMISSION_SEED, stealthPda.toBuffer()],
+    PERMISSION_PROGRAM_ID,
   );
 
+  // Buffer is owned by the SHREDR program (the delegated account's owner)
   const [delegationBuffer] = PublicKey.findProgramAddressSync(
-    [Buffer.from("buffer"), stealthPda.toBuffer()],
-    MAGIC_BLOCK_PROGRAM_ID
+    [BUFFER_SEED, stealthPda.toBuffer()],
+    SHREDR_PROGRAM_ID,
   );
 
   const [delegationRecord] = PublicKey.findProgramAddressSync(
-    [DELEGATION_RECORD_SEED, stealthPda.toBuffer()],
-    MAGIC_BLOCK_PROGRAM_ID
+    [DELEGATION_SEED, stealthPda.toBuffer()],
+    MAGIC_BLOCK_PROGRAM_ID,
   );
 
   const [delegationMetadata] = PublicKey.findProgramAddressSync(
     [DELEGATION_METADATA_SEED, stealthPda.toBuffer()],
-    MAGIC_BLOCK_PROGRAM_ID
+    MAGIC_BLOCK_PROGRAM_ID,
   );
 
   return {
@@ -115,8 +133,8 @@ export function deriveDelegationPDAs(stealthPda: PublicKey) {
  * Creates a stealth PDA from burner+salt, initializes state, and delegates
  * to a MagicBlock TEE validator.
  *
- * @param relayer      - Relayer paying for the transaction (signer)
- * @param burner       - One-time burner keypair derived from mainKey+nonce (signer)
+ * @param relayer      - Kora relayer paying for the transaction (signer)
+ * @param burner       - One-time burner keypair (signer)
  * @param salt         - 32-byte random salt for PDA derivation
  * @param burnerPubkey - Burner's public key as 32-byte array
  * @param commitDelay  - Commit delay in seconds (i64)
@@ -126,7 +144,7 @@ export function createInitializeAndDelegateInstruction(
   burner: PublicKey,
   salt: Uint8Array,
   burnerPubkey: Uint8Array,
-  commitDelay: bigint
+  commitDelay: bigint,
 ): TransactionInstruction {
   const [stealthAccount] = deriveStealthPDA(burner, salt);
   const delegationPDAs = deriveDelegationPDAs(stealthAccount);
@@ -176,18 +194,20 @@ export function createInitializeAndDelegateInstruction(
 }
 
 /**
- * Build a PrivateTransfer instruction.
+ * Build a PrivateTransfer instruction (executed inside the MagicBlock rollup).
  *
- * Moves lamports between two stealth PDAs inside the MagicBlock rollup.
+ * Moves lamports between two stealth PDAs. Source PDA must sign, which means
+ * inside the rollup the burner keypair (which owns the stealth PDA via ACL)
+ * is the actual signer.
  *
- * @param sourcePda      - Source stealth PDA (must sign)
- * @param destinationPda - Destination stealth PDA
+ * @param sourcePda      - Source stealth PDA (signer inside rollup)
+ * @param destinationPda - Destination stealth PDA (typically the main PDA)
  * @param amount         - Amount in lamports (u64)
  */
 export function createPrivateTransferInstruction(
   sourcePda: PublicKey,
   destinationPda: PublicKey,
-  amount: bigint
+  amount: bigint,
 ): TransactionInstruction {
   // Instruction data: [discriminator(1)] [amount(8)]
   const data = Buffer.alloc(1 + 8);
@@ -208,17 +228,12 @@ export function createPrivateTransferInstruction(
  * Build a CommitStealth instruction.
  *
  * Flushes rollup state to the base layer while keeping the account delegated.
- *
- * @param relayer        - Relayer paying for the transaction
- * @param stealthAccount - The stealth PDA to commit
- * @param magicProgram   - MagicBlock program address
- * @param magicContext   - MagicBlock context account
  */
 export function createCommitStealthInstruction(
   relayer: PublicKey,
   stealthAccount: PublicKey,
-  magicProgram: PublicKey,
-  magicContext: PublicKey
+  magicProgram: PublicKey = MAGIC_BLOCK_PROGRAM_ID,
+  magicContext: PublicKey = MAGIC_CONTEXT,
 ): TransactionInstruction {
   const data = Buffer.alloc(1);
   data.writeUInt8(StealthInstruction.CommitStealth, 0);
@@ -239,17 +254,12 @@ export function createCommitStealthInstruction(
  * Build a CommitAndUndelegateStealth instruction.
  *
  * Flushes state AND releases the account back to the base layer.
- *
- * @param relayer        - Relayer paying for the transaction
- * @param stealthAccount - The stealth PDA to commit and undelegate
- * @param magicProgram   - MagicBlock program address
- * @param magicContext   - MagicBlock context account
  */
 export function createCommitAndUndelegateStealthInstruction(
   relayer: PublicKey,
   stealthAccount: PublicKey,
-  magicProgram: PublicKey,
-  magicContext: PublicKey
+  magicProgram: PublicKey = MAGIC_BLOCK_PROGRAM_ID,
+  magicContext: PublicKey = MAGIC_CONTEXT,
 ): TransactionInstruction {
   const data = Buffer.alloc(1);
   data.writeUInt8(StealthInstruction.CommitAndUndelegateStealth, 0);
@@ -267,12 +277,13 @@ export function createCommitAndUndelegateStealthInstruction(
 }
 
 /**
- * Build a Withdraw instruction (stealth PDA withdrawal).
+ * Build a Withdraw instruction.
  *
- * After undelegation, the owner (burner) can withdraw lamports to any destination.
+ * After undelegation, the main burner can withdraw from the main PDA to
+ * any destination address. Signed by the main burner keypair.
  *
- * @param mainBurner  - The burner keypair proving ownership (signer)
- * @param mainPda     - The stealth PDA holding funds
+ * @param mainBurner  - The main burner pubkey (signer, must match PDA owner)
+ * @param mainPda     - The main stealth PDA holding funds
  * @param destination - Any destination address to receive funds
  * @param amount      - Amount in lamports (u64)
  */
@@ -280,7 +291,7 @@ export function createStealthWithdrawInstruction(
   mainBurner: PublicKey,
   mainPda: PublicKey,
   destination: PublicKey,
-  amount: bigint
+  amount: bigint,
 ): TransactionInstruction {
   // Instruction data: [discriminator(1)] [amount(8)]
   const data = Buffer.alloc(1 + 8);
@@ -322,7 +333,7 @@ export interface StealthAccountData {
  * @returns Parsed StealthAccountData or null if invalid
  */
 export function parseStealthAccount(
-  data: Buffer
+  data: Buffer,
 ): StealthAccountData | null {
   // Minimum size: 8 (discriminator) + 32 (owner) + 32 (salt) + 8 (amount) + 8 (timestamp) + 1 (delegated) + 1 (bump)
   const MIN_SIZE = 8 + 32 + 32 + 8 + 8 + 1 + 1;
@@ -358,68 +369,4 @@ export function parseStealthAccount(
     delegated,
     bump,
   };
-}
-
-// ============ HIGH-LEVEL HELPERS ============
-
-/**
- * Get balance of a stealth PDA (raw lamports on the account).
- */
-export async function getStealthBalance(
-  connection: Connection,
-  burnerPubkey: PublicKey,
-  salt: Uint8Array
-): Promise<{ lamports: number; pda: PublicKey }> {
-  const [pda] = deriveStealthPDA(burnerPubkey, salt);
-  const accountInfo = await connection.getAccountInfo(pda);
-  return {
-    lamports: accountInfo?.lamports ?? 0,
-    pda,
-  };
-}
-
-/**
- * Send a transaction with one or more instructions, signing with the provided signers.
- */
-export async function sendShredrTransaction(
-  connection: Connection,
-  instructions: TransactionInstruction[],
-  signers: Signer[],
-  opts?: { skipPreflight?: boolean }
-): Promise<string> {
-  const tx = new Transaction().add(...instructions);
-  return sendAndConfirmTransaction(connection, tx, signers, {
-    skipPreflight: opts?.skipPreflight ?? false,
-    commitment: "confirmed",
-  });
-}
-
-/**
- * Withdraw from a stealth PDA to a destination address.
- *
- * Convenience function that builds the instruction and sends the transaction.
- *
- * @param connection  - Solana RPC connection
- * @param burner      - The burner Keypair (signer, must match PDA owner)
- * @param salt        - 32-byte salt used in PDA derivation
- * @param destination - Destination pubkey for the withdrawal
- * @param amount      - Amount in lamports
- */
-export async function withdrawFromStealth(
-  connection: Connection,
-  burner: Keypair,
-  salt: Uint8Array,
-  destination: PublicKey,
-  amount: bigint
-): Promise<string> {
-  const [stealthPda] = deriveStealthPDA(burner.publicKey, salt);
-
-  const ix = createStealthWithdrawInstruction(
-    burner.publicKey,
-    stealthPda,
-    destination,
-    amount
-  );
-
-  return sendShredrTransaction(connection, [ix], [burner]);
 }

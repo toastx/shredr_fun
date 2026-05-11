@@ -58,7 +58,7 @@ use crate::instructions::private_transfer::PrivateTransfer;
 use crate::instructions::commit_undelegate::{CommitStealth, CommitAndUndelegateStealth, UndelegationCallback};
 use crate::instructions::withdraw::Withdraw;
 
-declare_id!("H64YCQTWdQkx9vjs1ZB2Uo24FyUBibnDxhKdznamybpZ");
+declare_id!("FfJtZKQaW7Nac8nEZKyVj64kq6Di8HtvCgzTokj2yuqi");
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum InstructionDiscriminator {

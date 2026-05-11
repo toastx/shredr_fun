@@ -164,9 +164,12 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             setWithdrawError(null);
             setWithdrawSuccess(null);
 
-            console.log('ClaimPage: Starting withdrawal to', destinationAddress);
+            console.log('ClaimPage: Starting withdrawal from main PDA to', destinationAddress);
 
-            // Withdraw via external transfer from stealth address (burner[0]) to connected wallet
+            // Calls the SHREDR program's `Withdraw` instruction:
+            //   - signed by the main burner (proves ownership of the main PDA)
+            //   - fee paid by Kora relayer
+            //   - moves lamports from main PDA → destination
             const result = await shredrClient.withdrawToWallet(
                 destinationAddress,
                 'all'  // Withdraw full balance
@@ -253,19 +256,19 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                     )}
                 </div>
 
-                {/* Balance Display */}
+                {/* Balance Display — main PDA balance after rollup commit */}
                 <div className="balance-section">
-                    <span className="balance-label">stealth balance</span>
+                    <span className="balance-label">main pda balance</span>
                     <span className="balance-amount">
                         {pageState === 'loadingBalance' ? 'loading...' :
                          isInitialized ? `${formatBalance(totalBalance)} SOL` : '---'}
                     </span>
                 </div>
                 
-                {/* Stealth Address Display */}
-                {isInitialized && shredrClient.stealthAddress && (
+                {/* Main PDA address (where consolidated funds live) */}
+                {isInitialized && shredrClient.mainPdaAddress && (
                     <div className="burner-address-display">
-                        <small>From: {shredrClient.stealthAddress.slice(0, 6)}...{shredrClient.stealthAddress.slice(-6)}</small>
+                        <small>From: {shredrClient.mainPdaAddress.slice(0, 6)}...{shredrClient.mainPdaAddress.slice(-6)}</small>
                     </div>
                 )}
                 
@@ -286,12 +289,12 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                 )}
 
                 {/* Withdraw Button */}
-                <button 
+                <button
                     className="withdraw-btn"
                     onClick={isInitialized ? handleWithdraw : handleUnlock}
                     disabled={isLoading}
                 >
-                    {pageState === 'unlocking' ? 'verifying...' : 
+                    {pageState === 'unlocking' ? 'verifying...' :
                      pageState === 'idle' || pageState === 'error' ? 'scan for funds' :
                      pageState === 'loadingBalance' ? 'loading...' :
                      pageState === 'withdrawing' ? 'withdrawing...' : 'withdraw all'}
@@ -299,9 +302,9 @@ function ClaimPage({ onBack }: ClaimPageProps) {
 
                 {/* Info Note */}
                 <div className="claim-note">
-                    {!isInitialized 
-                        ? "Sign to recover your privacy keys and scan for funds." 
-                        : "Withdraw all funds from your stealth address to your connected wallet."}
+                    {!isInitialized
+                        ? "Sign to recover your privacy keys and scan for pending funds."
+                        : "Withdraw all funds from your main PDA to the destination address. Fees paid by Kora relayer."}
                 </div>
             </div>
         </div>

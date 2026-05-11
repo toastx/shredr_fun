@@ -1,52 +1,107 @@
 /**
- * ShredrClient - Main orchestrator for SHREDR privacy wallet
+ * ShredrClient — Privacy wallet orchestrator (program-aware version)
  *
- * Coordinates NonceService, BurnerService, and on-chain helpers to provide:
- * - Initialization from wallet signature
- * - Burner address generation
- * - Stealth (burner[0]) balance lookup
- * - Withdrawal from stealth address to any wallet
- * - State management
+ * Coordinates:
+ *   - Wallet signature → master seed (NonceService + BurnerService)
+ *   - Per-receive **stealth burner** + **stealth PDA** (one-time receive address)
+ *   - Persistent **main burner** + **main PDA** (consolidation account)
+ *   - On-chain SHREDR program instructions (via {@link ShredrProgram})
+ *   - Fee-payer / relayer signing (via {@link KoraRelayer})
+ *   - MagicBlock ephemeral rollup RPC (for PrivateTransfer)
+ *
+ * The user's connected wallet (mainKeypair) signs ONCE to derive everything;
+ * after that, all on-chain activity is signed by derived burner keypairs and
+ * the Kora relayer — preserving privacy.
  */
+
 import { nonceService } from "./NonceService";
 import { burnerService } from "./BurnerService";
 import { apiClient } from "./ApiClient";
+import { koraRelayer } from "./KoraRelayer";
 import {
   Connection,
   Keypair,
   LAMPORTS_PER_SOL,
   PublicKey,
-  Transaction,
-  sendAndConfirmTransaction,
 } from "@solana/web3.js";
-import { HELIUS_RPC_URL } from "./constants";
+import {
+  HELIUS_RPC_URL,
+  MAGICBLOCK_RPC_URL,
+  SHREDR_FIXED_SALT,
+  COMMIT_DELAY_MIN_SECS,
+  COMMIT_DELAY_MAX_SECS,
+  MAX_UTXO_SCAN_INDEX,
+  UTXO_SCAN_EMPTY_THRESHOLD,
+  DEFAULT_DENOMINATION_SOL,
+  type NormalizedDenomination,
+} from "./constants";
+import {
+  deriveStealthPDA,
+  createInitializeAndDelegateInstruction,
+  createPrivateTransferInstruction,
+  createCommitAndUndelegateStealthInstruction,
+  createStealthWithdrawInstruction,
+  parseStealthAccount,
+} from "./ShredrProgram";
 import type { GeneratedNonce, BurnerKeyPair, CreateBlobRequest } from "./types";
 
 // ============ TYPES ============
+
 export type SigningMode = "auto" | "manual";
+
+export type UtxoStatus =
+  | "empty" // no balance, not yet used
+  | "received" // funds received, awaiting init+delegate
+  | "delegated" // initialized + delegated to rollup
+  | "ready" // committed back, ready to withdraw
+  | "spent"; // already withdrawn
+
+export interface PendingUtxo {
+  nonceIndex: number;
+  burnerAddress: string;
+  stealthPda: string;
+  lamports: number;
+  status: UtxoStatus;
+}
 
 export interface ShredrState {
   initialized: boolean;
   currentNonce: GeneratedNonce | null;
   currentBurner: BurnerKeyPair | null;
-  stealthAddress: string | null; // The stable receiving address (burner[0])
+  stealthPda: string | null; // current PDA address to share with senders
+  mainBurnerAddress: string | null;
+  mainPda: string | null;
   signingMode: SigningMode;
   currentBlobId: string | null;
+  preferredDenomination: NormalizedDenomination;
 }
 
-// ============ SHREDR CLIENT ============
+// ============ CLIENT ============
+
 export class ShredrClient {
   private _initialized = false;
   private _currentNonce: GeneratedNonce | null = null;
   private _currentBurner: BurnerKeyPair | null = null;
-  private _stealthBurner: BurnerKeyPair | null = null; // burner[0] - stable receiving address
   private _walletPubkey: Uint8Array | null = null;
   private _signingMode: SigningMode = "auto";
   private _currentBlobId: string | null = null;
   private _isNewUser = false;
   private _connection: Connection | null = null;
+  private _rollupConnection: Connection | null = null;
+
+  // Main burner (persistent, controls main PDA)
+  private _mainBurner: BurnerKeyPair | null = null;
+  private _mainPda: PublicKey | null = null;
+
+  // Current stealth PDA (derived from currentBurner + fixed salt)
+  private _stealthPda: PublicKey | null = null;
+
+  // User-configurable
+  private _preferredDenomination: NormalizedDenomination =
+    DEFAULT_DENOMINATION_SOL;
 
   // ============ GETTERS ============
+
   get initialized(): boolean {
     return this._initialized;
   }
@@ -56,45 +111,65 @@ export class ShredrClient {
   get currentBurnerAddress(): string | null {
     return this._currentBurner?.address ?? null;
   }
-  /**
-   * The user's stable stealth address - burner[0]
-   * This is the address they share for receiving private payments.
-   */
+
+  /** Stealth PDA derived from the *current* burner — share this with senders. */
   get stealthAddress(): string | null {
-    return this._stealthBurner?.address ?? null;
+    return this._stealthPda?.toBase58() ?? null;
   }
-  /** @deprecated Use stealthAddress instead */
+  /** @deprecated use stealthAddress */
   get shadowireAddress(): string | null {
     return this.stealthAddress;
   }
-  /**
-   * The full burner keypair for stealth address (needed for withdrawals)
-   */
+
+  /** Persistent main burner pubkey (controls the main PDA). */
+  get mainBurnerAddress(): string | null {
+    return this._mainBurner?.address ?? null;
+  }
+
+  /** Persistent main PDA — where funds consolidate after the rollup commit. */
+  get mainPdaAddress(): string | null {
+    return this._mainPda?.toBase58() ?? null;
+  }
+
+  /** @deprecated kept for old UI compat */
   get stealthBurner(): BurnerKeyPair | null {
-    return this._stealthBurner;
+    return this._mainBurner;
   }
-  /** @deprecated Use stealthBurner instead */
+  /** @deprecated kept for old UI compat */
   get shadowireBurner(): BurnerKeyPair | null {
-    return this.stealthBurner;
+    return this._mainBurner;
   }
+
   get signingMode(): SigningMode {
     return this._signingMode;
   }
   get isNewUser(): boolean {
     return this._isNewUser;
   }
+  get preferredDenomination(): NormalizedDenomination {
+    return this._preferredDenomination;
+  }
+  setPreferredDenomination(d: NormalizedDenomination): void {
+    this._preferredDenomination = d;
+  }
+
   get state(): ShredrState {
     return {
       initialized: this._initialized,
       currentNonce: this._currentNonce,
       currentBurner: this._currentBurner,
-      stealthAddress: this._stealthBurner?.address ?? null,
+      stealthPda: this._stealthPda?.toBase58() ?? null,
+      mainBurnerAddress: this._mainBurner?.address ?? null,
+      mainPda: this._mainPda?.toBase58() ?? null,
       signingMode: this._signingMode,
       currentBlobId: this._currentBlobId,
+      preferredDenomination: this._preferredDenomination,
     };
   }
 
-  /** Get or create a Solana RPC connection */
+  // ============ CONNECTIONS ============
+
+  /** Base-layer Solana RPC. */
   private getConnection(rpcUrl?: string): Connection {
     if (rpcUrl) return new Connection(rpcUrl, "confirmed");
     if (!this._connection) {
@@ -103,16 +178,32 @@ export class ShredrClient {
     return this._connection;
   }
 
-  /** Build a Keypair from a BurnerKeyPair's secretKey */
+  /** MagicBlock ephemeral-rollup RPC (for PrivateTransfer inside the rollup). */
+  private getRollupConnection(): Connection {
+    if (!this._rollupConnection) {
+      this._rollupConnection = new Connection(MAGICBLOCK_RPC_URL, "confirmed");
+    }
+    return this._rollupConnection;
+  }
+
+  /** Build a Solana-web3 Keypair from a BurnerKeyPair. */
   private burnerToKeypair(burner: BurnerKeyPair): Keypair {
     return Keypair.fromSecretKey(burner.secretKey);
   }
 
+  /** Recompute and cache the stealth PDA from the current burner. */
+  private refreshStealthPda(): void {
+    if (!this._currentBurner) {
+      this._stealthPda = null;
+      return;
+    }
+    const burnerPub = new PublicKey(this._currentBurner.publicKey);
+    const [pda] = deriveStealthPDA(burnerPub, SHREDR_FIXED_SALT);
+    this._stealthPda = pda;
+  }
+
   // ============ USER STATUS CHECK ============
-  /**
-   * Check if user is new without initializing the full client
-   * Returns true if no existing nonce found in local or remote storage
-   */
+
   async checkIfNewUser(
     signature: Uint8Array,
     walletPubkey: Uint8Array,
@@ -120,61 +211,33 @@ export class ShredrClient {
       Array<{ id: string; encryptedBlob: string; createdAt: number }>
     > = () => apiClient.fetchAllBlobs(),
   ): Promise<boolean> {
-    console.log("[checkIfNewUser] Starting check...");
-
-    // Initialize nonce service to enable storage access
     await nonceService.initFromSignature(signature);
-    console.log("[checkIfNewUser] NonceService initialized");
 
-    // Try local storage first
     const nonce = await nonceService.loadCurrentNonce(walletPubkey);
-    console.log(
-      "[checkIfNewUser] Local storage nonce:",
-      nonce ? `index=${nonce.index}` : "null",
-    );
-    if (nonce) {
-      return false;
-    }
+    if (nonce) return false;
 
-    // Try remote backend if fetch function provided
     if (fetchBlobsFn) {
       try {
-        console.log("[checkIfNewUser] Fetching blobs from backend...");
         const blobs = await fetchBlobsFn();
-        console.log("[checkIfNewUser] Backend returned blobs:", blobs.length);
-
         const result = await nonceService.tryDecryptBlobs(blobs);
-        console.log("[checkIfNewUser] tryDecryptBlobs result:", {
-          found: result.found,
-          blobId: result.blobId,
-          nonceIndex: result.nonce?.index,
-        });
-
-        if (result.found && result.nonce) {
-          return false;
-        }
+        if (result.found && result.nonce) return false;
       } catch (err) {
-        console.warn(
-          "[checkIfNewUser] Failed to fetch blobs from backend:",
-          err,
-        );
+        console.warn("[checkIfNewUser] fetchBlobs failed:", err);
       }
     }
-
-    // No nonce found - new user
-    console.log("[checkIfNewUser] No nonce found - treating as new user");
     return true;
   }
 
   // ============ INITIALIZATION ============
+
   /**
-   * Initialize ShredrClient with wallet signature
-   * This follows the flow from SKILL.md:
-   * 1. Init services from signature
-   * 2. Check local storage for nonce
-   * 3. If not found, check backend
-   * 4. If not found, generate new base nonce
-   * 5. Derive burner from nonce
+   * Initialize the client from a single wallet signature.
+   *
+   * Flow:
+   *  1. Init NonceService + BurnerService from signature
+   *  2. Derive the persistent **main burner** + **main PDA** (controls consolidation)
+   *  3. Load (local → remote) or generate the spending nonce chain
+   *  4. Derive the **current stealth burner** + **current stealth PDA**
    */
   async initFromSignature(
     signature: Uint8Array,
@@ -182,124 +245,76 @@ export class ShredrClient {
     fetchBlobsFn: () => Promise<
       Array<{ id: string; encryptedBlob: string; createdAt: number }>
     > = () => apiClient.fetchAllBlobs(),
-    createBlobFn: (data: CreateBlobRequest) => Promise<{ id: string }> = (
-      data,
-    ) => apiClient.createBlob(data),
+    createBlobFn: (data: CreateBlobRequest) => Promise<{ id: string }> = (d) =>
+      apiClient.createBlob(d),
   ): Promise<void> {
-    console.log("[initFromSignature] Starting initialization...");
-
-    // 1. Initialize both services
+    // 1. Init crypto services
     await nonceService.initFromSignature(signature);
     await burnerService.initFromSignature(signature);
-    console.log("[initFromSignature] Services initialized");
 
-    // Store wallet pubkey for stealth address derivation
     this._walletPubkey = walletPubkey;
 
-    // 2. Derive the stealth address (burner[0]) - always same for this wallet
-    const baseNonce = await nonceService.generateNonceAtIndex(0, walletPubkey);
-    this._stealthBurner =
-      await burnerService.deriveShadowireAddress(baseNonce);
+    // 2. Derive persistent main burner + main PDA
+    this._mainBurner = await burnerService.deriveMainBurner(signature);
+    const mainBurnerPub = new PublicKey(this._mainBurner.publicKey);
+    const [mainPda] = deriveStealthPDA(mainBurnerPub, SHREDR_FIXED_SALT);
+    this._mainPda = mainPda;
     console.log(
-      "[initFromSignature] Stealth address derived:",
-      this._stealthBurner?.address,
+      "[ShredrClient] mainBurner:",
+      this._mainBurner.address,
+      "mainPda:",
+      this._mainPda.toBase58(),
     );
 
-    // 3. Try local storage first for current spending nonce
+    // 3. Load / generate current spending nonce
     let nonce = await nonceService.loadCurrentNonce(walletPubkey);
-    console.log(
-      "[initFromSignature] Local storage nonce:",
-      nonce ? `index=${nonce.index}` : "null",
-    );
 
-    if (!nonce) {
-      // 4. Try remote backend if fetch function provided
-      if (fetchBlobsFn) {
-        try {
-          console.log("[initFromSignature] Fetching blobs from backend...");
-          const blobs = await fetchBlobsFn();
-          console.log(
-            "[initFromSignature] Backend returned blobs:",
-            blobs.length,
-          );
-
-          const result = await nonceService.tryDecryptBlobs(blobs);
-          console.log("[initFromSignature] tryDecryptBlobs result:", {
-            found: result.found,
-            blobId: result.blobId,
-            nonceIndex: result.nonce?.index,
-          });
-
-          if (result.found && result.nonce) {
-            // Found in remote - sync to local
-            console.log(
-              "[initFromSignature] Syncing remote nonce to local storage...",
-            );
-            await nonceService.setCurrentState(result.nonce);
-            nonce = result.nonce;
-            this._currentBlobId = result.blobId ?? null;
-          }
-        } catch (err) {
-          console.warn(
-            "[initFromSignature] Failed to fetch blobs from backend:",
-            err,
-          );
+    if (!nonce && fetchBlobsFn) {
+      try {
+        const blobs = await fetchBlobsFn();
+        const result = await nonceService.tryDecryptBlobs(blobs);
+        if (result.found && result.nonce) {
+          await nonceService.setCurrentState(result.nonce);
+          nonce = result.nonce;
+          this._currentBlobId = result.blobId ?? null;
         }
+      } catch (err) {
+        console.warn("[initFromSignature] fetchBlobs failed:", err);
       }
     }
+
     if (!nonce) {
-      // 5. New user - generate base nonce (index 0), then increment to index 1
-      console.log(
-        "[initFromSignature] No nonce found - generating new base nonce (NEW USER)",
-      );
+      // New user — generate base nonce, then move to index 1 (index 0 reserved)
       await nonceService.generateBaseNonce(walletPubkey);
-      nonce = await nonceService.incrementNonce(); // Move to index 1
-      console.log(
-        "[initFromSignature] New nonce generated at index:",
-        nonce.index,
-      );
+      nonce = await nonceService.incrementNonce();
       this._isNewUser = true;
 
-      // Upload to backend if function provided
       if (createBlobFn) {
         try {
           const blobData = await nonceService.createBlobData(nonce);
           const newBlob = await createBlobFn(blobData);
           this._currentBlobId = newBlob.id;
-          console.log(
-            "[initFromSignature] Blob uploaded to backend:",
-            newBlob.id,
-          );
         } catch (err) {
-          console.warn(
-            "[initFromSignature] Failed to upload blob to backend:",
-            err,
-          );
+          console.warn("[initFromSignature] createBlob failed:", err);
         }
       }
     } else {
-      console.log(
-        "[initFromSignature] Returning user - using nonce at index:",
-        nonce.index,
-      );
       this._isNewUser = false;
     }
 
-    const isSameAsBaseNonce =
-      nonce.nonce.length === baseNonce.nonce.length &&
-      nonce.nonce.every((byte, i) => byte === baseNonce.nonce[i]);
-
-    if (isSameAsBaseNonce) {
-      console.warn(
-        "Current nonce matches burner[0] - incrementing to protect stealth address",
-      );
-      nonce = await nonceService.incrementNonce();
-    }
-
     this._currentNonce = nonce;
-    // 6. Derive current spending burner from nonce (index 1+)
+
+    // 4. Derive current burner + stealth PDA
     this._currentBurner = await burnerService.deriveBurnerFromNonce(nonce);
+    this.refreshStealthPda();
+
     this._initialized = true;
+    console.log(
+      "[ShredrClient] currentBurner:",
+      this._currentBurner.address,
+      "stealthPda:",
+      this._stealthPda?.toBase58(),
+    );
   }
 
   // ============ SIGNING MODE ============
@@ -307,116 +322,176 @@ export class ShredrClient {
     this._signingMode = mode;
   }
 
-  // ============ BURNER MANAGEMENT ============
+  // ============ BURNER ROTATION ============
+
+  /**
+   * Consume the current nonce and rotate to a fresh burner / stealth PDA.
+   * Call this after a stealth PDA has been used (funds received) so the next
+   * receive lands on a brand-new address.
+   */
   async consumeAndGenerateNew(
-    createBlobFn: (data: CreateBlobRequest) => Promise<{ id: string }> = (
-      data,
-    ) => apiClient.createBlob(data),
+    createBlobFn: (data: CreateBlobRequest) => Promise<{ id: string }> = (d) =>
+      apiClient.createBlob(d),
     deleteBlobFn: (id: string) => Promise<boolean> = (id) =>
       apiClient.deleteBlob(id),
   ): Promise<BurnerKeyPair> {
     if (!this._initialized || !this._currentNonce) {
       throw new Error("ShredrClient not initialized");
     }
-    // Clear old burner from memory
+
     if (this._currentBurner) {
       burnerService.clearBurner(this._currentBurner);
     }
-    // Consume nonce and get new one
+
     const { newNonce, newBlobData } = await nonceService.consumeNonce();
     const oldBlobId = this._currentBlobId;
-    // Sync with backend
+
     if (createBlobFn) {
       try {
         const newBlob = await createBlobFn(newBlobData);
         this._currentBlobId = newBlob.id;
       } catch (err) {
-        console.warn("Failed to upload new blob:", err);
+        console.warn("[consumeAndGenerateNew] createBlob failed:", err);
       }
     }
     if (deleteBlobFn && oldBlobId) {
       try {
         await deleteBlobFn(oldBlobId);
       } catch (err) {
-        console.warn("Failed to delete old blob:", err);
+        console.warn("[consumeAndGenerateNew] deleteBlob failed:", err);
       }
     }
+
     this._currentNonce = newNonce;
-    // Derive new burner
     this._currentBurner = await burnerService.deriveBurnerFromNonce(newNonce);
+    this.refreshStealthPda();
     return this._currentBurner;
   }
 
-  // ============ STEALTH BALANCE & WITHDRAW ============
+  // ============ ON-CHAIN: INITIALIZE & DELEGATE ============
 
   /**
-   * Get balance of the stealth address (burner[0]).
-   * Queries direct lamport balance on the stealth burner address.
+   * Step 2 of the SHREDR flow.
+   *
+   * After a sender deposits SOL into the stealth PDA via a regular SOL
+   * transfer, the relayer calls `InitializeAndDelegate` to create the PDA
+   * state and delegate it to the MagicBlock TEE validator.
+   *
+   * This is signed by:
+   *   - **Kora** as relayer + fee payer (server-side)
+   *   - The **burner keypair** (we have it client-side)
+   *
+   * @param burner   Burner keypair owning the stealth PDA (defaults to current)
+   * @param salt     32-byte salt (defaults to {@link SHREDR_FIXED_SALT})
+   * @returns Signature of the broadcast transaction
    */
-  async getStealthBalance(rpcUrl?: string): Promise<{
-    available: number; // SOL amount (human readable)
-    availableLamports: number; // Raw lamports
-    address: string;
-  }> {
-    if (!this._stealthBurner) {
-      throw new Error(
-        "Stealth address not derived. Call initFromSignature first.",
-      );
-    }
+  async initializeAndDelegate(
+    burner?: BurnerKeyPair,
+    salt: Uint8Array = SHREDR_FIXED_SALT,
+  ): Promise<string> {
+    const b = burner ?? this._currentBurner;
+    if (!b) throw new Error("No burner available");
 
-    const connection = this.getConnection(rpcUrl);
-    const stealthPubkey = new PublicKey(this._stealthBurner.publicKey);
+    const burnerKp = this.burnerToKeypair(b);
+    const relayer = koraRelayer.getRelayerPubkey();
 
-    console.log(
-      `getStealthBalance: Querying balance for address: ${this._stealthBurner.address}`,
+    // Random commit delay in [6h, 48h] for timing obfuscation
+    const delaySpan = COMMIT_DELAY_MAX_SECS - COMMIT_DELAY_MIN_SECS;
+    const commitDelay =
+      COMMIT_DELAY_MIN_SECS + Math.floor(Math.random() * delaySpan);
+
+    const ix = createInitializeAndDelegateInstruction(
+      relayer,
+      burnerKp.publicKey,
+      salt,
+      burnerKp.publicKey.toBytes(),
+      BigInt(commitDelay),
     );
 
-    const lamports = await connection.getBalance(stealthPubkey);
-
-    return {
-      available: lamports / LAMPORTS_PER_SOL,
-      availableLamports: lamports,
-      address: this._stealthBurner.address,
-    };
+    return koraRelayer.signAndSend(this.getConnection(), [ix], [burnerKp]);
   }
 
-  /** @deprecated Use getStealthBalance instead */
-  async getShadowireBalance(rpcUrl?: string) {
-    const result = await this.getStealthBalance(rpcUrl);
-    return {
-      available: result.available,
-      availableLamports: result.availableLamports,
-      poolAddress: result.address,
-    };
-  }
+  // ============ ON-CHAIN: PRIVATE TRANSFER (inside rollup) ============
 
   /**
-   * Withdraw SOL from stealth address (burner[0]) to any destination wallet.
+   * Step 3 — execute the private transfer inside the MagicBlock rollup.
+   * Moves the full balance from a stealth PDA to the main PDA.
    *
-   * This performs a standard SOL transfer from the stealth burner to the destination.
+   * @param sourceBurner  Burner that owns the source stealth PDA
+   * @param amountLamports Amount to transfer (typically the full PDA balance)
+   * @param salt          Salt used when deriving the source PDA
+   */
+  async privateTransferToMainPda(
+    sourceBurner: BurnerKeyPair,
+    amountLamports: bigint,
+    salt: Uint8Array = SHREDR_FIXED_SALT,
+  ): Promise<string> {
+    if (!this._mainPda) throw new Error("Main PDA not initialized");
+
+    const burnerKp = this.burnerToKeypair(sourceBurner);
+    const [sourcePda] = deriveStealthPDA(burnerKp.publicKey, salt);
+
+    const ix = createPrivateTransferInstruction(
+      sourcePda,
+      this._mainPda,
+      amountLamports,
+    );
+
+    // PrivateTransfer is dispatched against the rollup RPC.
+    // The source burner is registered in the ACL during InitializeAndDelegate,
+    // so it can sign on behalf of the source PDA inside the rollup.
+    return koraRelayer.signAndSend(
+      this.getRollupConnection(),
+      [ix],
+      [burnerKp],
+    );
+  }
+
+  // ============ ON-CHAIN: COMMIT & UNDELEGATE ============
+
+  /**
+   * Step 4 — commit rollup state to base layer AND undelegate the stealth PDA.
+   * Signed by Kora (relayer + fee payer).
+   */
+  async commitAndUndelegate(stealthPda: PublicKey): Promise<string> {
+    const relayer = koraRelayer.getRelayerPubkey();
+    const ix = createCommitAndUndelegateStealthInstruction(
+      relayer,
+      stealthPda,
+    );
+
+    // No client-side signers needed (Kora signs as relayer)
+    return koraRelayer.signAndSend(this.getConnection(), [ix], []);
+  }
+
+  // ============ ON-CHAIN: WITHDRAW ============
+
+  /**
+   * Step 5 — withdraw lamports from the main PDA to any destination.
+   * Signed by the main burner; fee paid by Kora.
+   *
+   * @param destinationAddress  Destination wallet (any base58 pubkey)
+   * @param amountInSol         Amount in SOL or "all" for the full balance
    */
   async withdrawToWallet(
     destinationAddress: string,
     amountInSol: number | "all",
-    rpcUrl?: string,
   ): Promise<{ signature: string; amount: number }> {
-    if (!this._stealthBurner) {
-      throw new Error(
-        "Stealth address not derived. Call initFromSignature first.",
-      );
+    if (!this._mainBurner || !this._mainPda) {
+      throw new Error("Main burner / main PDA not initialized");
     }
 
-    const connection = this.getConnection(rpcUrl);
-    const stealthKeypair = this.burnerToKeypair(this._stealthBurner);
+    const connection = this.getConnection();
+    const mainBurnerKp = this.burnerToKeypair(this._mainBurner);
     const destination = new PublicKey(destinationAddress);
 
-    // Get current balance
-    const balance = await connection.getBalance(stealthKeypair.publicKey);
+    // Look up current balance of the main PDA
+    const balanceLamports = await connection.getBalance(this._mainPda);
 
     let withdrawLamports: number;
     if (amountInSol === "all") {
-      // Leave enough for tx fee
-      withdrawLamports = balance - 5000;
+      // Leave a small buffer for rent (program will reject < rent_exempt)
+      withdrawLamports = balanceLamports;
     } else {
       withdrawLamports = Math.floor(amountInSol * LAMPORTS_PER_SOL);
     }
@@ -425,20 +500,17 @@ export class ShredrClient {
       throw new Error("Insufficient balance for withdrawal");
     }
 
-    // Use SystemProgram transfer (simple SOL transfer from burner[0] to destination)
-    const { SystemProgram } = await import("@solana/web3.js");
-    const ix = SystemProgram.transfer({
-      fromPubkey: stealthKeypair.publicKey,
-      toPubkey: destination,
-      lamports: withdrawLamports,
-    });
+    const ix = createStealthWithdrawInstruction(
+      mainBurnerKp.publicKey,
+      this._mainPda,
+      destination,
+      BigInt(withdrawLamports),
+    );
 
-    const tx = new Transaction().add(ix);
-    const signature = await sendAndConfirmTransaction(
+    const signature = await koraRelayer.signAndSend(
       connection,
-      tx,
-      [stealthKeypair],
-      { commitment: "confirmed" },
+      [ix],
+      [mainBurnerKp],
     );
 
     return {
@@ -447,13 +519,113 @@ export class ShredrClient {
     };
   }
 
+  // ============ BALANCE ============
+
+  /**
+   * Get the balance of the main PDA (where consolidated funds end up).
+   *
+   * The `address` returned is the **main PDA**, not the burner pubkey.
+   */
+  async getStealthBalance(): Promise<{
+    available: number;
+    availableLamports: number;
+    address: string;
+  }> {
+    if (!this._mainPda) {
+      throw new Error("Main PDA not initialized. Call initFromSignature first.");
+    }
+
+    const connection = this.getConnection();
+    const lamports = await connection.getBalance(this._mainPda);
+
+    return {
+      available: lamports / LAMPORTS_PER_SOL,
+      availableLamports: lamports,
+      address: this._mainPda.toBase58(),
+    };
+  }
+
+  /** @deprecated alias kept for the old UI */
+  async getShadowireBalance() {
+    const r = await this.getStealthBalance();
+    return {
+      available: r.available,
+      availableLamports: r.availableLamports,
+      poolAddress: r.address,
+    };
+  }
+
+  // ============ UTXO SCANNING ============
+
+  /**
+   * Scan stealth PDAs across nonce indices and return the ones with non-zero
+   * balance / pending state. Used by the dashboard to surface in-flight funds.
+   *
+   * Stops after {@link UTXO_SCAN_EMPTY_THRESHOLD} consecutive empty PDAs to
+   * keep the scan cheap.
+   */
+  async scanPendingUtxos(): Promise<PendingUtxo[]> {
+    if (!this._initialized || !this._walletPubkey) {
+      throw new Error("ShredrClient not initialized");
+    }
+
+    const connection = this.getConnection();
+    const utxos: PendingUtxo[] = [];
+    let consecutiveEmpty = 0;
+
+    for (let i = 1; i < MAX_UTXO_SCAN_INDEX; i++) {
+      const nonce = await nonceService.generateNonceAtIndex(
+        i,
+        this._walletPubkey,
+      );
+      const burner = await burnerService.deriveBurnerFromNonce(nonce);
+      const burnerPub = new PublicKey(burner.publicKey);
+      const [pda] = deriveStealthPDA(burnerPub, SHREDR_FIXED_SALT);
+
+      const accountInfo = await connection.getAccountInfo(pda);
+      const lamports = accountInfo?.lamports ?? 0;
+
+      let status: UtxoStatus = "empty";
+      if (lamports > 0) {
+        consecutiveEmpty = 0;
+        // Try to parse the on-chain state to determine the lifecycle phase.
+        if (accountInfo?.data && accountInfo.data.length > 0) {
+          const state = parseStealthAccount(Buffer.from(accountInfo.data));
+          if (state) {
+            status = state.delegated ? "delegated" : "ready";
+          } else {
+            status = "received"; // raw lamports landed, not yet initialized
+          }
+        } else {
+          status = "received";
+        }
+        utxos.push({
+          nonceIndex: i,
+          burnerAddress: burner.address,
+          stealthPda: pda.toBase58(),
+          lamports,
+          status,
+        });
+      } else {
+        consecutiveEmpty++;
+        if (consecutiveEmpty >= UTXO_SCAN_EMPTY_THRESHOLD) break;
+      }
+
+      // Wipe the burner private key when we don't keep it
+      burnerService.clearBurner(burner);
+    }
+
+    return utxos;
+  }
+
   // ============ CLEANUP ============
+
   destroy(): void {
     if (this._currentBurner) {
       burnerService.clearBurner(this._currentBurner);
     }
-    if (this._stealthBurner) {
-      burnerService.clearBurner(this._stealthBurner);
+    if (this._mainBurner) {
+      burnerService.clearBurner(this._mainBurner);
     }
 
     nonceService.destroy();
@@ -461,11 +633,14 @@ export class ShredrClient {
     this._initialized = false;
     this._currentNonce = null;
     this._currentBurner = null;
-    this._stealthBurner = null;
+    this._mainBurner = null;
+    this._mainPda = null;
+    this._stealthPda = null;
     this._walletPubkey = null;
     this._currentBlobId = null;
     this._isNewUser = false;
     this._connection = null;
+    this._rollupConnection = null;
   }
 }
 
