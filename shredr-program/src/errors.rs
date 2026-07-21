@@ -30,6 +30,8 @@ pub enum ShredrError {
     BalanceInvariantViolation = 6009,
     /// Attempted to initialize an account that already exists.
     AccountAlreadyInitialized = 6010,
+    /// Source and destination stealth accounts are the same account.
+    SelfTransferNotAllowed = 6011,
 }
 
 impl From<ShredrError> for ProgramError {

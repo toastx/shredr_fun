@@ -93,6 +93,15 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for PrivateTransfer<'a> {
         let destination_pda = &accounts[1];
         let amount = parse_amount(data)?;
 
+        // Reject self-transfer. Passing the same account as both source and
+        // destination would make `get_stealth_mut` hand out two aliasing
+        // `&mut StealthAccount` references to the same bytes (undefined
+        // behavior, and a violation of that helper's documented SAFETY
+        // contract), on top of being a meaningless no-op transfer.
+        if source_pda.address() == destination_pda.address() {
+            return Err(ShredrError::SelfTransferNotAllowed.into());
+        }
+
         // Source must sign (delegated key signs inside rollup)
         if !source_pda.is_signer() {
             return Err(ShredrError::MissingSigner.into());

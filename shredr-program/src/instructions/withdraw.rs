@@ -110,6 +110,14 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for Withdraw<'a> {
 
         let amount = parse_amount(instruction_data)?;
 
+        // Reject a destination that is the stealth account itself: the paired
+        // set_lamports calls would credit the account without a matching debit,
+        // which the runtime rejects as a lamports imbalance. Fail early with a
+        // clear error instead.
+        if destination.address() == stealth_account.address() {
+            return Err(ShredrError::SelfTransferNotAllowed.into());
+        }
+
         // Signer check — only in TryFrom (removed duplicate from process)
         if !owner.is_signer() {
             return Err(ShredrError::MissingSigner.into());
