@@ -23,17 +23,6 @@ pub fn parse_amount(data: &[u8]) -> Result<u64, ProgramError> {
     Ok(amt)
 }
 
-/// Derive a stealth account PDA from a burner's AccountView and salt.
-///
-/// Seeds: `[STEALTH_ADDRESS, burner_address, salt]`
-pub fn derive_stealth_account(burner: &AccountView, salt: &[u8; 32]) -> Result<(Address, u8), ProgramError> {
-    Address::derive_program_address(
-        &[seeds::STEALTH_ADDRESS, burner.address().as_ref(), salt.as_ref()],
-        &PROGRAM_ADDRESS,
-    )
-    .ok_or(ProgramError::InvalidAccountData)
-}
-
 /// Derive a stealth account PDA from a raw burner pubkey and salt.
 ///
 /// Used when we have the pubkey bytes (e.g. from instruction data) rather than an AccountView.
@@ -73,9 +62,9 @@ pub fn get_stealth_mut(account: &AccountView) -> Result<&mut StealthAccount, Pro
     unsafe {
         let data = account.borrow_unchecked_mut();
 
-        // 3. Discriminator check
-        let disc: [u8; 8] = data[0..8].try_into().map_err(|_| -> ProgramError { ShredrError::InvalidDiscriminator.into() })?;
-        if disc != STEALTH_ACCOUNT_DISCRIMINATOR {
+        // 3. Discriminator check (compare the slice directly — the length is
+        // already guaranteed by the check above, so no intermediate copy is needed).
+        if data[0..8] != STEALTH_ACCOUNT_DISCRIMINATOR {
             return Err(ShredrError::InvalidDiscriminator.into());
         }
 

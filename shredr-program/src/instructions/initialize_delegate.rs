@@ -51,7 +51,6 @@ use ephemeral_rollups_pinocchio::acl::{
 use ephemeral_rollups_pinocchio::instruction::delegate_account;
 use ephemeral_rollups_pinocchio::types::DelegateConfig;
 
-use pinocchio::cpi::Signer;
 use pinocchio::sysvars::clock::Clock;
 use pinocchio::sysvars::rent::Rent;
 use pinocchio::sysvars::Sysvar;
