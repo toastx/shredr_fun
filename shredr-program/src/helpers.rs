@@ -76,13 +76,24 @@ pub fn get_stealth_mut(account: &AccountView) -> Result<&mut StealthAccount, Pro
 
 /// Write the discriminator bytes to the first 8 bytes of a stealth account.
 /// Should be called once during initialization before writing any state.
-pub fn write_stealth_discriminator(account: &AccountView) {
-    // SAFETY: We're writing the discriminator to the first 8 bytes of account data.
-    // The caller is responsible for ensuring the account has sufficient data length.
+///
+/// Returns [`ShredrError::AccountDataTooSmall`] if the account cannot hold a
+/// full `[discriminator][StealthAccount]` layout, so the `unsafe` write below
+/// can never index out of bounds.
+pub fn write_stealth_discriminator(account: &AccountView) -> Result<(), ProgramError> {
+    // Bounds precondition for the unsafe write (and the state that follows it).
+    if account.data_len() < 8 + STEALTH_ACCOUNT_SIZE {
+        return Err(ShredrError::AccountDataTooSmall.into());
+    }
+
+    // SAFETY: The length check above guarantees at least 8 bytes exist, so the
+    // slice write to `data[0..8]` is in bounds. No other reference to this
+    // account's data is live at this point (called once, right after creation).
     unsafe {
         let data = account.borrow_unchecked_mut();
         data[0..8].copy_from_slice(&STEALTH_ACCOUNT_DISCRIMINATOR);
     }
+    Ok(())
 }
 
 /// Validate that an account's address matches the expected PDA derivation.

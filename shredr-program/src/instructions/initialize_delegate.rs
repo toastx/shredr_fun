@@ -119,7 +119,7 @@ impl<'a> InitializeAndDelegate<'a> {
         .invoke()?;
 
         // ── Step 2: Write discriminator + stealth state ──
-        write_stealth_discriminator(stealth_account);
+        write_stealth_discriminator(stealth_account)?;
 
         // Safely get mutable reference to stealth state
         let stealth_state = get_stealth_mut(stealth_account)?;
