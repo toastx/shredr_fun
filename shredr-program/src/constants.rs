@@ -78,9 +78,25 @@ pub const PERMISSION_PROGRAM_ID_B58: &str = "EPHpaA1tt7nJpEgAjRwkPx5tWHiV6cfKZjP
 
 // ============ TEE VALIDATOR ============
 
-/// TEE validator pubkey for **mainnet** MagicBlock delegation.
-///
-/// **WARNING**: This is hardcoded for mainnet only. For devnet/testnet deployments,
-/// this value should be overridden. A future improvement is to store this in a
-/// `ProgramConfig` PDA so it can be set at runtime per environment.
+/// TEE validator identity for **mainnet** MagicBlock delegation.
 pub const TEE_VALIDATOR_MAINNET: &str = "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo";
+
+/// The TEE validator to pin when delegating, selected at build time via Cargo
+/// features so the same source can target either network:
+///
+/// - `mainnet` feature → pin [`TEE_VALIDATOR_MAINNET`].
+/// - otherwise (default `devnet`) → `None`, which lets the MagicBlock delegation
+///   program fall back to the network's default validator. This avoids hardcoding
+///   a devnet validator identity that would be invalid on-chain there.
+///
+/// Build for mainnet with `cargo build-sbf --features mainnet`.
+#[cfg(feature = "mainnet")]
+pub fn tee_validator() -> Option<Address> {
+    Some(Address::from_str_const(TEE_VALIDATOR_MAINNET))
+}
+
+/// See [`tee_validator`] — devnet/default variant (no pinned validator).
+#[cfg(not(feature = "mainnet"))]
+pub fn tee_validator() -> Option<Address> {
+    None
+}

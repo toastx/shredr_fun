@@ -34,7 +34,7 @@
 //! - Account must not already exist (prevents re-initialization attacks).
 //! - A discriminator is written before any state to prevent type confusion.
 
-use crate::constants::{PROGRAM_ADDRESS, TEE_VALIDATOR_MAINNET, seeds};
+use crate::constants::{PROGRAM_ADDRESS, tee_validator, seeds};
 use crate::errors::ShredrError;
 use crate::helpers::{get_stealth_mut, verify_stealth_pda, write_stealth_discriminator};
 use crate::state::STEALTH_ACCOUNT_SIZE;
@@ -170,8 +170,10 @@ impl<'a> InitializeAndDelegate<'a> {
         .invoke()?;
 
         // ── Step 4: Delegate to MagicBlock TEE validator ──
+        // The validator is selected at build time by Cargo feature (see
+        // `constants::tee_validator`): pinned on mainnet, network-default on devnet.
         let delegate_config = DelegateConfig {
-            validator: Some(Address::from_str_const(TEE_VALIDATOR_MAINNET)),
+            validator: tee_validator(),
             ..Default::default()
         };
 

@@ -40,9 +40,9 @@ pub enum StealthInstruction {
     #[account(3, writable, name = "magic_context", desc = "MagicBlock context account")]
     CommitAndUndelegateStealth {},
 
-    /// Withdraw lamports from main PDA to any destination after undelegation
-    #[account(0, signer, writable, name = "main_burner", desc = "Main burner keypair derived from mainKey, proves ownership")]
-    #[account(1, writable, name = "main_pda", desc = "Main stealth PDA holding funds after private transfer")]
+    /// Withdraw lamports from the stealth PDA to any destination after undelegation
+    #[account(0, signer, writable, name = "burner", desc = "Burner keypair that owns the stealth account, proves ownership")]
+    #[account(1, writable, name = "stealth_account", desc = "Stealth PDA holding the funds")]
     #[account(2, writable, name = "destination", desc = "Any destination address to receive funds")]
     Withdraw {
         amount: u64,

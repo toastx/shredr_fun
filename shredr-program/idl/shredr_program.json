@@ -226,19 +226,19 @@
       "name": "Withdraw",
       "accounts": [
         {
-          "name": "mainBurner",
+          "name": "burner",
           "isMut": true,
           "isSigner": true,
           "docs": [
-            "Main burner keypair derived from mainKey, proves ownership"
+            "Burner keypair that owns the stealth account, proves ownership"
           ]
         },
         {
-          "name": "mainPda",
+          "name": "stealthAccount",
           "isMut": true,
           "isSigner": false,
           "docs": [
-            "Main stealth PDA holding funds after private transfer"
+            "Stealth PDA holding the funds"
           ]
         },
         {

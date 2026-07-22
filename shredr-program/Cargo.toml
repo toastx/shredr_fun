@@ -16,5 +16,9 @@ pinocchio-system = "0.5.0"
 shank = "0.4.8"
 
 [features]
-default = []
+default = ["devnet"]
 logging = []
+# Network selection for the pinned MagicBlock TEE validator (see constants::tee_validator).
+# devnet: no pinned validator (network default). mainnet: pin TEE_VALIDATOR_MAINNET.
+devnet = []
+mainnet = []
