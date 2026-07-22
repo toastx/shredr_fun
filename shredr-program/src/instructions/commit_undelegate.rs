@@ -15,6 +15,7 @@
 use crate::ProgramError;
 use crate::AccountView;
 use crate::ProgramResult;
+use crate::helpers::get_stealth_mut;
 
 use ephemeral_rollups_pinocchio::instruction::{
     commit_accounts,
@@ -162,6 +163,15 @@ impl<'a> UndelegationCallback<'a> {
         } = self;
 
         undelegate(stealth_account, program_id, buffer_account, payer, ix_data)?;
+
+        // `undelegate` has just recreated the base-layer account (program-owned)
+        // and copied the buffered rollup state back verbatim — which still carries
+        // `delegated = true` from initialization. Clear it now so the account
+        // reflects that it lives on the base layer again; otherwise `Withdraw`
+        // would permanently reject with `AlreadyDelegated` and funds could never
+        // be claimed.
+        let stealth_state = get_stealth_mut(stealth_account)?;
+        stealth_state.delegated = false;
 
         Ok(())
     }

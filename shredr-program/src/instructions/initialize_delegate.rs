@@ -129,7 +129,12 @@ impl<'a> InitializeAndDelegate<'a> {
 
         stealth_state.owner = burner_pubkey.clone();
         stealth_state.salt = salt;
-        stealth_state.deposited_amount = stealth_account.lamports();
+        // `deposited_amount` tracks *user funds only* and must exclude the
+        // rent-exempt lamports the account was just created with. At init there
+        // are no deposits yet, so this is zero; deposits/transfers increment it
+        // alongside the account's lamports, preserving the invariant
+        // `lamports == rent_exempt_minimum + deposited_amount`.
+        stealth_state.deposited_amount = 0;
         stealth_state.deposit_timestamp = clock.unix_timestamp;
         stealth_state.delegated = true;
         stealth_state.bump = bump;

@@ -32,6 +32,9 @@ use crate::ProgramResult;
 use crate::Address;
 use crate::helpers::parse_amount;
 
+use pinocchio::sysvars::rent::Rent;
+use pinocchio::sysvars::Sysvar;
+
 pub struct Withdraw<'a> {
     pub owner: &'a AccountView,
     pub stealth_account: &'a AccountView,
@@ -71,6 +74,17 @@ impl<'a> Withdraw<'a> {
             .lamports()
             .checked_sub(amount)
             .ok_or(ProgramError::InsufficientFunds)?;
+
+        // Never let the stealth account drop below rent-exemption. `deposited_amount`
+        // excludes rent, so a well-formed withdraw (amount <= deposited_amount)
+        // always leaves at least the rent-exempt minimum. This floor is a safety
+        // net against any lamports/deposited_amount desync: dropping below rent
+        // would let the runtime reap the account and strand the residual lamports.
+        let rent = Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
+        let rent_minimum = rent.try_minimum_balance(stealth_account.data_len())?;
+        if new_stealth_lamports < rent_minimum {
+            return Err(ShredrError::BalanceInvariantViolation.into());
+        }
 
         let new_destination_lamports = destination
             .lamports()
