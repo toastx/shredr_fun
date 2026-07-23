@@ -1,0 +1,38 @@
+# rustfmt configuration for shredr-program.
+#
+# These are the stable, industry-standard settings aligned with the official
+# Rust Style Guide. Run `cargo fmt` to apply, `cargo fmt --check` in CI.
+
+# Match the crate edition (see Cargo.toml).
+edition = "2021"
+
+# Rust Style Guide defaults — set explicitly so formatting is stable across
+# toolchain versions that may change defaults.
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Unix"
+use_small_heuristics = "Default"
+
+# Idiomatic shorthands.
+use_field_init_shorthand = true
+use_try_shorthand = true
+
+# Import & item ordering.
+reorder_imports = true
+reorder_modules = true
+remove_nested_parens = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Nightly-only options. These require `cargo +nightly fmt`; on the stable
+# toolchain rustfmt ignores them (with a warning), so they are left commented.
+# Uncomment if the project adopts a nightly fmt step in CI.
+# ─────────────────────────────────────────────────────────────────────────────
+# imports_granularity = "Crate"
+# group_imports = "StdExternalCrate"
+# trailing_comma = "Vertical"
+# match_block_trailing_comma = false
+# wrap_comments = true
+# comment_width = 100
+# format_code_in_doc_comments = true
+# normalize_comments = true

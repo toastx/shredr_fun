@@ -12,27 +12,25 @@
 //! - Commit operations require the relayer to sign.
 //! - UndelegationCallback is invoked by the MagicBlock delegation program via CPI.
 
-use crate::ProgramError;
-use crate::AccountView;
-use crate::ProgramResult;
 use crate::helpers::get_stealth_mut;
+use crate::AccountView;
+use crate::ProgramError;
+use crate::ProgramResult;
 
-use ephemeral_rollups_pinocchio::instruction::{
-    commit_accounts,
-    commit_and_undelegate_accounts,
-    undelegate,
-};
 use crate::Address;
+use ephemeral_rollups_pinocchio::instruction::{
+    commit_accounts, commit_and_undelegate_accounts, undelegate,
+};
 
 // ─────────────────────────────────────────────
 // Commit  (keeps account delegated, just flushes state to base layer)
 // ─────────────────────────────────────────────
 
 pub struct CommitStealth<'a> {
-    pub relayer:         &'a AccountView,
+    pub relayer: &'a AccountView,
     pub stealth_account: &'a AccountView,
-    pub magic_program:   &'a AccountView,
-    pub magic_context:   &'a AccountView,
+    pub magic_program: &'a AccountView,
+    pub magic_context: &'a AccountView,
 }
 
 impl<'a> CommitStealth<'a> {
@@ -68,10 +66,10 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for CommitStealth<'a> {
         let (accounts, _instruction_data) = value;
         let mut iter = accounts.iter();
 
-        let relayer         = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let relayer = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let stealth_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let magic_program   = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let magic_context   = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let magic_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let magic_context = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
 
         Ok(Self {
             relayer,
@@ -87,10 +85,10 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for CommitStealth<'a> {
 // ─────────────────────────────────────────────
 
 pub struct CommitAndUndelegateStealth<'a> {
-    pub relayer:         &'a AccountView,
+    pub relayer: &'a AccountView,
     pub stealth_account: &'a AccountView,
-    pub magic_program:   &'a AccountView,
-    pub magic_context:   &'a AccountView,
+    pub magic_program: &'a AccountView,
+    pub magic_context: &'a AccountView,
 }
 
 impl<'a> CommitAndUndelegateStealth<'a> {
@@ -112,7 +110,7 @@ impl<'a> CommitAndUndelegateStealth<'a> {
             magic_context,
             magic_program,
             None,
-            None
+            None,
         )?;
 
         Ok(())
@@ -126,10 +124,10 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for CommitAndUndelegateStealth<'
         let (accounts, _instruction_data) = value;
         let mut iter = accounts.iter();
 
-        let relayer         = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let relayer = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let stealth_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let magic_program   = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let magic_context   = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let magic_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let magic_context = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
 
         Ok(Self {
             relayer,
@@ -146,10 +144,10 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for CommitAndUndelegateStealth<'
 
 pub struct UndelegationCallback<'a> {
     pub stealth_account: &'a AccountView,
-    pub buffer_account:  &'a AccountView,
-    pub payer:           &'a AccountView,
-    pub system_program:  &'a AccountView,
-    pub ix_data:         &'a [u8],
+    pub buffer_account: &'a AccountView,
+    pub payer: &'a AccountView,
+    pub system_program: &'a AccountView,
+    pub ix_data: &'a [u8],
 }
 
 impl<'a> UndelegationCallback<'a> {
@@ -186,9 +184,9 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for UndelegationCallback<'a> {
 
         // Order matches what the delegation program passes in the callback CPI.
         let stealth_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let buffer_account  = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let payer           = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let system_program  = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let buffer_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let payer = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let system_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
 
         Ok(Self {
             stealth_account,

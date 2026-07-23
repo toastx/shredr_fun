@@ -26,11 +26,11 @@
 
 use crate::errors::ShredrError;
 use crate::helpers::get_stealth_mut;
-use crate::ProgramError;
-use crate::AccountView;
-use crate::ProgramResult;
-use crate::Address;
 use crate::helpers::parse_amount;
+use crate::AccountView;
+use crate::Address;
+use crate::ProgramError;
+use crate::ProgramResult;
 
 use pinocchio::sysvars::rent::Rent;
 use pinocchio::sysvars::Sysvar;
@@ -51,10 +51,8 @@ impl<'a> Withdraw<'a> {
             amount,
         } = self;
 
-        // Safe access with ownership/length/discriminator validation
         let stealth_data = get_stealth_mut(stealth_account)?;
 
-        // Owner check — stealth state owner must match the signer
         if &stealth_data.owner != owner.address() {
             return Err(ProgramError::IllegalOwner);
         }
@@ -64,12 +62,10 @@ impl<'a> Withdraw<'a> {
             return Err(ShredrError::AlreadyDelegated.into());
         }
 
-        // Amount check
         if stealth_data.deposited_amount < amount {
             return Err(ProgramError::InsufficientFunds);
         }
 
-        // Transfer lamports: stealth_account -> destination
         let new_stealth_lamports = stealth_account
             .lamports()
             .checked_sub(amount)
@@ -80,7 +76,8 @@ impl<'a> Withdraw<'a> {
         // always leaves at least the rent-exempt minimum. This floor is a safety
         // net against any lamports/deposited_amount desync: dropping below rent
         // would let the runtime reap the account and strand the residual lamports.
-        let rent = Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
+        let rent =
+            Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
         let rent_minimum = rent.try_minimum_balance(stealth_account.data_len())?;
         if new_stealth_lamports < rent_minimum {
             return Err(ShredrError::BalanceInvariantViolation.into());
@@ -94,7 +91,6 @@ impl<'a> Withdraw<'a> {
         stealth_account.set_lamports(new_stealth_lamports);
         destination.set_lamports(new_destination_lamports);
 
-        // Update state
         stealth_data.deposited_amount = stealth_data
             .deposited_amount
             .checked_sub(amount)
@@ -118,9 +114,9 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for Withdraw<'a> {
         let (accounts, instruction_data) = value;
         let mut iter = accounts.iter();
 
-        let owner           = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let owner = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let stealth_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let destination     = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let destination = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
 
         let amount = parse_amount(instruction_data)?;
 
@@ -132,7 +128,6 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for Withdraw<'a> {
             return Err(ShredrError::SelfTransferNotAllowed.into());
         }
 
-        // Signer check — only in TryFrom (removed duplicate from process)
         if !owner.is_signer() {
             return Err(ShredrError::MissingSigner.into());
         }

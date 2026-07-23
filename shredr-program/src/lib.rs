@@ -39,23 +39,20 @@
 #![no_std]
 #![allow(unexpected_cfgs)]
 
-use pinocchio::{AccountView,
-    entrypoint,
-    error::ProgramError,
-    Address,
-    ProgramResult,
-};
+use pinocchio::{entrypoint, error::ProgramError, AccountView, Address, ProgramResult};
 use pinocchio_pubkey::declare_id;
 entrypoint!(process_instruction);
-pub mod instructions;
-pub mod helpers;
 pub mod constants;
-pub mod state;
 pub mod errors;
+pub mod helpers;
+pub mod instructions;
+pub mod state;
 
+use crate::instructions::commit_undelegate::{
+    CommitAndUndelegateStealth, CommitStealth, UndelegationCallback,
+};
 use crate::instructions::initialize_delegate::InitializeAndDelegate;
 use crate::instructions::private_transfer::PrivateTransfer;
-use crate::instructions::commit_undelegate::{CommitStealth, CommitAndUndelegateStealth, UndelegationCallback};
 use crate::instructions::withdraw::Withdraw;
 
 declare_id!("FfJtZKQaW7Nac8nEZKyVj64kq6Di8HtvCgzTokj2yuqi");
@@ -105,7 +102,6 @@ fn process_instruction(
 
     log_instruction(instruction);
 
-    // All TryFrom implementations use the standardized (accounts, data) signature.
     match instruction {
         InstructionDiscriminator::InitializeAndDelegate => {
             InitializeAndDelegate::try_from((accounts, data))?.process()
@@ -119,9 +115,7 @@ fn process_instruction(
         InstructionDiscriminator::CommitAndUndelegateStealth => {
             CommitAndUndelegateStealth::try_from((accounts, data))?.process()
         }
-        InstructionDiscriminator::Withdraw => {
-            Withdraw::try_from((accounts, data))?.process()
-        }
+        InstructionDiscriminator::Withdraw => Withdraw::try_from((accounts, data))?.process(),
         InstructionDiscriminator::UndelegationCallback => {
             UndelegationCallback::try_from((accounts, data))?.process(program_id)
         }

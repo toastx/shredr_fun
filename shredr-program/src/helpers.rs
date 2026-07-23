@@ -2,13 +2,13 @@
 //!
 //! Includes PDA derivation, safe account state access, and instruction data parsing.
 
-use pinocchio::error::ProgramError;
-use pinocchio::Address;
-use pinocchio::AccountView;
-use crate::constants::PROGRAM_ADDRESS;
 use crate::constants::seeds;
+use crate::constants::PROGRAM_ADDRESS;
 use crate::errors::ShredrError;
 use crate::state::{StealthAccount, STEALTH_ACCOUNT_DISCRIMINATOR, STEALTH_ACCOUNT_SIZE};
+use pinocchio::error::ProgramError;
+use pinocchio::AccountView;
+use pinocchio::Address;
 
 /// Parse a little-endian u64 amount from instruction data.
 /// Returns an error if the data is not exactly 8 bytes or the value is zero.
@@ -26,9 +26,16 @@ pub fn parse_amount(data: &[u8]) -> Result<u64, ProgramError> {
 /// Derive a stealth account PDA from a raw burner pubkey and salt.
 ///
 /// Used when we have the pubkey bytes (e.g. from instruction data) rather than an AccountView.
-pub fn derive_stealth_account_from_pubkey(burner_pubkey: &Address, salt: &[u8; 32]) -> Result<(Address, u8), ProgramError> {
+pub fn derive_stealth_account_from_pubkey(
+    burner_pubkey: &Address,
+    salt: &[u8; 32],
+) -> Result<(Address, u8), ProgramError> {
     Address::derive_program_address(
-        &[seeds::STEALTH_ADDRESS, burner_pubkey.as_ref(), salt.as_ref()],
+        &[
+            seeds::STEALTH_ADDRESS,
+            burner_pubkey.as_ref(),
+            salt.as_ref(),
+        ],
         &PROGRAM_ADDRESS,
     )
     .ok_or(ProgramError::InvalidAccountData)
@@ -46,12 +53,10 @@ pub fn derive_stealth_account_from_pubkey(burner_pubkey: &Address, salt: &[u8; 3
 /// The caller must ensure no aliasing mutable references exist.
 #[allow(clippy::mut_from_ref)]
 pub fn get_stealth_mut(account: &AccountView) -> Result<&mut StealthAccount, ProgramError> {
-    // 1. Ownership check
     if !account.owned_by(&PROGRAM_ADDRESS) {
         return Err(ShredrError::InvalidProgramOwner.into());
     }
 
-    // 2. Data length check
     let required_len = 8 + STEALTH_ACCOUNT_SIZE;
     if account.data_len() < required_len {
         return Err(ShredrError::AccountDataTooSmall.into());
@@ -62,8 +67,8 @@ pub fn get_stealth_mut(account: &AccountView) -> Result<&mut StealthAccount, Pro
     unsafe {
         let data = account.borrow_unchecked_mut();
 
-        // 3. Discriminator check (compare the slice directly — the length is
-        // already guaranteed by the check above, so no intermediate copy is needed).
+        // Compare the discriminator slice directly — the length is already
+        // guaranteed above, so no intermediate copy is needed.
         if data[0..8] != STEALTH_ACCOUNT_DISCRIMINATOR {
             return Err(ShredrError::InvalidDiscriminator.into());
         }
