@@ -22,3 +22,19 @@ logging = []
 # devnet: no pinned validator (network default). mainnet: pin TEE_VALIDATOR_MAINNET.
 devnet = []
 mainnet = []
+
+[[bench]]
+name = "compute_units"
+harness = false
+
+
+[dev-dependencies]
+mollusk-svm = "0.14.0"
+mollusk-svm-bencher = "0.14.0"
+solana-account = "4.3"
+solana-instruction = "3.4"
+solana-program-error = "3.0"
+# `curve25519` enables off-chain `find_program_address`, needed to derive the
+# stealth PDAs from the host side of the tests.
+solana-pubkey = { version = "4.2", features = ["curve25519"] }
+solana-sdk-ids = "3.1"

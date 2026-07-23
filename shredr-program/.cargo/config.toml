@@ -1,0 +1,6 @@
+# Mollusk turns on `solana_runtime::message_processor=debug` unless RUST_LOG is
+# already set, which buries `cargo test` output in per-instruction SVM logs.
+# `force = false` means an explicit `RUST_LOG=debug cargo test` still wins when
+# you actually want the program logs.
+[env]
+RUST_LOG = { value = "off", force = false }
