@@ -2,10 +2,11 @@
 //!
 //! ## Accounts
 //!
-//! | # | Account          | Signer | Writable | Description                      |
-//! |---|------------------|--------|----------|----------------------------------|
-//! | 0 | source_pda       | ✓      | ✓        | Source stealth PDA (must sign)   |
-//! | 1 | destination_pda  |        | ✓        | Destination stealth PDA          |
+//! | # | Account          | Signer | Writable | Description                                  |
+//! |---|------------------|--------|----------|----------------------------------------------|
+//! | 0 | source_burner    | ✓      |          | Burner that owns the source PDA, authorizes  |
+//! | 1 | source_pda       |        | ✓        | Source stealth PDA                           |
+//! | 2 | destination_pda  |        | ✓        | Destination stealth PDA                      |
 //!
 //! ## Instruction Data
 //!
@@ -13,7 +14,9 @@
 //!
 //! ## Security
 //!
-//! - Source PDA must sign (delegated key signs inside the rollup).
+//! - A PDA can never sign, so the transfer is authorized by the source's burner:
+//!   it must sign, and its address must equal the source PDA's recorded `owner`.
+//!   This is the burner registered as the ACL member at delegation time.
 //! - Both accounts must be owned by the SHREDR program.
 //! - Lamports are moved directly (valid inside MagicBlock ephemeral rollups).
 //! - `deposited_amount` is updated atomically for both accounts.
@@ -32,6 +35,7 @@ use crate::ProgramError;
 use crate::ProgramResult;
 
 pub struct PrivateTransfer<'a> {
+    pub source_burner: &'a AccountView,
     pub source_pda: &'a AccountView,
     pub destination_pda: &'a AccountView,
     pub amount: u64,
@@ -40,12 +44,19 @@ pub struct PrivateTransfer<'a> {
 impl<'a> PrivateTransfer<'a> {
     pub fn process(self) -> ProgramResult {
         let PrivateTransfer {
+            source_burner,
             source_pda,
             destination_pda,
             amount,
         } = self;
 
         let source_data = get_stealth_mut(source_pda)?;
+
+        // Authorize against the recorded owner: the signer must be the burner
+        // that owns the source PDA, not the PDA itself (a PDA never signs).
+        if &source_data.owner != source_burner.address() {
+            return Err(ProgramError::IllegalOwner);
+        }
 
         if source_data.deposited_amount < amount {
             return Err(ProgramError::InsufficientFunds);
@@ -84,11 +95,12 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for PrivateTransfer<'a> {
 
     fn try_from(value: (&'a [AccountView], &'a [u8])) -> Result<Self, Self::Error> {
         let (accounts, data) = value;
-        if accounts.len() < 2 {
+        if accounts.len() < 3 {
             return Err(ProgramError::NotEnoughAccountKeys);
         }
-        let source_pda = &accounts[0];
-        let destination_pda = &accounts[1];
+        let source_burner = &accounts[0];
+        let source_pda = &accounts[1];
+        let destination_pda = &accounts[2];
         let amount = parse_amount(data)?;
 
         // Reject self-transfer. Passing the same account as both source and
@@ -100,8 +112,9 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for PrivateTransfer<'a> {
             return Err(ShredrError::SelfTransferNotAllowed.into());
         }
 
-        // Source must sign (delegated key signs inside rollup)
-        if !source_pda.is_signer() {
+        // The source's burner authorizes the move (owner match is checked in
+        // `process` against the PDA's recorded owner).
+        if !source_burner.is_signer() {
             return Err(ShredrError::MissingSigner.into());
         }
 
@@ -113,6 +126,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for PrivateTransfer<'a> {
         }
 
         Ok(Self {
+            source_burner,
             source_pda,
             destination_pda,
             amount,

@@ -52,19 +52,19 @@ pub enum StealthInstruction {
     InitializeAndDelegate {
         salt: [u8; 32],
         burner_pubkey: [u8; 32],
-        commit_delay: i64,
+        deposit_amount: u64,
     },
 
     /// Private transfer between two stealth PDAs inside the MagicBlock rollup
     #[account(
         0,
         signer,
-        writable,
-        name = "source_pda",
-        desc = "Source stealth PDA, must sign"
+        name = "source_burner",
+        desc = "Burner that owns the source PDA, authorizes the transfer"
     )]
+    #[account(1, writable, name = "source_pda", desc = "Source stealth PDA")]
     #[account(
-        1,
+        2,
         writable,
         name = "destination_pda",
         desc = "Destination stealth PDA"

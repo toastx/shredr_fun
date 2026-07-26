@@ -108,11 +108,13 @@ fn main() {
         program_id(),
         &transfer_data,
         vec![
-            AccountMeta::new(source_key, true),
+            AccountMeta::new_readonly(source_burner, true),
+            AccountMeta::new(source_key, false),
             AccountMeta::new(dest_key, false),
         ],
     );
     let transfer_accounts = vec![
+        (source_burner, system_account(0)),
         (
             source_key,
             stealth_account(
@@ -155,9 +157,92 @@ fn main() {
         (destination, system_account(0)),
     ];
 
+    // ── private transfer, full drain ──
+    // Moves the source's entire deposited balance, leaving it at exactly rent —
+    // the boundary path where `deposited_amount` reaches zero.
+    let drain_source_burner = Pubkey::new_unique();
+    let drain_dest_burner = Pubkey::new_unique();
+    let (drain_source_key, drain_source_bump) = derive(&drain_source_burner, &[3u8; 32]);
+    let (drain_dest_key, drain_dest_bump) = derive(&drain_dest_burner, &[4u8; 32]);
+
+    let mut transfer_full_data = vec![IX_PRIVATE_TRANSFER];
+    transfer_full_data.extend_from_slice(&(4 * LAMPORTS_PER_SOL).to_le_bytes());
+
+    let transfer_full_ix = Instruction::new_with_bytes(
+        program_id(),
+        &transfer_full_data,
+        vec![
+            AccountMeta::new_readonly(drain_source_burner, true),
+            AccountMeta::new(drain_source_key, false),
+            AccountMeta::new(drain_dest_key, false),
+        ],
+    );
+    let transfer_full_accounts = vec![
+        (drain_source_burner, system_account(0)),
+        (
+            drain_source_key,
+            stealth_account(
+                &drain_source_burner,
+                [3u8; 32],
+                drain_source_bump,
+                4 * LAMPORTS_PER_SOL,
+                rent,
+            ),
+        ),
+        (
+            drain_dest_key,
+            stealth_account(&drain_dest_burner, [4u8; 32], drain_dest_bump, 0, rent),
+        ),
+    ];
+
+    // ── withdraw, full drain ──
+    // Withdraws the entire deposit, exercising the extra work the partial path
+    // skips: the rent-exemption floor check and the state-clearing branch that
+    // zeroes owner/delegated/bump.
+    let wd_burner = Pubkey::new_unique();
+    let (wd_stealth_key, wd_stealth_bump) = derive(&wd_burner, &[8u8; 32]);
+    let wd_destination = Pubkey::new_unique();
+
+    let mut withdraw_full_data = vec![IX_WITHDRAW];
+    withdraw_full_data.extend_from_slice(&(5 * LAMPORTS_PER_SOL).to_le_bytes());
+
+    let withdraw_full_ix = Instruction::new_with_bytes(
+        program_id(),
+        &withdraw_full_data,
+        vec![
+            AccountMeta::new(wd_burner, true),
+            AccountMeta::new(wd_stealth_key, false),
+            AccountMeta::new(wd_destination, false),
+        ],
+    );
+    let withdraw_full_accounts = vec![
+        (wd_burner, system_account(LAMPORTS_PER_SOL)),
+        (
+            wd_stealth_key,
+            stealth_account(
+                &wd_burner,
+                [8u8; 32],
+                wd_stealth_bump,
+                5 * LAMPORTS_PER_SOL,
+                rent,
+            ),
+        ),
+        (wd_destination, system_account(0)),
+    ];
+
     MolluskComputeUnitBencher::new(mollusk)
         .bench(("private_transfer", &transfer_ix, &transfer_accounts))
+        .bench((
+            "private_transfer_full_drain",
+            &transfer_full_ix,
+            &transfer_full_accounts,
+        ))
         .bench(("withdraw", &withdraw_ix, &withdraw_accounts))
+        .bench((
+            "withdraw_full_drain",
+            &withdraw_full_ix,
+            &withdraw_full_accounts,
+        ))
         .must_pass(true)
         .out_dir("target/benches")
         .execute();

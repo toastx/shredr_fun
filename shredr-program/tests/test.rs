@@ -229,14 +229,20 @@ fn funded_stealth(mollusk: &Mollusk, burner: &Pubkey, salt: [u8; 32], deposited:
 // Instruction builders
 // ─────────────────────────────────────────────
 
-fn private_transfer_ix(source: &Pubkey, destination: &Pubkey, amount: u64) -> Instruction {
+fn private_transfer_ix(
+    source_burner: &Pubkey,
+    source: &Pubkey,
+    destination: &Pubkey,
+    amount: u64,
+) -> Instruction {
     let mut data = vec![IX_PRIVATE_TRANSFER];
     data.extend_from_slice(&amount.to_le_bytes());
     Instruction::new_with_bytes(
         program_id(),
         &data,
         vec![
-            AccountMeta::new(*source, true),
+            AccountMeta::new_readonly(*source_burner, true),
+            AccountMeta::new(*source, false),
             AccountMeta::new(*destination, false),
         ],
     )
@@ -358,8 +364,9 @@ fn private_transfer_moves_lamports_and_deposited_amount() {
         .to_bytes();
 
     mollusk.process_and_validate_instruction(
-        &private_transfer_ix(&source.key, &destination.key, amount),
+        &private_transfer_ix(&source_burner, &source.key, &destination.key, amount),
         &[
+            (source_burner, system_account(0)),
             (source.key, source.account.clone()),
             (destination.key, destination.account.clone()),
         ],
@@ -382,17 +389,19 @@ fn private_transfer_of_entire_balance_succeeds() {
     let mollusk = mollusk();
     let rent = stealth_rent(&mollusk);
 
-    let source = funded_stealth(
-        &mollusk,
-        &Pubkey::new_unique(),
-        [1u8; 32],
-        4 * LAMPORTS_PER_SOL,
-    );
+    let source_burner = Pubkey::new_unique();
+    let source = funded_stealth(&mollusk, &source_burner, [1u8; 32], 4 * LAMPORTS_PER_SOL);
     let destination = funded_stealth(&mollusk, &Pubkey::new_unique(), [2u8; 32], 0);
 
     mollusk.process_and_validate_instruction(
-        &private_transfer_ix(&source.key, &destination.key, 4 * LAMPORTS_PER_SOL),
+        &private_transfer_ix(
+            &source_burner,
+            &source.key,
+            &destination.key,
+            4 * LAMPORTS_PER_SOL,
+        ),
         &[
+            (source_burner, system_account(0)),
             (source.key, source.account.clone()),
             (destination.key, destination.account.clone()),
         ],
@@ -411,16 +420,15 @@ fn private_transfer_of_entire_balance_succeeds() {
 #[test]
 fn private_transfer_rejects_self_transfer() {
     let mollusk = mollusk();
-    let source = funded_stealth(
-        &mollusk,
-        &Pubkey::new_unique(),
-        [1u8; 32],
-        5 * LAMPORTS_PER_SOL,
-    );
+    let source_burner = Pubkey::new_unique();
+    let source = funded_stealth(&mollusk, &source_burner, [1u8; 32], 5 * LAMPORTS_PER_SOL);
 
     mollusk.process_and_validate_instruction(
-        &private_transfer_ix(&source.key, &source.key, LAMPORTS_PER_SOL),
-        &[(source.key, source.account.clone())],
+        &private_transfer_ix(&source_burner, &source.key, &source.key, LAMPORTS_PER_SOL),
+        &[
+            (source_burner, system_account(0)),
+            (source.key, source.account.clone()),
+        ],
         &[Check::err(shredr_err(ShredrError::SelfTransferNotAllowed))],
     );
 }
@@ -428,20 +436,23 @@ fn private_transfer_rejects_self_transfer() {
 #[test]
 fn private_transfer_requires_source_signature() {
     let mollusk = mollusk();
-    let source = funded_stealth(
-        &mollusk,
-        &Pubkey::new_unique(),
-        [1u8; 32],
-        5 * LAMPORTS_PER_SOL,
-    );
+    let source_burner = Pubkey::new_unique();
+    let source = funded_stealth(&mollusk, &source_burner, [1u8; 32], 5 * LAMPORTS_PER_SOL);
     let destination = funded_stealth(&mollusk, &Pubkey::new_unique(), [2u8; 32], 0);
 
-    let mut instruction = private_transfer_ix(&source.key, &destination.key, LAMPORTS_PER_SOL);
+    // Clear the signer flag on the source burner (account 0).
+    let mut instruction = private_transfer_ix(
+        &source_burner,
+        &source.key,
+        &destination.key,
+        LAMPORTS_PER_SOL,
+    );
     instruction.accounts[0].is_signer = false;
 
     mollusk.process_and_validate_instruction(
         &instruction,
         &[
+            (source_burner, system_account(0)),
             (source.key, source.account.clone()),
             (destination.key, destination.account.clone()),
         ],
@@ -449,15 +460,43 @@ fn private_transfer_requires_source_signature() {
     );
 }
 
+/// A signer that is not the source PDA's recorded owner cannot move its funds,
+/// even though it is a valid signer and both PDAs are program-owned.
+#[test]
+fn private_transfer_rejects_non_owner_signer() {
+    let mollusk = mollusk();
+    let source_burner = Pubkey::new_unique();
+    let attacker = Pubkey::new_unique();
+    let source = funded_stealth(&mollusk, &source_burner, [1u8; 32], 5 * LAMPORTS_PER_SOL);
+    let destination = funded_stealth(&mollusk, &Pubkey::new_unique(), [2u8; 32], 0);
+
+    mollusk.process_and_validate_instruction(
+        &private_transfer_ix(&attacker, &source.key, &destination.key, LAMPORTS_PER_SOL),
+        &[
+            (attacker, system_account(0)),
+            (source.key, source.account.clone()),
+            (destination.key, destination.account.clone()),
+        ],
+        &[Check::err(ProgramError::IllegalOwner)],
+    );
+}
+
 #[test]
 fn private_transfer_rejects_foreign_source() {
     let mollusk = mollusk();
+    let source_burner = Pubkey::new_unique();
     let source_key = Pubkey::new_unique();
     let destination = funded_stealth(&mollusk, &Pubkey::new_unique(), [2u8; 32], 0);
 
     mollusk.process_and_validate_instruction(
-        &private_transfer_ix(&source_key, &destination.key, LAMPORTS_PER_SOL),
+        &private_transfer_ix(
+            &source_burner,
+            &source_key,
+            &destination.key,
+            LAMPORTS_PER_SOL,
+        ),
         &[
+            (source_burner, system_account(0)),
             (source_key, system_account(10 * LAMPORTS_PER_SOL)),
             (destination.key, destination.account.clone()),
         ],
@@ -468,17 +507,19 @@ fn private_transfer_rejects_foreign_source() {
 #[test]
 fn private_transfer_rejects_foreign_destination() {
     let mollusk = mollusk();
-    let source = funded_stealth(
-        &mollusk,
-        &Pubkey::new_unique(),
-        [1u8; 32],
-        5 * LAMPORTS_PER_SOL,
-    );
+    let source_burner = Pubkey::new_unique();
+    let source = funded_stealth(&mollusk, &source_burner, [1u8; 32], 5 * LAMPORTS_PER_SOL);
     let destination_key = Pubkey::new_unique();
 
     mollusk.process_and_validate_instruction(
-        &private_transfer_ix(&source.key, &destination_key, LAMPORTS_PER_SOL),
+        &private_transfer_ix(
+            &source_burner,
+            &source.key,
+            &destination_key,
+            LAMPORTS_PER_SOL,
+        ),
         &[
+            (source_burner, system_account(0)),
             (source.key, source.account.clone()),
             (destination_key, system_account(0)),
         ],
@@ -490,12 +531,19 @@ fn private_transfer_rejects_foreign_destination() {
 fn private_transfer_rejects_amount_above_deposited() {
     let mollusk = mollusk();
     // The account holds rent + 1 SOL of lamports but only 1 SOL is withdrawable.
-    let source = funded_stealth(&mollusk, &Pubkey::new_unique(), [1u8; 32], LAMPORTS_PER_SOL);
+    let source_burner = Pubkey::new_unique();
+    let source = funded_stealth(&mollusk, &source_burner, [1u8; 32], LAMPORTS_PER_SOL);
     let destination = funded_stealth(&mollusk, &Pubkey::new_unique(), [2u8; 32], 0);
 
     mollusk.process_and_validate_instruction(
-        &private_transfer_ix(&source.key, &destination.key, LAMPORTS_PER_SOL + 1),
+        &private_transfer_ix(
+            &source_burner,
+            &source.key,
+            &destination.key,
+            LAMPORTS_PER_SOL + 1,
+        ),
         &[
+            (source_burner, system_account(0)),
             (source.key, source.account.clone()),
             (destination.key, destination.account.clone()),
         ],
@@ -506,17 +554,14 @@ fn private_transfer_rejects_amount_above_deposited() {
 #[test]
 fn private_transfer_rejects_zero_amount() {
     let mollusk = mollusk();
-    let source = funded_stealth(
-        &mollusk,
-        &Pubkey::new_unique(),
-        [1u8; 32],
-        5 * LAMPORTS_PER_SOL,
-    );
+    let source_burner = Pubkey::new_unique();
+    let source = funded_stealth(&mollusk, &source_burner, [1u8; 32], 5 * LAMPORTS_PER_SOL);
     let destination = funded_stealth(&mollusk, &Pubkey::new_unique(), [2u8; 32], 0);
 
     mollusk.process_and_validate_instruction(
-        &private_transfer_ix(&source.key, &destination.key, 0),
+        &private_transfer_ix(&source_burner, &source.key, &destination.key, 0),
         &[
+            (source_burner, system_account(0)),
             (source.key, source.account.clone()),
             (destination.key, destination.account.clone()),
         ],
@@ -527,12 +572,8 @@ fn private_transfer_rejects_zero_amount() {
 #[test]
 fn private_transfer_rejects_malformed_amount() {
     let mollusk = mollusk();
-    let source = funded_stealth(
-        &mollusk,
-        &Pubkey::new_unique(),
-        [1u8; 32],
-        5 * LAMPORTS_PER_SOL,
-    );
+    let source_burner = Pubkey::new_unique();
+    let source = funded_stealth(&mollusk, &source_burner, [1u8; 32], 5 * LAMPORTS_PER_SOL);
     let destination = funded_stealth(&mollusk, &Pubkey::new_unique(), [2u8; 32], 0);
 
     // 7 bytes and 9 bytes: `parse_amount` demands exactly 8.
@@ -545,11 +586,13 @@ fn private_transfer_rejects_malformed_amount() {
                 program_id(),
                 &data,
                 vec![
-                    AccountMeta::new(source.key, true),
+                    AccountMeta::new_readonly(source_burner, true),
+                    AccountMeta::new(source.key, false),
                     AccountMeta::new(destination.key, false),
                 ],
             ),
             &[
+                (source_burner, system_account(0)),
                 (source.key, source.account.clone()),
                 (destination.key, destination.account.clone()),
             ],
@@ -561,12 +604,8 @@ fn private_transfer_rejects_malformed_amount() {
 #[test]
 fn private_transfer_rejects_wrong_discriminator_in_account_data() {
     let mollusk = mollusk();
-    let source = funded_stealth(
-        &mollusk,
-        &Pubkey::new_unique(),
-        [1u8; 32],
-        5 * LAMPORTS_PER_SOL,
-    );
+    let source_burner = Pubkey::new_unique();
+    let source = funded_stealth(&mollusk, &source_burner, [1u8; 32], 5 * LAMPORTS_PER_SOL);
     let destination = funded_stealth(&mollusk, &Pubkey::new_unique(), [2u8; 32], 0);
 
     // Program-owned and correctly sized, but not a StealthAccount.
@@ -574,8 +613,14 @@ fn private_transfer_rejects_wrong_discriminator_in_account_data() {
     impostor.data[0..8].copy_from_slice(b"NOTSHRDR");
 
     mollusk.process_and_validate_instruction(
-        &private_transfer_ix(&source.key, &destination.key, LAMPORTS_PER_SOL),
+        &private_transfer_ix(
+            &source_burner,
+            &source.key,
+            &destination.key,
+            LAMPORTS_PER_SOL,
+        ),
         &[
+            (source_burner, system_account(0)),
             (source.key, impostor),
             (destination.key, destination.account.clone()),
         ],
@@ -586,20 +631,22 @@ fn private_transfer_rejects_wrong_discriminator_in_account_data() {
 #[test]
 fn private_transfer_rejects_undersized_account() {
     let mollusk = mollusk();
-    let source = funded_stealth(
-        &mollusk,
-        &Pubkey::new_unique(),
-        [1u8; 32],
-        5 * LAMPORTS_PER_SOL,
-    );
+    let source_burner = Pubkey::new_unique();
+    let source = funded_stealth(&mollusk, &source_burner, [1u8; 32], 5 * LAMPORTS_PER_SOL);
     let destination = funded_stealth(&mollusk, &Pubkey::new_unique(), [2u8; 32], 0);
 
     let mut truncated = source.account.clone();
     truncated.data.truncate(ACCOUNT_LEN - 1);
 
     mollusk.process_and_validate_instruction(
-        &private_transfer_ix(&source.key, &destination.key, LAMPORTS_PER_SOL),
+        &private_transfer_ix(
+            &source_burner,
+            &source.key,
+            &destination.key,
+            LAMPORTS_PER_SOL,
+        ),
         &[
+            (source_burner, system_account(0)),
             (source.key, truncated),
             (destination.key, destination.account.clone()),
         ],
@@ -608,25 +655,28 @@ fn private_transfer_rejects_undersized_account() {
 }
 
 #[test]
-fn private_transfer_requires_two_accounts() {
+fn private_transfer_requires_three_accounts() {
     let mollusk = mollusk();
-    let source = funded_stealth(
-        &mollusk,
-        &Pubkey::new_unique(),
-        [1u8; 32],
-        5 * LAMPORTS_PER_SOL,
-    );
+    let source_burner = Pubkey::new_unique();
+    let source = funded_stealth(&mollusk, &source_burner, [1u8; 32], 5 * LAMPORTS_PER_SOL);
 
     let mut data = vec![IX_PRIVATE_TRANSFER];
     data.extend_from_slice(&LAMPORTS_PER_SOL.to_le_bytes());
 
+    // Only two of the three required accounts (missing the destination).
     mollusk.process_and_validate_instruction(
         &Instruction::new_with_bytes(
             program_id(),
             &data,
-            vec![AccountMeta::new(source.key, true)],
+            vec![
+                AccountMeta::new_readonly(source_burner, true),
+                AccountMeta::new(source.key, false),
+            ],
         ),
-        &[(source.key, source.account.clone())],
+        &[
+            (source_burner, system_account(0)),
+            (source.key, source.account.clone()),
+        ],
         &[Check::err(ProgramError::NotEnoughAccountKeys)],
     );
 }
@@ -947,11 +997,11 @@ fn init_setup(stealth_override: Option<Pubkey>, stealth_lamports: u64) -> InitAc
     }
 }
 
-fn init_ix_data(salt: &[u8; 32], burner: &Pubkey) -> Vec<u8> {
+fn init_ix_data(salt: &[u8; 32], burner: &Pubkey, deposit_amount: u64) -> Vec<u8> {
     let mut data = vec![IX_INITIALIZE_AND_DELEGATE];
     data.extend_from_slice(salt);
     data.extend_from_slice(burner.as_ref());
-    data.extend_from_slice(&0i64.to_le_bytes()); // commit_delay, currently unread
+    data.extend_from_slice(&deposit_amount.to_le_bytes());
     data
 }
 
@@ -964,7 +1014,7 @@ fn initialize_requires_relayer_signature() {
     mollusk.process_and_validate_instruction(
         &Instruction::new_with_bytes(
             program_id(),
-            &init_ix_data(&setup.salt, &setup.burner),
+            &init_ix_data(&setup.salt, &setup.burner, 0),
             setup.metas.clone(),
         ),
         &setup.accounts,
@@ -981,7 +1031,7 @@ fn initialize_requires_burner_signature() {
     mollusk.process_and_validate_instruction(
         &Instruction::new_with_bytes(
             program_id(),
-            &init_ix_data(&setup.salt, &setup.burner),
+            &init_ix_data(&setup.salt, &setup.burner, 0),
             setup.metas.clone(),
         ),
         &setup.accounts,
@@ -990,12 +1040,12 @@ fn initialize_requires_burner_signature() {
 }
 
 #[test]
-fn initialize_requires_at_least_64_bytes_of_data() {
+fn initialize_requires_at_least_72_bytes_of_data() {
     let mollusk = mollusk();
     let setup = init_setup(None, 0);
 
-    let mut short = init_ix_data(&setup.salt, &setup.burner);
-    short.truncate(64); // discriminator + 63 payload bytes
+    let mut short = init_ix_data(&setup.salt, &setup.burner, 0);
+    short.truncate(72); // discriminator + 71 payload bytes (one short of salt+burner+deposit)
 
     mollusk.process_and_validate_instruction(
         &Instruction::new_with_bytes(program_id(), &short, setup.metas.clone()),
@@ -1012,7 +1062,7 @@ fn initialize_requires_nine_accounts() {
     mollusk.process_and_validate_instruction(
         &Instruction::new_with_bytes(
             program_id(),
-            &init_ix_data(&setup.salt, &setup.burner),
+            &init_ix_data(&setup.salt, &setup.burner, 0),
             setup.metas[..8].to_vec(),
         ),
         &setup.accounts[..8],
@@ -1030,7 +1080,7 @@ fn initialize_rejects_wrong_pda() {
     mollusk.process_and_validate_instruction(
         &Instruction::new_with_bytes(
             program_id(),
-            &init_ix_data(&setup.salt, &setup.burner),
+            &init_ix_data(&setup.salt, &setup.burner, 0),
             setup.metas.clone(),
         ),
         &setup.accounts,
@@ -1048,7 +1098,7 @@ fn initialize_rejects_mismatched_salt() {
     mollusk.process_and_validate_instruction(
         &Instruction::new_with_bytes(
             program_id(),
-            &init_ix_data(&[0xABu8; 32], &setup.burner),
+            &init_ix_data(&[0xABu8; 32], &setup.burner, 0),
             setup.metas.clone(),
         ),
         &setup.accounts,
@@ -1066,7 +1116,7 @@ fn initialize_rejects_existing_account() {
     mollusk.process_and_validate_instruction(
         &Instruction::new_with_bytes(
             program_id(),
-            &init_ix_data(&setup.salt, &setup.burner),
+            &init_ix_data(&setup.salt, &setup.burner, 0),
             setup.metas.clone(),
         ),
         &setup.accounts,
@@ -1079,16 +1129,18 @@ fn initialize_rejects_existing_account() {
 /// With every SHREDR-side check satisfied, execution reaches the ACL permission
 /// CPI, which cannot resolve here because the MagicBlock programs are not loaded
 /// into the harness. Asserting only that no SHREDR error surfaces still proves
-/// PDA derivation and the System `CreateAccount` CPI both went through.
+/// PDA derivation, the System `CreateAccount` CPI, and the burner→PDA deposit
+/// `Transfer` (a non-zero `deposit_amount` is passed) all went through.
 #[test]
 fn initialize_clears_program_validation_before_cpi() {
     let mollusk = mollusk();
     let setup = init_setup(None, 0);
 
+    // Burner is funded with 1 SOL in `init_setup`; sweep half of it into the PDA.
     let result = mollusk.process_instruction(
         &Instruction::new_with_bytes(
             program_id(),
-            &init_ix_data(&setup.salt, &setup.burner),
+            &init_ix_data(&setup.salt, &setup.burner, LAMPORTS_PER_SOL / 2),
             setup.metas.clone(),
         ),
         &setup.accounts,

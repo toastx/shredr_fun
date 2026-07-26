@@ -98,8 +98,8 @@
           }
         },
         {
-          "name": "commitDelay",
-          "type": "i64"
+          "name": "depositAmount",
+          "type": "u64"
         }
       ],
       "discriminant": {
@@ -111,11 +111,19 @@
       "name": "PrivateTransfer",
       "accounts": [
         {
-          "name": "sourcePda",
-          "isMut": true,
+          "name": "sourceBurner",
+          "isMut": false,
           "isSigner": true,
           "docs": [
-            "Source stealth PDA, must sign"
+            "Burner that owns the source PDA, authorizes the transfer"
+          ]
+        },
+        {
+          "name": "sourcePda",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Source stealth PDA"
           ]
         },
         {

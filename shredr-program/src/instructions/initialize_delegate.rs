@@ -16,20 +16,26 @@
 //!
 //! ## Instruction Data
 //!
-//! `[salt: [u8; 32], burner_pubkey: [u8; 32], commit_delay: i64]` — 72 bytes total.
+//! `[salt: [u8; 32], burner_pubkey: [u8; 32], deposit_amount: u64]` — 72 bytes total.
+//!
+//! `deposit_amount` is the amount of SOL the burner has already received and is
+//! swept into the PDA here. Pass `0` to create an empty delegated PDA (used for
+//! the destination account, which is funded later by a private transfer).
 //!
 //! ## Flow
 //!
 //! 1. Derive and verify the stealth PDA address.
 //! 2. **Create the PDA account** via System Program CPI (relayer pays rent).
-//! 3. Write discriminator + stealth state.
-//! 4. Create ACL permission for the burner.
-//! 5. Delegate the account to MagicBlock TEE validator.
+//! 3. **Sweep `deposit_amount` from the burner into the PDA** (burner signs).
+//! 4. Write discriminator + stealth state.
+//! 5. Create ACL permission for the burner.
+//! 6. Delegate the account to MagicBlock TEE validator.
 //!
 //! ## Security
 //!
 //! - Relayer must sign (pays for account creation + delegation).
-//! - Burner must sign (proves ownership of the derived keypair).
+//! - Burner must sign (proves ownership of the derived keypair *and* authorizes
+//!   moving its received funds into the PDA).
 //! - The stealth PDA is re-derived and compared to the provided account.
 //! - Account must not already exist (prevents re-initialization attacks).
 //! - A discriminator is written before any state to prevent type confusion.
@@ -51,7 +57,7 @@ use pinocchio::sysvars::clock::Clock;
 use pinocchio::sysvars::rent::Rent;
 use pinocchio::sysvars::Sysvar;
 use pinocchio::AccountView;
-use pinocchio_system::instructions::CreateAccount;
+use pinocchio_system::instructions::{CreateAccount, Transfer};
 
 pub struct InitializeAndDelegate<'a> {
     pub relayer: &'a AccountView,
@@ -65,6 +71,7 @@ pub struct InitializeAndDelegate<'a> {
     pub system_program: &'a AccountView,
     pub salt: [u8; 32],
     pub burner_pubkey: Address,
+    pub deposit_amount: u64,
 }
 
 impl<'a> InitializeAndDelegate<'a> {
@@ -81,6 +88,7 @@ impl<'a> InitializeAndDelegate<'a> {
             system_program,
             salt,
             burner_pubkey,
+            deposit_amount,
         } = self;
 
         let bump = verify_stealth_pda(stealth_account, &burner_pubkey, &salt)?;
@@ -112,7 +120,23 @@ impl<'a> InitializeAndDelegate<'a> {
         }
         .invoke()?;
 
-        // ── Step 2: Write discriminator + stealth state ──
+        // ── Step 2: Sweep the burner's received funds into the PDA ──
+        // People send SOL to the burner (a one-time keypair); the burner signs
+        // here to move that deposit into its program-owned stealth PDA. The
+        // relayer paid rent above, so only user funds land in `deposited_amount`,
+        // preserving the invariant `lamports == rent_exempt_minimum + deposited`.
+        // `deposit_amount == 0` creates an empty delegated PDA (the destination
+        // account, funded later by a private transfer).
+        if deposit_amount > 0 {
+            Transfer {
+                from: burner,
+                to: stealth_account,
+                lamports: deposit_amount,
+            }
+            .invoke()?;
+        }
+
+        // ── Step 3: Write discriminator + stealth state ──
         write_stealth_discriminator(stealth_account)?;
 
         let stealth_state = get_stealth_mut(stealth_account)?;
@@ -122,17 +146,12 @@ impl<'a> InitializeAndDelegate<'a> {
 
         stealth_state.owner = burner_pubkey.clone();
         stealth_state.salt = salt;
-        // `deposited_amount` tracks *user funds only* and must exclude the
-        // rent-exempt lamports the account was just created with. At init there
-        // are no deposits yet, so this is zero; deposits/transfers increment it
-        // alongside the account's lamports, preserving the invariant
-        // `lamports == rent_exempt_minimum + deposited_amount`.
-        stealth_state.deposited_amount = 0;
+        stealth_state.deposited_amount = deposit_amount;
         stealth_state.deposit_timestamp = clock.unix_timestamp;
         stealth_state.delegated = true;
         stealth_state.bump = bump;
 
-        // ── Step 3: Create ACL permission for the burner ──
+        // ── Step 4: Create ACL permission for the burner ──
         let permission_program = PERMISSION_PROGRAM_ID;
 
         let signer_seeds: &[&[u8]] = &[
@@ -162,7 +181,7 @@ impl<'a> InitializeAndDelegate<'a> {
         .seeds(signer_seeds)
         .invoke()?;
 
-        // ── Step 4: Delegate to MagicBlock TEE validator ──
+        // ── Step 5: Delegate to MagicBlock TEE validator ──
         // The validator is selected at build time by Cargo feature (see
         // `constants::tee_validator`): pinned on mainnet, network-default on devnet.
         let delegate_config = DelegateConfig {
@@ -213,8 +232,8 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             return Err(ShredrError::MissingSigner.into());
         }
 
-        // Expecting: [salt(32) + burner_pubkey(32)] = 64 bytes minimum
-        if instruction_data.len() < 64 {
+        // Expecting: [salt(32) + burner_pubkey(32) + deposit_amount(8)] = 72 bytes
+        if instruction_data.len() < 72 {
             return Err(ProgramError::InvalidInstructionData);
         }
 
@@ -223,6 +242,11 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             .map_err(|_| ProgramError::InvalidInstructionData)?;
         let burner_pubkey = Address::new_from_array(
             instruction_data[32..64]
+                .try_into()
+                .map_err(|_| ProgramError::InvalidInstructionData)?,
+        );
+        let deposit_amount = u64::from_le_bytes(
+            instruction_data[64..72]
                 .try_into()
                 .map_err(|_| ProgramError::InvalidInstructionData)?,
         );
@@ -239,6 +263,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             system_program,
             salt,
             burner_pubkey,
+            deposit_amount,
         })
     }
 }
