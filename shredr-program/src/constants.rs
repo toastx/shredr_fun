@@ -18,7 +18,7 @@ pub const PROGRAM_ADDRESS: Address = Address::new_from_array(crate::ID);
 pub mod seeds {
     /// Seed for the global program config PDA (reserved for future use).
     pub const PROGRAM_CONFIG: &[u8] = b"shredr_program_config";
-    /// Seed for stealth account PDAs: `[STEALTH_ADDRESS, burner_pubkey, salt]`.
+    /// Seed for stealth account PDAs: `[STEALTH_ADDRESS, burner_pubkey]`.
     pub const STEALTH_ADDRESS: &[u8] = b"shredr_stealth_address";
     /// Seed for user address PDAs (reserved for future use).
     pub const USER_ADDRESS: &[u8] = b"shredr_user_address";

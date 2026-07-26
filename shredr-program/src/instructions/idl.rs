@@ -22,7 +22,7 @@ pub enum StealthInstruction {
         3,
         writable,
         name = "stealth_account",
-        desc = "Stealth PDA derived from burner+salt"
+        desc = "Stealth PDA derived from the burner"
     )]
     #[account(
         4,
@@ -49,11 +49,7 @@ pub enum StealthInstruction {
         desc = "MagicBlock delegation metadata"
     )]
     #[account(8, name = "system_program", desc = "System Program")]
-    InitializeAndDelegate {
-        salt: [u8; 32],
-        burner_pubkey: [u8; 32],
-        deposit_amount: u64,
-    },
+    InitializeAndDelegate { deposit_amount: u64 },
 
     /// Private transfer between two stealth PDAs inside the MagicBlock rollup
     #[account(

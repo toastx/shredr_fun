@@ -31,7 +31,7 @@
 //!
 //! ### Security Model
 //!
-//! - Stealth PDAs are derived deterministically: `[STEALTH_ADDRESS, burner_pubkey, salt]`.
+//! - Stealth PDAs are derived deterministically: `[STEALTH_ADDRESS, burner_pubkey]`.
 //! - The burner keypair is a one-time key derived client-side from `mainKey + nonce`.
 //! - Private transfers happen inside the MagicBlock ephemeral rollup (TEE-secured).
 //! - Withdrawals require the burner to sign and the account to be undelegated.

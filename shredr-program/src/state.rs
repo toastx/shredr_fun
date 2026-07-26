@@ -22,7 +22,8 @@ pub const STEALTH_ACCOUNT_SIZE: usize = core::mem::size_of::<StealthAccount>();
 ///
 /// # Fields
 /// - `owner`: The burner pubkey that owns this stealth account.
-/// - `salt`: 32-byte random salt used in PDA derivation.
+/// - `salt`: reserved (unused). The PDA is derived from the burner alone; this
+///   field is retained for layout stability and is written as zero.
 /// - `deposited_amount`: Lamports deposited (tracked independently of actual lamports for accounting).
 /// - `deposit_timestamp`: Unix timestamp when funds were first deposited.
 /// - `delegated`: Whether this account is currently delegated to a MagicBlock validator.

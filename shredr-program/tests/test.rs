@@ -128,13 +128,9 @@ fn shredr_err(error: ShredrError) -> ProgramError {
 // Fixtures
 // ─────────────────────────────────────────────
 
-/// Derive a stealth PDA the same way the program does:
-/// `[STEALTH_ADDRESS, burner_pubkey, salt]`.
-fn derive_stealth_pda(burner: &Pubkey, salt: &[u8; 32]) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[seeds::STEALTH_ADDRESS, burner.as_ref(), salt],
-        &program_id(),
-    )
+/// Derive a stealth PDA the same way the program does: `[STEALTH_ADDRESS, burner]`.
+fn derive_stealth_pda(burner: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[seeds::STEALTH_ADDRESS, burner.as_ref()], &program_id())
 }
 
 #[derive(Clone)]
@@ -215,7 +211,7 @@ struct Stealth {
 /// Build a funded, undelegated stealth account holding `deposited` lamports of
 /// user funds on top of the rent-exempt minimum.
 fn funded_stealth(mollusk: &Mollusk, burner: &Pubkey, salt: [u8; 32], deposited: u64) -> Stealth {
-    let (key, bump) = derive_stealth_pda(burner, &salt);
+    let (key, bump) = derive_stealth_pda(burner);
     let state = StealthState::new(*burner, salt, bump).deposited(deposited);
     let account = state.to_account(stealth_rent(mollusk) + deposited);
     Stealth {
@@ -804,7 +800,7 @@ fn withdraw_rejects_non_owner_signer() {
 fn withdraw_rejects_delegated_account() {
     let mollusk = mollusk();
     let burner = Pubkey::new_unique();
-    let (key, bump) = derive_stealth_pda(&burner, &[7u8; 32]);
+    let (key, bump) = derive_stealth_pda(&burner);
     let state = StealthState::new(burner, [7u8; 32], bump)
         .deposited(5 * LAMPORTS_PER_SOL)
         .delegated(true);
@@ -851,7 +847,7 @@ fn withdraw_below_rent_exemption_is_refused() {
     let rent = stealth_rent(&mollusk);
 
     let burner = Pubkey::new_unique();
-    let (key, bump) = derive_stealth_pda(&burner, &[7u8; 32]);
+    let (key, bump) = derive_stealth_pda(&burner);
     let state = StealthState::new(burner, [7u8; 32], bump).deposited(1_000);
     let destination = Pubkey::new_unique();
 
@@ -934,7 +930,6 @@ fn withdraw_requires_three_accounts() {
 
 struct InitAccounts {
     burner: Pubkey,
-    salt: [u8; 32],
     stealth: Pubkey,
     accounts: Vec<(Pubkey, Account)>,
     metas: Vec<AccountMeta>,
@@ -943,8 +938,7 @@ struct InitAccounts {
 fn init_setup(stealth_override: Option<Pubkey>, stealth_lamports: u64) -> InitAccounts {
     let relayer = Pubkey::new_unique();
     let burner = Pubkey::new_unique();
-    let salt = [9u8; 32];
-    let (derived, _) = derive_stealth_pda(&burner, &salt);
+    let (derived, _) = derive_stealth_pda(&burner);
     let stealth = stealth_override.unwrap_or(derived);
 
     let owner_program = program_id();
@@ -990,17 +984,14 @@ fn init_setup(stealth_override: Option<Pubkey>, stealth_lamports: u64) -> InitAc
 
     InitAccounts {
         burner,
-        salt,
         stealth,
         accounts,
         metas,
     }
 }
 
-fn init_ix_data(salt: &[u8; 32], burner: &Pubkey, deposit_amount: u64) -> Vec<u8> {
+fn init_ix_data(deposit_amount: u64) -> Vec<u8> {
     let mut data = vec![IX_INITIALIZE_AND_DELEGATE];
-    data.extend_from_slice(salt);
-    data.extend_from_slice(burner.as_ref());
     data.extend_from_slice(&deposit_amount.to_le_bytes());
     data
 }
@@ -1012,11 +1003,7 @@ fn initialize_requires_relayer_signature() {
     setup.metas[0].is_signer = false;
 
     mollusk.process_and_validate_instruction(
-        &Instruction::new_with_bytes(
-            program_id(),
-            &init_ix_data(&setup.salt, &setup.burner, 0),
-            setup.metas.clone(),
-        ),
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
         &setup.accounts,
         &[Check::err(shredr_err(ShredrError::MissingSigner))],
     );
@@ -1029,23 +1016,19 @@ fn initialize_requires_burner_signature() {
     setup.metas[1].is_signer = false;
 
     mollusk.process_and_validate_instruction(
-        &Instruction::new_with_bytes(
-            program_id(),
-            &init_ix_data(&setup.salt, &setup.burner, 0),
-            setup.metas.clone(),
-        ),
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
         &setup.accounts,
         &[Check::err(shredr_err(ShredrError::MissingSigner))],
     );
 }
 
 #[test]
-fn initialize_requires_at_least_72_bytes_of_data() {
+fn initialize_requires_deposit_amount_bytes() {
     let mollusk = mollusk();
     let setup = init_setup(None, 0);
 
-    let mut short = init_ix_data(&setup.salt, &setup.burner, 0);
-    short.truncate(72); // discriminator + 71 payload bytes (one short of salt+burner+deposit)
+    let mut short = init_ix_data(0);
+    short.truncate(8); // discriminator + 7 payload bytes (one short of the 8-byte deposit_amount)
 
     mollusk.process_and_validate_instruction(
         &Instruction::new_with_bytes(program_id(), &short, setup.metas.clone()),
@@ -1060,47 +1043,21 @@ fn initialize_requires_nine_accounts() {
     let setup = init_setup(None, 0);
 
     mollusk.process_and_validate_instruction(
-        &Instruction::new_with_bytes(
-            program_id(),
-            &init_ix_data(&setup.salt, &setup.burner, 0),
-            setup.metas[..8].to_vec(),
-        ),
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas[..8].to_vec()),
         &setup.accounts[..8],
         &[Check::err(ProgramError::NotEnoughAccountKeys)],
     );
 }
 
-/// An attacker-supplied account that is not the canonical `[seed, burner, salt]`
-/// PDA must be rejected before any lamports are spent on it.
+/// An attacker-supplied account that is not the canonical `[seed, burner]` PDA
+/// must be rejected before any lamports are spent on it.
 #[test]
 fn initialize_rejects_wrong_pda() {
     let mollusk = mollusk();
     let setup = init_setup(Some(Pubkey::new_unique()), 0);
 
     mollusk.process_and_validate_instruction(
-        &Instruction::new_with_bytes(
-            program_id(),
-            &init_ix_data(&setup.salt, &setup.burner, 0),
-            setup.metas.clone(),
-        ),
-        &setup.accounts,
-        &[Check::err(shredr_err(ShredrError::InvalidStealthPDA))],
-    );
-}
-
-/// A salt that does not match the one the PDA was derived from re-derives to a
-/// different address, which is the same rejection path as a forged account.
-#[test]
-fn initialize_rejects_mismatched_salt() {
-    let mollusk = mollusk();
-    let setup = init_setup(None, 0);
-
-    mollusk.process_and_validate_instruction(
-        &Instruction::new_with_bytes(
-            program_id(),
-            &init_ix_data(&[0xABu8; 32], &setup.burner, 0),
-            setup.metas.clone(),
-        ),
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
         &setup.accounts,
         &[Check::err(shredr_err(ShredrError::InvalidStealthPDA))],
     );
@@ -1114,11 +1071,7 @@ fn initialize_rejects_existing_account() {
     let setup = init_setup(None, LAMPORTS_PER_SOL);
 
     mollusk.process_and_validate_instruction(
-        &Instruction::new_with_bytes(
-            program_id(),
-            &init_ix_data(&setup.salt, &setup.burner, 0),
-            setup.metas.clone(),
-        ),
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
         &setup.accounts,
         &[Check::err(shredr_err(
             ShredrError::AccountAlreadyInitialized,
@@ -1140,7 +1093,7 @@ fn initialize_clears_program_validation_before_cpi() {
     let result = mollusk.process_instruction(
         &Instruction::new_with_bytes(
             program_id(),
-            &init_ix_data(&setup.salt, &setup.burner, LAMPORTS_PER_SOL / 2),
+            &init_ix_data(LAMPORTS_PER_SOL / 2),
             setup.metas.clone(),
         ),
         &setup.accounts,
@@ -1148,10 +1101,7 @@ fn initialize_clears_program_validation_before_cpi() {
 
     // The stealth PDA is the canonical derivation, so validation cannot have
     // been what stopped it.
-    assert_eq!(
-        setup.stealth,
-        derive_stealth_pda(&setup.burner, &setup.salt).0
-    );
+    assert_eq!(setup.stealth, derive_stealth_pda(&setup.burner).0);
     assert!(
         !matches!(
             result.raw_result,

@@ -7,7 +7,7 @@
 //! | 0 | relayer             | ✓      | ✓        | Pays for the transaction + rent                |
 //! | 1 | burner              | ✓      | ✓        | One-time burner keypair (mainKey+nonce derived) |
 //! | 2 | owner_program       |        |          | This program's address                         |
-//! | 3 | stealth_account     |        | ✓        | Stealth PDA derived from burner+salt           |
+//! | 3 | stealth_account     |        | ✓        | Stealth PDA derived from the burner            |
 //! | 4 | permission_account  |        | ✓        | ACL permission account                         |
 //! | 5 | delegation_buffer   |        | ✓        | MagicBlock delegation buffer                   |
 //! | 6 | delegation_record   |        | ✓        | MagicBlock delegation record                   |
@@ -16,7 +16,10 @@
 //!
 //! ## Instruction Data
 //!
-//! `[salt: [u8; 32], burner_pubkey: [u8; 32], deposit_amount: u64]` — 72 bytes total.
+//! `[deposit_amount: u64]` — 8 bytes. The burner's identity comes from the
+//! `burner` account (index 1); the PDA is `[STEALTH_ADDRESS, burner_pubkey]`, so
+//! no salt or separate pubkey is passed — the one-time burner alone makes it
+//! unique.
 //!
 //! `deposit_amount` is the amount of SOL the burner has already received and is
 //! swept into the PDA here. Pass `0` to create an empty delegated PDA (used for
@@ -24,7 +27,7 @@
 //!
 //! ## Flow
 //!
-//! 1. Derive and verify the stealth PDA address.
+//! 1. Derive and verify the stealth PDA address from the burner.
 //! 2. **Create the PDA account** via System Program CPI (relayer pays rent).
 //! 3. **Sweep `deposit_amount` from the burner into the PDA** (burner signs).
 //! 4. Write discriminator + stealth state.
@@ -45,7 +48,7 @@ use crate::errors::ShredrError;
 use crate::helpers::{get_stealth_mut, verify_stealth_pda, write_stealth_discriminator};
 use crate::state::STEALTH_ACCOUNT_SIZE;
 
-use crate::{Address, ProgramError, ProgramResult};
+use crate::{ProgramError, ProgramResult};
 
 use ephemeral_rollups_pinocchio::acl::{
     consts::PERMISSION_PROGRAM_ID, CreatePermissionCpiBuilder, Member, MemberFlags, MembersArgs,
@@ -69,8 +72,6 @@ pub struct InitializeAndDelegate<'a> {
     pub delegation_record: &'a AccountView,
     pub delegation_metadata: &'a AccountView,
     pub system_program: &'a AccountView,
-    pub salt: [u8; 32],
-    pub burner_pubkey: Address,
     pub deposit_amount: u64,
 }
 
@@ -86,12 +87,15 @@ impl<'a> InitializeAndDelegate<'a> {
             delegation_record,
             delegation_metadata,
             system_program,
-            salt,
-            burner_pubkey,
             deposit_amount,
         } = self;
 
-        let bump = verify_stealth_pda(stealth_account, &burner_pubkey, &salt)?;
+        // The burner's identity is the burner account itself — no pubkey is
+        // passed in the instruction data. Kept owned so its bytes can back the
+        // PDA signer seeds through the CPIs below.
+        let burner_key = burner.address().clone();
+
+        let bump = verify_stealth_pda(stealth_account, &burner_key)?;
 
         // Guard: account must not already exist (lamports == 0 means uninitialized)
         if stealth_account.lamports() > 0 {
@@ -105,9 +109,6 @@ impl<'a> InitializeAndDelegate<'a> {
         let rent =
             Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
         let rent_lamports = rent.try_minimum_balance(account_space as usize)?;
-
-        // Keep an owned copy for PDA signer seeds (needs to outlive the CPI calls)
-        let burner_for_seeds = burner_pubkey.clone();
 
         let bump_slice = [bump];
 
@@ -144,8 +145,7 @@ impl<'a> InitializeAndDelegate<'a> {
         let clock =
             Clock::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
 
-        stealth_state.owner = burner_pubkey.clone();
-        stealth_state.salt = salt;
+        stealth_state.owner = burner_key.clone();
         stealth_state.deposited_amount = deposit_amount;
         stealth_state.deposit_timestamp = clock.unix_timestamp;
         stealth_state.delegated = true;
@@ -154,16 +154,11 @@ impl<'a> InitializeAndDelegate<'a> {
         // ── Step 4: Create ACL permission for the burner ──
         let permission_program = PERMISSION_PROGRAM_ID;
 
-        let signer_seeds: &[&[u8]] = &[
-            seeds::STEALTH_ADDRESS,
-            burner_for_seeds.as_array(),
-            salt.as_ref(),
-            &bump_slice,
-        ];
+        let signer_seeds: &[&[u8]] = &[seeds::STEALTH_ADDRESS, burner_key.as_array(), &bump_slice];
 
         let member = [Member {
             flags: MemberFlags::new(),
-            pubkey: burner_pubkey,
+            pubkey: burner_key.clone(),
         }];
 
         let members = MembersArgs {
@@ -232,21 +227,13 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             return Err(ShredrError::MissingSigner.into());
         }
 
-        // Expecting: [salt(32) + burner_pubkey(32) + deposit_amount(8)] = 72 bytes
-        if instruction_data.len() < 72 {
+        // Expecting: [deposit_amount(8)] = 8 bytes
+        if instruction_data.len() < 8 {
             return Err(ProgramError::InvalidInstructionData);
         }
 
-        let salt: [u8; 32] = instruction_data[0..32]
-            .try_into()
-            .map_err(|_| ProgramError::InvalidInstructionData)?;
-        let burner_pubkey = Address::new_from_array(
-            instruction_data[32..64]
-                .try_into()
-                .map_err(|_| ProgramError::InvalidInstructionData)?,
-        );
         let deposit_amount = u64::from_le_bytes(
-            instruction_data[64..72]
+            instruction_data[0..8]
                 .try_into()
                 .map_err(|_| ProgramError::InvalidInstructionData)?,
         );
@@ -261,8 +248,6 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             delegation_record,
             delegation_metadata,
             system_program,
-            salt,
-            burner_pubkey,
             deposit_amount,
         })
     }

@@ -23,19 +23,15 @@ pub fn parse_amount(data: &[u8]) -> Result<u64, ProgramError> {
     Ok(amt)
 }
 
-/// Derive a stealth account PDA from a raw burner pubkey and salt.
+/// Derive a stealth account PDA from a burner pubkey.
 ///
-/// Used when we have the pubkey bytes (e.g. from instruction data) rather than an AccountView.
+/// The burner is one-time (derived client-side from the main key's signature +
+/// a nonce), so it alone makes the PDA unique — no salt is needed.
 pub fn derive_stealth_account_from_pubkey(
     burner_pubkey: &Address,
-    salt: &[u8; 32],
 ) -> Result<(Address, u8), ProgramError> {
     Address::derive_program_address(
-        &[
-            seeds::STEALTH_ADDRESS,
-            burner_pubkey.as_ref(),
-            salt.as_ref(),
-        ],
+        &[seeds::STEALTH_ADDRESS, burner_pubkey.as_ref()],
         &PROGRAM_ADDRESS,
     )
     .ok_or(ProgramError::InvalidAccountData)
@@ -105,9 +101,8 @@ pub fn write_stealth_discriminator(account: &AccountView) -> Result<(), ProgramE
 pub fn verify_stealth_pda(
     account: &AccountView,
     burner_pubkey: &Address,
-    salt: &[u8; 32],
 ) -> Result<u8, ProgramError> {
-    let (expected_pda, bump) = derive_stealth_account_from_pubkey(burner_pubkey, salt)?;
+    let (expected_pda, bump) = derive_stealth_account_from_pubkey(burner_pubkey)?;
     if account.address() != &expected_pda {
         return Err(ShredrError::InvalidStealthPDA.into());
     }

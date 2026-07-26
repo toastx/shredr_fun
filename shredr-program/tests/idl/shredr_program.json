@@ -80,24 +80,6 @@
       ],
       "args": [
         {
-          "name": "salt",
-          "type": {
-            "array": [
-              "u8",
-              32
-            ]
-          }
-        },
-        {
-          "name": "burnerPubkey",
-          "type": {
-            "array": [
-              "u8",
-              32
-            ]
-          }
-        },
-        {
           "name": "depositAmount",
           "type": "u64"
         }
