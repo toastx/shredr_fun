@@ -4,213 +4,187 @@
 
 # shredr.fun
 
-### **Shred Your Money Trail - Privacy-First Burner Wallets on Solana**
+### Shred your money trail — privacy-first burner addresses on Solana
 
-**shredr.fun** is a privacy utility that generates disposable, unlinkable burner addresses to receive funds on Solana. Using deterministic key derivation and private transfers by shadowwire, it ensures your main wallet is never linked to incoming transactions.
+**shredr.fun** generates disposable, unlinkable burner addresses to receive funds on Solana. Funds land on a one-time **stealth account**, move privately inside a [MagicBlock](https://www.magicblock.gg/) ephemeral rollup, and are consolidated to your destination — so your main wallet is never on the same transaction graph as the sender.
 
----
+Everything is derived from a **single wallet signature**: no seed phrases to store, no server-held keys, and full recovery on any device.
 
-## 🔄 How It Works
-
-1. **Connect Wallet** → Sign a message to derive your encryption keys
-2. **Generate Burner** → Get a fresh burner address (deterministic, recoverable)
-3. **Receive Funds** → Share the burner address with sender
-4. **Shred** → Deposit funds to ShadowWire pool for private transfer to your destination
+> [!NOTE]
+> This project is a work in progress built for a hackathon. Program and relayer addresses target Solana **devnet** by default.
 
 ---
 
-## 🏗 Architecture
+## How it works
 
-### Services
+1. **Connect & sign** — Your wallet signs one message; this deterministically derives a master seed.
+2. **Generate a burner** — A one-time stealth keypair + on-chain stealth PDA is derived from `masterSeed + nonce`.
+3. **Receive funds** — Share the burner address. Incoming SOL lands on the stealth PDA, delegated to a MagicBlock TEE validator.
+4. **Shred** — A `PrivateTransfer` moves lamports between stealth accounts *inside the rollup*, then state is committed and undelegated back to the base layer.
+5. **Withdraw** — After undelegation, the burner signs a withdrawal to your destination address. A [Kora](https://github.com/solana-foundation/kora) relayer pays fees so the burner needs no funding.
 
-| Service | Purpose |
-|---------|---------|
-| **NonceService** | Manages nonce generation, chaining, and encrypted storage |
-| **BurnerService** | Derives burner keypairs from nonces |
-| **StorageService** | Encrypted IndexedDB wrapper for local state |
-| **ShadowWireClient** | Integration with ShadowWire privacy protocol |
+Because the sender only ever sees a fresh burner and the private transfer happens off the public graph, incoming payments are unlinkable to your main wallet.
 
-### Flow
+---
+
+## Architecture
+
+The project is a monorepo with three cooperating parts:
+
+| Component | Path | Stack | Role |
+|-----------|------|-------|------|
+| **Frontend** | [`src/`](src/) | React 19, Vite, TypeScript | Key derivation, on-chain orchestration, UI |
+| **On-chain program** | [`shredr-program/`](shredr-program/) | Rust, [Pinocchio](https://github.com/anza-xyz/pinocchio), MagicBlock ER | Stealth PDAs and private transfers |
+| **Backend** | [`shredr-backend/`](shredr-backend/) | Rust, Axum, PostgreSQL | Encrypted blob sync, WebSocket, Helius webhooks |
+
+### Data flow
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  Wallet Sign    │ ──▶ │  NonceService   │ ──▶ │  BurnerService  │
-│  (Auth)         │     │  (Nonce Chain)  │     │  (Keypair)      │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-                               │
-                               ▼
-                        ┌─────────────────┐
-                        │  Backend API    │
-                        │  (Blob Sync)    │
-                        └─────────────────┘
+   Wallet signature
+        │  (once)
+        ▼
+┌──────────────────┐   nonce chain    ┌──────────────────┐
+│  NonceService    │ ───────────────▶ │  BurnerService   │
+│  (encrypted)     │                  │  (stealth keys)  │
+└────────┬─────────┘                  └────────┬─────────┘
+         │ encrypted blob                      │
+         ▼                                      ▼
+┌──────────────────┐               ┌───────────────────────────┐
+│  Backend (Axum)  │               │  ShredrProgram (on-chain) │
+│  blob + webhook  │               │  Initialize → Transfer →  │
+│  + WebSocket     │◀── Helius ───▶│  Commit → Withdraw        │
+└──────────────────┘               └────────────┬──────────────┘
+                                                 │  PrivateTransfer
+                                                 ▼
+                                    ┌───────────────────────────┐
+                                    │  MagicBlock Ephemeral      │
+                                    │  Rollup (TEE-secured)      │
+                                    └───────────────────────────┘
 ```
 
-### State Management
+### Frontend library (`src/lib/`)
 
-- **Local State** (IndexedDB): Encrypted cache for fast access
-- **Remote State** (Backend): Source of truth for cross-device recovery
-- **Sync Logic**: Higher index wins, automatic sync on init
+| Module | Responsibility |
+|--------|----------------|
+| `ShredrClient` | Top-level orchestrator tying signature → burners → on-chain flow |
+| `NonceService` | Nonce generation, chaining, and encrypted persistence |
+| `BurnerService` | Deterministic stealth / main burner keypair derivation |
+| `ShredrProgram` | Builds instructions matching the on-chain IDL |
+| `KoraRelayer` | JSON-RPC client for the Kora fee-payer / relayer |
+| `StorageService` | Encrypted IndexedDB wrapper for local state |
+| `ApiClient` / `WebSocketClient` | Backend blob sync and real-time deposit notifications |
+
+### On-chain program (`shredr-program/`)
+
+A zero-dependency Pinocchio program managing stealth PDAs derived as `["shredr_stealth_address", burner_pubkey]`. Instructions:
+
+| # | Instruction | Purpose |
+|---|-------------|---------|
+| 0 | `InitializeAndDelegate` | Create a stealth PDA and delegate it to a MagicBlock TEE validator |
+| 1 | `PrivateTransfer` | Move lamports between stealth PDAs inside the rollup |
+| 2 | `CommitStealth` | Flush rollup state to the base layer, staying delegated |
+| 3 | `CommitAndUndelegateStealth` | Flush state and release the account back to the base layer |
+| 4 | `Withdraw` | Burner withdraws to a destination once undelegated |
+| — | `UndelegationCallback` | Invoked by the delegation program after finalization (not user-called) |
+
+State stays private inside the TEE-secured rollup; only the net settlement lands on-chain.
 
 ---
 
-## 🛠 Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| **Frontend** | TypeScript, Vite, React |
-| **Crypto** | Web Crypto API (AES-GCM, SHA-256) |
-| **Storage** | IndexedDB (encrypted) |
-| **Backend** | Rust (Axum) |
-| **Privacy** | ShadowWire (@radr/shadowwire) |
-| **Blockchain** | Solana |
-
----
-
-## 📦 Getting Started
+## Getting started
 
 ### Prerequisites
 
-- Node.js 18+
-- npm or pnpm
+- **Node.js** 18+ and npm
+- **Rust** 1.75+ (for the program and backend)
+- **Solana CLI** + [`solana-build-sbf`](https://solana.com/docs) (to build the program)
+- **PostgreSQL** 14+ (for the backend)
 
-### Installation
+### Frontend
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/shredr.git
-cd shredr
+git clone https://github.com/toastx/shredr_fun.git
+cd shredr_fun
 
-# Install dependencies
 npm install
-
-# Run development server
-npm run dev
+npm run dev      # start the Vite dev server
 ```
 
-### Running Tests
+Other scripts:
 
 ```bash
-npm test
+npm run build    # type-check and produce a production build
+npm run lint     # run ESLint
+npm test         # run the Mocha test suite
 ```
 
 See [tests/README.md](tests/README.md) for test coverage details.
 
----
+### On-chain program
 
-## 📁 Project Structure
+```bash
+cd shredr-program
 
-```
-shredr/
-├── src/
-│   ├── lib/
-│   │   ├── NonceService.ts    # Nonce management
-│   │   ├── BurnerService.ts   # Burner derivation
-│   │   ├── StorageService.ts  # Encrypted IndexedDB
-│   │   ├── ShadowWireClient.ts # Privacy pool integration
-│   │   ├── constants.ts       # Shared constants
-│   │   ├── types.ts           # TypeScript types
-│   │   ├── utils.ts           # Crypto utilities
-│   │   └── index.ts           # Exports
-│   └── ...
-├── tests/
-│   ├── NonceService.test.ts   # 41 unit tests
-│   ├── setup.ts               # Test environment
-│   └── README.md              # Test documentation
-├── shredr-backend/            # Rust backend (separate)
-└── ...
+cargo build-sbf              # build the deployable program (defaults to the devnet feature)
+cargo test                   # run the Mollusk SVM tests
+cargo bench                  # measure compute units
 ```
 
----
-
-## 🔐 Security Features
-
-- **Non-Custodial**: Private keys never leave the browser
-- **Deterministic Recovery**: Burners recoverable from wallet signature
-- **Encrypted Storage**: Local state encrypted with derived keys
-- **Memory Zeroing**: Sensitive data cleared after use
-- **Privacy-Preserving Keys**: Wallet hash derived via SHA-256
-
----
-
-## 📄 API Reference
-
-### NonceService
-
-```typescript
-// Initialize
-await nonceService.initFromSignature(signature);
-
-// Load or generate nonce
-const nonce = await nonceService.loadCurrentNonce(pubkey);
-if (!nonce) {
-    await nonceService.generateBaseNonce(pubkey);
-}
-
-// Consume (after burner used)
-const result = await nonceService.consumeNonce();
-// result.newBlobData → upload to backend
-```
-
-### BurnerService
-
-```typescript
-// Initialize
-await burnerService.initFromSignature(signature);
-
-// Derive burner from nonce
-const burner = await burnerService.deriveBurnerFromNonce(nonce);
-console.log(burner.address); // Burner Solana address
-
-// Clear when done
-burnerService.clearBurner(burner);
-```
-
----
-
-## 🚀 Roadmap
-
-### Core Library
-- [x] NonceService with encrypted storage
-- [x] BurnerService for keypair derivation
-- [x] StorageService (encrypted IndexedDB)
-- [x] Local/Remote state sync logic
-- [x] Privacy-preserving wallet hash
-
-### Testing
-- [x] NonceService tests (41 passing)
-- [x] BurnerService tests (25+ passing)
-- [x] Integration flow tests (complete 5-phase flow)
-- [x] StorageService tests
+Program ID (devnet): `H9pUQeNA2RwBHRwx52V8nqWpCAKReSA3gGUuRFHbEjG6`
 
 ### Backend
-- [x] Project setup (Rust/Axum)
-- [x] Blob API endpoints (CRUD)
-- [x] WebSocket for real-time notifications
-- [ ] Helius webhook integration
-- [x] Database (PostgreSQL)
 
-### Frontend
-- [x] Vite + React setup
-- [x] Wallet adapter integration
-- [ ] User init flow UI
-- [ ] Burner generation UI
-- [ ] Deposit tracking UI
-- [ ] Shred/sweep UI
+```bash
+cd shredr-backend
+cp .env.example .env         # set DATABASE_URL
 
-### Privacy Integration
-- [x] ShadowWire SDK integration
-- [x] Deposit to pool flow
-- [x] Private transfer implementation
-- [ ] Fee collection
+cargo run                    # start the Axum server on :8000
+```
 
-### Production
-- [ ] Error handling & recovery
-- [ ] Mobile responsive
-- [ ] Deployment
-- [ ] Documentation
+See [shredr-backend/README.md](shredr-backend/README.md) for the full API reference (blob CRUD, WebSocket, Helius webhook).
 
 ---
 
-## 📜 License
+## Project structure
 
-MIT
+```
+shredr_fun/
+├── src/
+│   ├── lib/                 # Core services (nonce, burner, program, relayer, storage)
+│   ├── components/          # UI components (wallet, generator, monitor, ...)
+│   ├── pages/               # GeneratorPage, ClaimPage
+│   └── App.tsx              # Routing
+├── shredr-program/          # Pinocchio Solana program + Mollusk tests
+│   ├── src/instructions/    # Instruction handlers
+│   └── idl/                 # Program IDL
+├── shredr-backend/          # Axum backend (blob sync, WebSocket, webhooks)
+├── tests/                   # Frontend unit + integration tests
+└── public/                  # Static assets
+```
+
+---
+
+## Security model
+
+- **Non-custodial** — Private keys are derived and used entirely in the browser; nothing leaves the client.
+- **Deterministic recovery** — Every burner is recoverable from the original wallet signature, so state syncs across devices with no seed phrase to store.
+- **Encrypted at rest** — Local state (IndexedDB) and synced blobs are encrypted with keys derived from the wallet signature (Web Crypto AES-GCM / SHA-256).
+- **Unlinkable transfers** — Private transfers execute inside a TEE-secured MagicBlock rollup; only settlement touches the public ledger.
+- **Sponsored withdrawals** — A Kora relayer pays fees, so burner accounts never need to be funded from your main wallet.
+
+> [!WARNING]
+> This is hackathon-stage software and has not been audited. Do not use it to secure real funds.
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+|-------|------------|
+| Frontend | React 19, Vite, TypeScript, `@solana/web3.js`, wallet-adapter |
+| Crypto | Web Crypto API (AES-GCM, SHA-256), TweetNaCl, BIP39 |
+| Storage | IndexedDB (encrypted) |
+| On-chain | Rust, Pinocchio, MagicBlock ephemeral rollups |
+| Relayer | Kora paymaster |
+| Backend | Rust, Axum, PostgreSQL (SQLx), Helius webhooks |
+| Blockchain | Solana (devnet) |

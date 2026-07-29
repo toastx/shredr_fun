@@ -2,7 +2,7 @@
  * ShredrProgram - TypeScript client for the shredr_program smart contract
  *
  * Builds transaction instructions matching the on-chain IDL.
- * Program address: H64YCQTWdQkx9vjs1ZB2Uo24FyUBibnDxhKdznamybpZ
+ * Program address: H9pUQeNA2RwBHRwx52V8nqWpCAKReSA3gGUuRFHbEjG6
  *
  * Instructions:
  *   0 - InitializeAndDelegate: Create stealth PDA, delegate to MagicBlock
@@ -29,7 +29,7 @@ import { Buffer } from "buffer";
 
 /** The on-chain program address */
 export const SHREDR_PROGRAM_ID = new PublicKey(
-  "H64YCQTWdQkx9vjs1ZB2Uo24FyUBibnDxhKdznamybpZ",
+  "H9pUQeNA2RwBHRwx52V8nqWpCAKReSA3gGUuRFHbEjG6",
 );
 
 /** PDA seed prefixes (must match on-chain constants.rs) */

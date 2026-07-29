@@ -55,7 +55,7 @@ use crate::instructions::initialize_delegate::InitializeAndDelegate;
 use crate::instructions::private_transfer::PrivateTransfer;
 use crate::instructions::withdraw::Withdraw;
 
-declare_id!("FfJtZKQaW7Nac8nEZKyVj64kq6Di8HtvCgzTokj2yuqi");
+declare_id!("H9pUQeNA2RwBHRwx52V8nqWpCAKReSA3gGUuRFHbEjG6");
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum InstructionDiscriminator {
