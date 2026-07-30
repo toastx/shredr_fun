@@ -6,7 +6,8 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // `src/generated` is emitted by Codama — fix it in scripts/generate-client.mjs.
+  globalIgnores(['dist', 'src/generated']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
