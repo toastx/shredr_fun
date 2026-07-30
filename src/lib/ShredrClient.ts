@@ -505,8 +505,9 @@ export class ShredrClient {
       amountLamports,
     );
 
-    // Dispatched against the rollup RPC, where the delegated PDAs live.
-    return koraRelayer.signAndSend(
+    // Dispatched against the rollup RPC, where the delegated PDAs live: Kora
+    // signs as fee payer but the transaction is broadcast on the rollup.
+    return koraRelayer.signAndSendOn(
       this.getRollupConnection(),
       [ix],
       [burnerKp],
@@ -528,7 +529,7 @@ export class ShredrClient {
     const ix = createCommitAndUndelegateStealthInstruction(relayer, stealthPda);
 
     // No client-side signers needed (Kora signs as relayer)
-    return koraRelayer.signAndSend(this.getRollupConnection(), [ix], []);
+    return koraRelayer.signAndSendOn(this.getRollupConnection(), [ix], []);
   }
 
   /**

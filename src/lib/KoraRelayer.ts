@@ -128,6 +128,58 @@ export class KoraRelayer {
   }
 
   /**
+   * Sign with Kora as fee payer, then broadcast on the given connection.
+   *
+   * Needed for MagicBlock rollup instructions (`PrivateTransfer`,
+   * `CommitStealth`, `CommitAndUndelegateStealth`): the transaction is built on
+   * a rollup blockhash and has to reach the rollup RPC, whereas
+   * {@link signAndSend} lets Kora broadcast on whichever RPC it is configured
+   * with — the base layer.
+   *
+   * @param connection RPC the transaction is built on and sent to
+   * @param instructions Transaction instructions
+   * @param clientSigners Keypairs available client-side (burner, mainBurner)
+   * @returns The signature string (base58)
+   */
+  async signAndSendOn(
+    connection: Connection,
+    instructions: TransactionInstruction[],
+    clientSigners: Signer[],
+  ): Promise<string> {
+    const relayer = this.getRelayerPubkey();
+    const { blockhash } = await connection.getLatestBlockhash("confirmed");
+
+    const message = new TransactionMessage({
+      payerKey: relayer,
+      recentBlockhash: blockhash,
+      instructions,
+    }).compileToV0Message();
+
+    const tx = new VersionedTransaction(message);
+    if (clientSigners.length > 0) {
+      tx.sign(clientSigners);
+    }
+
+    const res = await this.rpc<{
+      signed_transaction?: string;
+      signedTransaction?: string;
+      transaction?: string;
+    }>("signTransaction", {
+      transaction: uint8ArrayToBase64(tx.serialize()),
+    });
+
+    const signed =
+      res.signed_transaction ?? res.signedTransaction ?? res.transaction;
+    if (!signed) {
+      throw new Error("Kora signTransaction returned no signed transaction");
+    }
+
+    return connection.sendRawTransaction(base64ToUint8Array(signed), {
+      skipPreflight: false,
+    });
+  }
+
+  /**
    * Variant for legacy (non-versioned) transactions. Some pinocchio programs
    * are easier to debug with legacy txs while developing.
    */
@@ -192,11 +244,18 @@ export class KoraRelayer {
   }
 }
 
-// ============ Inline base64 helper (avoid circular import on utils) ============
+// ============ Inline base64 helpers (avoid circular import on utils) ============
 function uint8ArrayToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   return btoa(binary);
+}
+
+function base64ToUint8Array(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 // ============ SINGLETON ============
