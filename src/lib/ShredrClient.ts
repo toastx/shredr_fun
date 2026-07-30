@@ -27,12 +27,11 @@ import {
 import {
   HELIUS_RPC_URL,
   MAGICBLOCK_RPC_URL,
-  SHREDR_FIXED_SALT,
-  COMMIT_DELAY_MIN_SECS,
-  COMMIT_DELAY_MAX_SECS,
   MAX_UTXO_SCAN_INDEX,
   UTXO_SCAN_EMPTY_THRESHOLD,
   DEFAULT_DENOMINATION_SOL,
+  UNDELEGATION_POLL_INTERVAL_MS,
+  UNDELEGATION_TIMEOUT_MS,
   type NormalizedDenomination,
 } from "./constants";
 import {
@@ -42,6 +41,7 @@ import {
   createCommitAndUndelegateStealthInstruction,
   createStealthWithdrawInstruction,
   parseStealthAccount,
+  type StealthAccountData,
 } from "./ShredrProgram";
 import type { GeneratedNonce, BurnerKeyPair, CreateBlobRequest } from "./types";
 
@@ -51,7 +51,7 @@ export type SigningMode = "auto" | "manual";
 
 export type UtxoStatus =
   | "empty" // no balance, not yet used
-  | "received" // funds received, awaiting init+delegate
+  | "received" // funds sitting on the burner, awaiting init+delegate
   | "delegated" // initialized + delegated to rollup
   | "ready" // committed back, ready to withdraw
   | "spent"; // already withdrawn
@@ -62,6 +62,20 @@ export interface PendingUtxo {
   stealthPda: string;
   lamports: number;
   status: UtxoStatus;
+}
+
+/** Signatures produced by a full shred (receive → rollup → base layer). */
+export interface ShredResult {
+  burnerAddress: string;
+  stealthPda: string;
+  /** Lamports swept from the burner into the stealth PDA. */
+  lamports: number;
+  signatures: {
+    initializeAndDelegate: string;
+    initializeMainPda: string | null;
+    privateTransfer: string;
+    commitAndUndelegate: string;
+  };
 }
 
 export interface ShredrState {
@@ -112,13 +126,25 @@ export class ShredrClient {
     return this._currentBurner?.address ?? null;
   }
 
-  /** Stealth PDA derived from the *current* burner — share this with senders. */
+  /**
+   * The address to share with senders: the one-time **burner pubkey**.
+   *
+   * Deposits land on the burner account and are swept into its stealth PDA by
+   * `InitializeAndDelegate` (the burner signs that sweep). Sending straight to
+   * the stealth PDA would break initialization, since the program requires the
+   * PDA to be empty when it is created.
+   */
+  get receiveAddress(): string | null {
+    return this._currentBurner?.address ?? null;
+  }
+
+  /** Stealth PDA derived from the *current* burner (created when shredding). */
   get stealthAddress(): string | null {
     return this._stealthPda?.toBase58() ?? null;
   }
-  /** @deprecated use stealthAddress */
+  /** @deprecated use receiveAddress */
   get shadowireAddress(): string | null {
-    return this.stealthAddress;
+    return this.receiveAddress;
   }
 
   /** Persistent main burner pubkey (controls the main PDA). */
@@ -198,8 +224,18 @@ export class ShredrClient {
       return;
     }
     const burnerPub = new PublicKey(this._currentBurner.publicKey);
-    const [pda] = deriveStealthPDA(burnerPub, SHREDR_FIXED_SALT);
+    const [pda] = deriveStealthPDA(burnerPub);
     this._stealthPda = pda;
+  }
+
+  /** Read and decode a stealth PDA's on-chain state (null if uninitialized). */
+  private async fetchStealthState(
+    pda: PublicKey,
+    connection: Connection = this.getConnection(),
+  ): Promise<StealthAccountData | null> {
+    const info = await connection.getAccountInfo(pda);
+    if (!info) return null;
+    return parseStealthAccount(new Uint8Array(info.data));
   }
 
   // ============ USER STATUS CHECK ============
@@ -257,7 +293,7 @@ export class ShredrClient {
     // 2. Derive persistent main burner + main PDA
     this._mainBurner = await burnerService.deriveMainBurner(signature);
     const mainBurnerPub = new PublicKey(this._mainBurner.publicKey);
-    const [mainPda] = deriveStealthPDA(mainBurnerPub, SHREDR_FIXED_SALT);
+    const [mainPda] = deriveStealthPDA(mainBurnerPub);
     this._mainPda = mainPda;
     console.log(
       "[ShredrClient] mainBurner:",
@@ -373,73 +409,103 @@ export class ShredrClient {
   /**
    * Step 2 of the SHREDR flow.
    *
-   * After a sender deposits SOL into the stealth PDA via a regular SOL
-   * transfer, the relayer calls `InitializeAndDelegate` to create the PDA
-   * state and delegate it to the MagicBlock TEE validator.
+   * A sender deposits SOL on the **burner address**; `InitializeAndDelegate`
+   * then creates the burner's stealth PDA, sweeps the deposit into it, and
+   * delegates it to the MagicBlock TEE validator.
    *
    * This is signed by:
    *   - **Kora** as relayer + fee payer (server-side)
-   *   - The **burner keypair** (we have it client-side)
+   *   - The **burner keypair** (we have it client-side), which authorizes
+   *     moving its balance into the PDA
    *
-   * @param burner   Burner keypair owning the stealth PDA (defaults to current)
-   * @param salt     32-byte salt (defaults to {@link SHREDR_FIXED_SALT})
+   * @param burner        Burner keypair owning the stealth PDA (defaults to current)
+   * @param depositAmount Lamports to sweep; defaults to the burner's full balance.
+   *                      Pass `0n` to create an empty delegated PDA.
    * @returns Signature of the broadcast transaction
    */
   async initializeAndDelegate(
     burner?: BurnerKeyPair,
-    salt: Uint8Array = SHREDR_FIXED_SALT,
+    depositAmount?: bigint,
   ): Promise<string> {
     const b = burner ?? this._currentBurner;
     if (!b) throw new Error("No burner available");
 
     const burnerKp = this.burnerToKeypair(b);
     const relayer = koraRelayer.getRelayerPubkey();
+    const connection = this.getConnection();
 
-    // Random commit delay in [6h, 48h] for timing obfuscation
-    const delaySpan = COMMIT_DELAY_MAX_SECS - COMMIT_DELAY_MIN_SECS;
-    const commitDelay =
-      COMMIT_DELAY_MIN_SECS + Math.floor(Math.random() * delaySpan);
+    // Kora pays rent and fees, so the whole burner balance is user deposit.
+    const deposit =
+      depositAmount ?? BigInt(await connection.getBalance(burnerKp.publicKey));
 
     const ix = createInitializeAndDelegateInstruction(
       relayer,
       burnerKp.publicKey,
-      salt,
-      burnerKp.publicKey.toBytes(),
-      BigInt(commitDelay),
+      deposit,
     );
 
-    return koraRelayer.signAndSend(this.getConnection(), [ix], [burnerKp]);
+    return koraRelayer.signAndSend(connection, [ix], [burnerKp]);
+  }
+
+  /**
+   * Make sure the main PDA exists and is delegated, so it can receive a
+   * private transfer inside the rollup. Creates it empty when missing.
+   *
+   * Note: the program creates the PDA as part of delegation and rejects a
+   * non-empty account, so a main PDA that has already been undelegated cannot
+   * be re-delegated — that case throws instead of silently failing later.
+   *
+   * @returns The `InitializeAndDelegate` signature, or null if already delegated.
+   */
+  async ensureMainPdaDelegated(): Promise<string | null> {
+    if (!this._mainBurner || !this._mainPda) {
+      throw new Error("Main burner / main PDA not initialized");
+    }
+
+    const state = await this.fetchStealthState(this._mainPda);
+    if (state) {
+      if (!state.delegated) {
+        throw new Error(
+          "Main PDA is undelegated and cannot be re-delegated. Withdraw its " +
+            "balance before shredding again.",
+        );
+      }
+      return null;
+    }
+
+    return this.initializeAndDelegate(this._mainBurner, 0n);
   }
 
   // ============ ON-CHAIN: PRIVATE TRANSFER (inside rollup) ============
 
   /**
    * Step 3 — execute the private transfer inside the MagicBlock rollup.
-   * Moves the full balance from a stealth PDA to the main PDA.
+   * Moves lamports from a stealth PDA to the main PDA.
    *
-   * @param sourceBurner  Burner that owns the source stealth PDA
-   * @param amountLamports Amount to transfer (typically the full PDA balance)
-   * @param salt          Salt used when deriving the source PDA
+   * A PDA cannot sign, so the source burner authorizes the transfer: it signs
+   * and the program checks it against the source PDA's recorded owner (the ACL
+   * member registered during `InitializeAndDelegate`).
+   *
+   * @param sourceBurner   Burner that owns the source stealth PDA
+   * @param amountLamports Amount to transfer (typically the full deposit)
    */
   async privateTransferToMainPda(
     sourceBurner: BurnerKeyPair,
     amountLamports: bigint,
-    salt: Uint8Array = SHREDR_FIXED_SALT,
   ): Promise<string> {
     if (!this._mainPda) throw new Error("Main PDA not initialized");
 
     const burnerKp = this.burnerToKeypair(sourceBurner);
-    const [sourcePda] = deriveStealthPDA(burnerKp.publicKey, salt);
+    const [sourcePda] = deriveStealthPDA(burnerKp.publicKey);
 
     const ix = createPrivateTransferInstruction(
+      burnerKp.publicKey,
       sourcePda,
       this._mainPda,
       amountLamports,
     );
 
-    // PrivateTransfer is dispatched against the rollup RPC.
-    // The source burner is registered in the ACL during InitializeAndDelegate,
-    // so it can sign on behalf of the source PDA inside the rollup.
+    // Dispatched against the rollup RPC, where the delegated PDAs live.
     return koraRelayer.signAndSend(
       this.getRollupConnection(),
       [ix],
@@ -450,25 +516,109 @@ export class ShredrClient {
   // ============ ON-CHAIN: COMMIT & UNDELEGATE ============
 
   /**
-   * Step 4 — commit rollup state to base layer AND undelegate the stealth PDA.
+   * Step 4 — commit rollup state to the base layer AND undelegate the PDA.
    * Signed by Kora (relayer + fee payer).
+   *
+   * Sent to the rollup RPC: the MagicBlock program schedules the settlement
+   * from inside the ephemeral rollup, which then calls the program's
+   * `UndelegationCallback` on the base layer.
    */
   async commitAndUndelegate(stealthPda: PublicKey): Promise<string> {
     const relayer = koraRelayer.getRelayerPubkey();
-    const ix = createCommitAndUndelegateStealthInstruction(
-      relayer,
-      stealthPda,
-    );
+    const ix = createCommitAndUndelegateStealthInstruction(relayer, stealthPda);
 
     // No client-side signers needed (Kora signs as relayer)
-    return koraRelayer.signAndSend(this.getConnection(), [ix], []);
+    return koraRelayer.signAndSend(this.getRollupConnection(), [ix], []);
+  }
+
+  /**
+   * Poll the base layer until `stealthPda` is back and undelegated.
+   *
+   * Undelegation settles asynchronously: the rollup commits state, then the
+   * delegation program recreates the account and invokes the program's
+   * `UndelegationCallback`, which clears the `delegated` flag.
+   */
+  async waitForUndelegation(
+    stealthPda: PublicKey,
+    timeoutMs: number = UNDELEGATION_TIMEOUT_MS,
+  ): Promise<StealthAccountData> {
+    const deadline = Date.now() + timeoutMs;
+
+    for (;;) {
+      const state = await this.fetchStealthState(stealthPda);
+      if (state && !state.delegated) return state;
+
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for ${stealthPda.toBase58()} to undelegate`,
+        );
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, UNDELEGATION_POLL_INTERVAL_MS),
+      );
+    }
+  }
+
+  // ============ ON-CHAIN: FULL SHRED FLOW ============
+
+  /**
+   * Run the whole flow for one received deposit:
+   *
+   *   1. `InitializeAndDelegate` the burner's stealth PDA, sweeping the deposit
+   *   2. `InitializeAndDelegate` the main PDA (empty) if it isn't delegated yet
+   *   3. `PrivateTransfer` the deposit stealth PDA → main PDA, inside the rollup
+   *   4. `CommitAndUndelegateStealth` the now-empty source PDA
+   *
+   * The main PDA stays delegated so it can keep receiving private transfers;
+   * {@link withdrawToWallet} undelegates it when the user claims.
+   *
+   * @param burner Burner holding the deposit (defaults to the current one)
+   */
+  async shredBurner(burner?: BurnerKeyPair): Promise<ShredResult> {
+    const b = burner ?? this._currentBurner;
+    if (!b) throw new Error("No burner available");
+    if (!this._mainPda) throw new Error("Main PDA not initialized");
+
+    const burnerKp = this.burnerToKeypair(b);
+    const [stealthPda] = deriveStealthPDA(burnerKp.publicKey);
+    const connection = this.getConnection();
+
+    const lamports = await connection.getBalance(burnerKp.publicKey);
+    if (lamports <= 0) {
+      throw new Error(`Burner ${b.address} has no funds to shred`);
+    }
+    const deposit = BigInt(lamports);
+
+    const initializeAndDelegate = await this.initializeAndDelegate(b, deposit);
+    const initializeMainPda = await this.ensureMainPdaDelegated();
+    const privateTransfer = await this.privateTransferToMainPda(b, deposit);
+    const commitAndUndelegate = await this.commitAndUndelegate(stealthPda);
+
+    return {
+      burnerAddress: b.address,
+      stealthPda: stealthPda.toBase58(),
+      lamports,
+      signatures: {
+        initializeAndDelegate,
+        initializeMainPda,
+        privateTransfer,
+        commitAndUndelegate,
+      },
+    };
   }
 
   // ============ ON-CHAIN: WITHDRAW ============
 
   /**
-   * Step 5 — withdraw lamports from the main PDA to any destination.
+   * Step 5 — withdraw the main PDA's balance to any destination.
    * Signed by the main burner; fee paid by Kora.
+   *
+   * `Withdraw` only works on the base layer, so a delegated main PDA is
+   * committed and undelegated first — that settlement is asynchronous and this
+   * method waits for it.
+   *
+   * Only `depositedAmount` can be withdrawn: the rest of the PDA's lamports is
+   * the rent-exemption Kora paid, which the program refuses to touch.
    *
    * @param destinationAddress  Destination wallet (any base58 pubkey)
    * @param amountInSol         Amount in SOL or "all" for the full balance
@@ -485,19 +635,30 @@ export class ShredrClient {
     const mainBurnerKp = this.burnerToKeypair(this._mainBurner);
     const destination = new PublicKey(destinationAddress);
 
-    // Look up current balance of the main PDA
-    const balanceLamports = await connection.getBalance(this._mainPda);
+    let state = await this.fetchStealthState(this._mainPda, connection);
+    if (!state) throw new Error("Main PDA has not been initialized on-chain");
+
+    if (state.delegated) {
+      await this.commitAndUndelegate(this._mainPda);
+      state = await this.waitForUndelegation(this._mainPda);
+    }
+
+    const availableLamports = Number(state.depositedAmount);
 
     let withdrawLamports: number;
     if (amountInSol === "all") {
-      // Leave a small buffer for rent (program will reject < rent_exempt)
-      withdrawLamports = balanceLamports;
+      withdrawLamports = availableLamports;
     } else {
       withdrawLamports = Math.floor(amountInSol * LAMPORTS_PER_SOL);
     }
 
     if (withdrawLamports <= 0) {
       throw new Error("Insufficient balance for withdrawal");
+    }
+    if (withdrawLamports > availableLamports) {
+      throw new Error(
+        `Requested ${withdrawLamports} lamports but only ${availableLamports} are withdrawable`,
+      );
     }
 
     const ix = createStealthWithdrawInstruction(
@@ -522,7 +683,11 @@ export class ShredrClient {
   // ============ BALANCE ============
 
   /**
-   * Get the balance of the main PDA (where consolidated funds end up).
+   * Get the withdrawable balance of the main PDA (where funds consolidate).
+   *
+   * Reads the PDA's `depositedAmount` rather than its raw lamports, which also
+   * include the rent-exemption the relayer paid. Returns zero while the main
+   * PDA does not exist yet.
    *
    * The `address` returned is the **main PDA**, not the burner pubkey.
    */
@@ -530,18 +695,20 @@ export class ShredrClient {
     available: number;
     availableLamports: number;
     address: string;
+    delegated: boolean;
   }> {
     if (!this._mainPda) {
       throw new Error("Main PDA not initialized. Call initFromSignature first.");
     }
 
-    const connection = this.getConnection();
-    const lamports = await connection.getBalance(this._mainPda);
+    const state = await this.fetchStealthState(this._mainPda);
+    const lamports = state ? Number(state.depositedAmount) : 0;
 
     return {
       available: lamports / LAMPORTS_PER_SOL,
       availableLamports: lamports,
       address: this._mainPda.toBase58(),
+      delegated: state?.delegated ?? false,
     };
   }
 
@@ -558,10 +725,15 @@ export class ShredrClient {
   // ============ UTXO SCANNING ============
 
   /**
-   * Scan stealth PDAs across nonce indices and return the ones with non-zero
-   * balance / pending state. Used by the dashboard to surface in-flight funds.
+   * Scan burners and their stealth PDAs across nonce indices and return the
+   * ones holding funds. Used by the dashboard to surface in-flight funds.
    *
-   * Stops after {@link UTXO_SCAN_EMPTY_THRESHOLD} consecutive empty PDAs to
+   * Each index can be in one of three funded states:
+   *   - `received`  — SOL sits on the burner, waiting to be shredded
+   *   - `delegated` — swept into the stealth PDA and living in the rollup
+   *   - `ready`     — committed back to the base layer, withdrawable
+   *
+   * Stops after {@link UTXO_SCAN_EMPTY_THRESHOLD} consecutive empty indices to
    * keep the scan cheap.
    */
   async scanPendingUtxos(): Promise<PendingUtxo[]> {
@@ -580,36 +752,45 @@ export class ShredrClient {
       );
       const burner = await burnerService.deriveBurnerFromNonce(nonce);
       const burnerPub = new PublicKey(burner.publicKey);
-      const [pda] = deriveStealthPDA(burnerPub, SHREDR_FIXED_SALT);
+      const [pda] = deriveStealthPDA(burnerPub);
 
-      const accountInfo = await connection.getAccountInfo(pda);
-      const lamports = accountInfo?.lamports ?? 0;
+      const [burnerLamports, pdaInfo] = await Promise.all([
+        connection.getBalance(burnerPub),
+        connection.getAccountInfo(pda),
+      ]);
+      const pdaState = pdaInfo
+        ? parseStealthAccount(new Uint8Array(pdaInfo.data))
+        : null;
+      const pdaLamports = pdaState ? Number(pdaState.depositedAmount) : 0;
 
       let status: UtxoStatus = "empty";
-      if (lamports > 0) {
-        consecutiveEmpty = 0;
-        // Try to parse the on-chain state to determine the lifecycle phase.
-        if (accountInfo?.data && accountInfo.data.length > 0) {
-          const state = parseStealthAccount(Buffer.from(accountInfo.data));
-          if (state) {
-            status = state.delegated ? "delegated" : "ready";
-          } else {
-            status = "received"; // raw lamports landed, not yet initialized
-          }
-        } else {
-          status = "received";
-        }
-        utxos.push({
-          nonceIndex: i,
-          burnerAddress: burner.address,
-          stealthPda: pda.toBase58(),
-          lamports,
-          status,
-        });
-      } else {
-        consecutiveEmpty++;
-        if (consecutiveEmpty >= UTXO_SCAN_EMPTY_THRESHOLD) break;
+      let lamports = 0;
+
+      if (pdaLamports > 0) {
+        // Swept into the PDA already: either still in the rollup or settled.
+        status = pdaState?.delegated ? "delegated" : "ready";
+        lamports = pdaLamports;
+      } else if (burnerLamports > 0) {
+        // Raw deposit landed on the burner, not yet swept.
+        status = "received";
+        lamports = burnerLamports;
       }
+
+      if (status === "empty") {
+        consecutiveEmpty++;
+        burnerService.clearBurner(burner);
+        if (consecutiveEmpty >= UTXO_SCAN_EMPTY_THRESHOLD) break;
+        continue;
+      }
+
+      consecutiveEmpty = 0;
+      utxos.push({
+        nonceIndex: i,
+        burnerAddress: burner.address,
+        stealthPda: pda.toBase58(),
+        lamports,
+        status,
+      });
 
       // Wipe the burner private key when we don't keep it
       burnerService.clearBurner(burner);

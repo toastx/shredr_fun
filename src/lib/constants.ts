@@ -120,11 +120,12 @@ export const DEFAULT_DENOMINATION_SOL: NormalizedDenomination = 1;
 export const COMMIT_DELAY_MIN_SECS = 6 * 60 * 60;
 export const COMMIT_DELAY_MAX_SECS = 48 * 60 * 60;
 
-/** Fixed salt used when deriving stealth/main PDAs from a burner pubkey.
- *  Using a deterministic salt keeps recovery simple — privacy already comes
- *  from the per-receive burner randomness.
- */
-export const SHREDR_FIXED_SALT = new Uint8Array(32); // all-zeros
+/** How long to wait for a committed stealth PDA to settle back on the base
+ *  layer (commit → delegation program → `UndelegationCallback`). */
+export const UNDELEGATION_TIMEOUT_MS = 120_000;
+
+/** Poll interval while waiting for undelegation. */
+export const UNDELEGATION_POLL_INTERVAL_MS = 2_000;
 
 /** Maximum index for pending-UTXO scanning. */
 export const MAX_UTXO_SCAN_INDEX = 64;

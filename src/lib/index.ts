@@ -11,6 +11,8 @@ export { KoraRelayer, koraRelayer } from './KoraRelayer';
 export {
     SHREDR_PROGRAM_ID,
     SEEDS,
+    STEALTH_ACCOUNT_LEN,
+    StealthInstruction,
     MAGIC_BLOCK_PROGRAM_ID,
     MAGIC_CONTEXT,
     PERMISSION_PROGRAM_ID,
@@ -22,10 +24,12 @@ export {
     createCommitAndUndelegateStealthInstruction,
     createStealthWithdrawInstruction,
     parseStealthAccount,
+    getShredrErrorMessage,
+    isShredrProgramError,
 } from './ShredrProgram';
 export type { StealthAccountData } from './ShredrProgram';
 
-export type { SigningMode, ShredrState, PendingUtxo, UtxoStatus } from './ShredrClient';
+export type { SigningMode, ShredrState, PendingUtxo, UtxoStatus, ShredResult } from './ShredrClient';
 
 // Types
 export { DecryptionError } from './types';
