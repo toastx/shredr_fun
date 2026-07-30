@@ -159,7 +159,7 @@ export type InitializeAndDelegateAsyncInput<
   burner: TransactionSigner<TAccountBurner>;
   /** This program's address */
   ownerProgram?: Address<TAccountOwnerProgram>;
-  /** Stealth PDA derived from burner+salt */
+  /** Stealth PDA derived from the burner */
   stealthAccount?: Address<TAccountStealthAccount>;
   /** ACL permission account */
   permissionAccount?: Address<TAccountPermissionAccount>;
@@ -346,7 +346,7 @@ export type InitializeAndDelegateInput<
   burner: TransactionSigner<TAccountBurner>;
   /** This program's address */
   ownerProgram?: Address<TAccountOwnerProgram>;
-  /** Stealth PDA derived from burner+salt */
+  /** Stealth PDA derived from the burner */
   stealthAccount: Address<TAccountStealthAccount>;
   /** ACL permission account */
   permissionAccount: Address<TAccountPermissionAccount>;
@@ -486,7 +486,7 @@ export type ParsedInitializeAndDelegateInstruction<
     burner: TAccountMetas[1];
     /** This program's address */
     ownerProgram: TAccountMetas[2];
-    /** Stealth PDA derived from burner+salt */
+    /** Stealth PDA derived from the burner */
     stealthAccount: TAccountMetas[3];
     /** ACL permission account */
     permissionAccount: TAccountMetas[4];

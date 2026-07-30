@@ -34,7 +34,7 @@
           "isMut": true,
           "isSigner": false,
           "docs": [
-            "Stealth PDA derived from burner+salt"
+            "Stealth PDA derived from the burner"
           ]
         },
         {

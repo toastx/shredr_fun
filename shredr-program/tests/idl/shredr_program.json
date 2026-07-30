@@ -34,7 +34,7 @@
           "isMut": true,
           "isSigner": false,
           "docs": [
-            "Stealth PDA derived from burner+salt"
+            "Stealth PDA derived from the burner"
           ]
         },
         {
@@ -291,87 +291,6 @@
       "discriminant": {
         "type": "u8",
         "value": 5
-      }
-    },
-    {
-      "name": "Deposit",
-      "accounts": [
-        {
-          "name": "owner",
-          "isMut": true,
-          "isSigner": true,
-          "docs": [
-            "Vault owner and payer"
-          ]
-        },
-        {
-          "name": "vault",
-          "isMut": true,
-          "isSigner": false,
-          "docs": [
-            "Vault PDA for lamports"
-          ]
-        },
-        {
-          "name": "program",
-          "isMut": false,
-          "isSigner": false,
-          "docs": [
-            "Program Address"
-          ]
-        },
-        {
-          "name": "systemProgram",
-          "isMut": false,
-          "isSigner": false,
-          "docs": [
-            "System Program Address"
-          ]
-        }
-      ],
-      "args": [
-        {
-          "name": "amount",
-          "type": "u64"
-        }
-      ],
-      "discriminant": {
-        "type": "u8",
-        "value": 0
-      }
-    },
-    {
-      "name": "Withdraw",
-      "accounts": [
-        {
-          "name": "owner",
-          "isMut": true,
-          "isSigner": true,
-          "docs": [
-            "Vault owner and authority"
-          ]
-        },
-        {
-          "name": "vault",
-          "isMut": true,
-          "isSigner": false,
-          "docs": [
-            "Vault PDA for lamports"
-          ]
-        },
-        {
-          "name": "program",
-          "isMut": false,
-          "isSigner": false,
-          "docs": [
-            "Program Address"
-          ]
-        }
-      ],
-      "args": [],
-      "discriminant": {
-        "type": "u8",
-        "value": 1
       }
     }
   ],
