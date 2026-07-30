@@ -19,9 +19,9 @@ Everything is derived from a **single wallet signature**: no seed phrases to sto
 
 1. **Connect & sign** — Your wallet signs one message; this deterministically derives a master seed.
 2. **Generate a burner** — A one-time stealth keypair + on-chain stealth PDA is derived from `masterSeed + nonce`.
-3. **Receive funds** — Share the burner address. Incoming SOL lands on the stealth PDA, delegated to a MagicBlock TEE validator.
-4. **Shred** — A `PrivateTransfer` moves lamports between stealth accounts *inside the rollup*, then state is committed and undelegated back to the base layer.
-5. **Withdraw** — After undelegation, the burner signs a withdrawal to your destination address. A [Kora](https://github.com/solana-foundation/kora) relayer pays fees so the burner needs no funding.
+3. **Receive funds** — Share the burner address. Incoming SOL lands on the burner account itself.
+4. **Shred** — `InitializeAndDelegate` sweeps the deposit into the burner's stealth PDA and delegates it to a MagicBlock TEE validator. A `PrivateTransfer` then moves the lamports into your main PDA *inside the rollup*, and the drained stealth PDA is committed and undelegated back to the base layer.
+5. **Withdraw** — The main PDA is committed and undelegated, then the main burner signs a withdrawal to your destination address. A [Kora](https://github.com/solana-foundation/kora) relayer pays fees so the burner needs no funding.
 
 Because the sender only ever sees a fresh burner and the private transfer happens off the public graph, incoming payments are unlinkable to your main wallet.
 
@@ -69,7 +69,7 @@ The project is a monorepo with three cooperating parts:
 | `ShredrClient` | Top-level orchestrator tying signature → burners → on-chain flow |
 | `NonceService` | Nonce generation, chaining, and encrypted persistence |
 | `BurnerService` | Deterministic stealth / main burner keypair derivation |
-| `ShredrProgram` | Builds instructions matching the on-chain IDL |
+| `ShredrProgram` | web3.js facade over the Codama-generated client in `src/generated` |
 | `KoraRelayer` | JSON-RPC client for the Kora fee-payer / relayer |
 | `StorageService` | Encrypted IndexedDB wrapper for local state |
 | `ApiClient` / `WebSocketClient` | Backend blob sync and real-time deposit notifications |
@@ -80,7 +80,7 @@ A zero-dependency Pinocchio program managing stealth PDAs derived as `["shredr_s
 
 | # | Instruction | Purpose |
 |---|-------------|---------|
-| 0 | `InitializeAndDelegate` | Create a stealth PDA and delegate it to a MagicBlock TEE validator |
+| 0 | `InitializeAndDelegate` | Create a stealth PDA, sweep the burner's deposit into it, delegate it to a MagicBlock TEE validator |
 | 1 | `PrivateTransfer` | Move lamports between stealth PDAs inside the rollup |
 | 2 | `CommitStealth` | Flush rollup state to the base layer, staying delegated |
 | 3 | `CommitAndUndelegateStealth` | Flush state and release the account back to the base layer |
@@ -114,6 +114,7 @@ Other scripts:
 
 ```bash
 npm run build    # type-check and produce a production build
+npm run generate:client  # regenerate src/generated from the program IDL
 npm run lint     # run ESLint
 npm test         # run the Mocha test suite
 ```
@@ -151,6 +152,7 @@ See [shredr-backend/README.md](shredr-backend/README.md) for the full API refere
 shredr_fun/
 ├── src/
 │   ├── lib/                 # Core services (nonce, burner, program, relayer, storage)
+│   ├── generated/           # Codama client (npm run generate:client)
 │   ├── components/          # UI components (wallet, generator, monitor, ...)
 │   ├── pages/               # GeneratorPage, ClaimPage
 │   └── App.tsx              # Routing
@@ -158,6 +160,7 @@ shredr_fun/
 │   ├── src/instructions/    # Instruction handlers
 │   └── idl/                 # Program IDL
 ├── shredr-backend/          # Axum backend (blob sync, WebSocket, webhooks)
+├── scripts/                 # Codama client generation
 ├── tests/                   # Frontend unit + integration tests
 └── public/                  # Static assets
 ```
