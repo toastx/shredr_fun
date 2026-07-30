@@ -1,6 +1,6 @@
 /**
  * GeneratorCard — small reusable card UI that surfaces the user's current
- * stealth PDA (the address to share with senders). This is a presentational
+ * burner address (the address to share with senders). This is a presentational
  * variant of GeneratorPage that can be embedded inside other pages.
  */
 
@@ -33,19 +33,20 @@ function GeneratorCard() {
   const { setVisible } = useWalletModal();
 
   const [cardState, setCardState] = useState<CardState>("disconnected");
-  const [stealthPdaAddress, setStealthPdaAddress] = useState<string | null>(
-    null,
-  );
+  // The one-time **burner pubkey** shared with senders. Deposits land there and
+  // are swept into the burner's stealth PDA when the deposit is shredded.
+  const [receiveAddress, setReceiveAddress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pdaBalance, setPdaBalance] = useState<number>(0);
   const [copied, setCopied] = useState(false);
 
   const copiedTimeout = useRef<NodeJS.Timeout | null>(null);
-  const stealthPdaRef = useRef<string | null>(null);
+  const receiveAddressRef = useRef<string | null>(null);
+  const shreddingRef = useRef(false);
 
   useEffect(() => {
-    stealthPdaRef.current = stealthPdaAddress;
-  }, [stealthPdaAddress]);
+    receiveAddressRef.current = receiveAddress;
+  }, [receiveAddress]);
 
   // ============ BALANCE ============
 
@@ -68,7 +69,7 @@ function GeneratorCard() {
   useEffect(() => {
     if (!connected) {
       setCardState("disconnected");
-      setStealthPdaAddress(null);
+      setReceiveAddress(null);
       setCopied(false);
       setError(null);
       webSocketClient.disconnect();
@@ -83,6 +84,46 @@ function GeneratorCard() {
   const handleConnect = useCallback(() => {
     setVisible(true);
   }, [setVisible]);
+
+  /** Consume the used burner and surface a fresh receive address. */
+  const rotateBurner = useCallback(async () => {
+    await shredrClient.consumeAndGenerateNew();
+    const next = shredrClient.receiveAddress;
+    if (!next) return;
+
+    setReceiveAddress(next);
+    setPdaBalance(0);
+    webSocketClient.subscribeToAccount(next);
+  }, []);
+
+  /**
+   * Shred a deposit that landed on the burner: sweep + delegate, private
+   * transfer into the main PDA inside the rollup, then commit and undelegate.
+   * Manual signing mode leaves it for the claim page instead.
+   */
+  const handleDeposit = useCallback(async () => {
+    if (shreddingRef.current) return;
+    if (shredrClient.signingMode !== "auto") return;
+
+    const address = receiveAddressRef.current;
+    if (!address) return;
+
+    // Subscriptions to rotated burners are never torn down, so confirm the
+    // balance on-chain instead of trusting the notification.
+    const lamports = await refreshBalance(address);
+    if (lamports <= 0) return;
+
+    shreddingRef.current = true;
+    try {
+      const result = await shredrClient.shredBurner();
+      console.log("Shredded deposit:", result.signatures);
+      await rotateBurner();
+    } catch (err) {
+      console.error("Failed to shred deposit:", err);
+    } finally {
+      shreddingRef.current = false;
+    }
+  }, [refreshBalance, rotateBurner]);
 
   const handleSign = useCallback(async () => {
     if (!publicKey || !signMessage) {
@@ -103,15 +144,15 @@ function GeneratorCard() {
       const walletPubkeyBytes = publicKey.toBytes();
       await shredrClient.initFromSignature(signature, walletPubkeyBytes);
 
-      const pda = shredrClient.stealthAddress;
-      if (!pda) throw new Error("Failed to derive stealth PDA");
+      const address = shredrClient.receiveAddress;
+      if (!address) throw new Error("Failed to derive burner receive address");
 
-      setStealthPdaAddress(pda);
+      setReceiveAddress(address);
       setCardState("ready");
 
       // Subscribe + initial balance
-      webSocketClient.subscribeToAccount(pda);
-      await refreshBalance(pda);
+      webSocketClient.subscribeToAccount(address);
+      const initialLamports = await refreshBalance(address);
 
       // Live updates
       webSocketClient.onMessage(async (data: WebSocketMessage) => {
@@ -125,8 +166,15 @@ function GeneratorCard() {
           return;
         if (lamports > 0) {
           setPdaBalance(lamports / LAMPORTS_PER_SOL);
+          // A deposit landed on the burner — shred it on-chain.
+          void handleDeposit();
         }
       });
+
+      // A deposit may have landed while the app was closed.
+      if (initialLamports > 0) {
+        void handleDeposit();
+      }
     } catch (err) {
       console.error("Failed to initialize:", err);
       if (err instanceof Error && err.message.includes("User rejected")) {
@@ -136,12 +184,12 @@ function GeneratorCard() {
         setCardState("error");
       }
     }
-  }, [publicKey, signMessage, refreshBalance]);
+  }, [publicKey, signMessage, refreshBalance, handleDeposit]);
 
   const handleCopy = useCallback(async () => {
-    if (!stealthPdaAddress) return;
+    if (!receiveAddress) return;
     try {
-      await navigator.clipboard.writeText(stealthPdaAddress);
+      await navigator.clipboard.writeText(receiveAddress);
       setCopied(true);
       setCardState("monitoring");
       if (copiedTimeout.current) clearTimeout(copiedTimeout.current);
@@ -149,7 +197,7 @@ function GeneratorCard() {
     } catch (err) {
       console.error("Failed to copy:", err);
     }
-  }, [stealthPdaAddress]);
+  }, [receiveAddress]);
 
   const handleRetry = useCallback(() => {
     setError(null);
@@ -198,10 +246,10 @@ function GeneratorCard() {
           <div className="results-section">
             <AddressDisplay
               label="stealth address"
-              value={stealthPdaAddress || ""}
+              value={receiveAddress || ""}
               placeholder=""
               isCopied={copied}
-              hasValue={!!stealthPdaAddress}
+              hasValue={!!receiveAddress}
               onCopy={handleCopy}
             />
 
@@ -228,8 +276,8 @@ function GeneratorCard() {
               </button>
             </div>
 
-            {cardState === "monitoring" && stealthPdaAddress && (
-              <TransactionMonitor burnerAddress={stealthPdaAddress} />
+            {cardState === "monitoring" && receiveAddress && (
+              <TransactionMonitor burnerAddress={receiveAddress} />
             )}
           </div>
         );

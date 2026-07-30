@@ -62,10 +62,10 @@ function ClaimPage({ onBack }: ClaimPageProps) {
 
         console.log('fetchStealthBalance: Starting...');
         console.log('fetchStealthBalance: initialized =', shredrClient.initialized);
-        console.log('fetchStealthBalance: stealthAddress =', shredrClient.stealthAddress);
-        
-        if (!shredrClient.initialized || !shredrClient.stealthAddress) {
-            console.log('fetchStealthBalance: Skipping - not initialized or no address');
+        console.log('fetchStealthBalance: mainPda =', shredrClient.mainPdaAddress);
+
+        if (!shredrClient.initialized || !shredrClient.mainPdaAddress) {
+            console.log('fetchStealthBalance: Skipping - not initialized or no main PDA');
             return;
         }
         
@@ -144,7 +144,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             return;
         }
         
-        if (pageState !== 'ready' || !shredrClient.stealthBurner) {
+        if (pageState !== 'ready' || !shredrClient.mainBurnerAddress) {
             setWithdrawError('Stealth address not initialized');
             return;
         }
@@ -166,7 +166,16 @@ function ClaimPage({ onBack }: ClaimPageProps) {
 
             console.log('ClaimPage: Starting withdrawal from main PDA to', destinationAddress);
 
+            // Consolidate first: any deposit still sitting on a burner (received
+            // while the app was closed, or left there by manual signing mode) is
+            // swept into its stealth PDA and privately transferred to the main PDA.
+            const shredded = await shredrClient.shredPendingDeposits();
+            if (shredded.length > 0) {
+                console.log(`ClaimPage: Shredded ${shredded.length} pending deposit(s)`);
+            }
+
             // Calls the SHREDR program's `Withdraw` instruction:
+            //   - commits + undelegates the main PDA if it is still in the rollup
             //   - signed by the main burner (proves ownership of the main PDA)
             //   - fee paid by Kora relayer
             //   - moves lamports from main PDA → destination

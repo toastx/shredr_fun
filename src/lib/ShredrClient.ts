@@ -680,6 +680,37 @@ export class ShredrClient {
     };
   }
 
+  /**
+   * Shred every burner that is holding an unswept deposit.
+   *
+   * Covers deposits that arrived while the app was closed, and manual-signing
+   * mode, where the generator page does not shred on its own.
+   */
+  async shredPendingDeposits(): Promise<ShredResult[]> {
+    if (!this._initialized || !this._walletPubkey) {
+      throw new Error("ShredrClient not initialized");
+    }
+
+    const pending = (await this.scanPendingUtxos()).filter(
+      (utxo) => utxo.status === "received",
+    );
+
+    const results: ShredResult[] = [];
+    for (const utxo of pending) {
+      const nonce = await nonceService.generateNonceAtIndex(
+        utxo.nonceIndex,
+        this._walletPubkey,
+      );
+      const burner = await burnerService.deriveBurnerFromNonce(nonce);
+      try {
+        results.push(await this.shredBurner(burner));
+      } finally {
+        burnerService.clearBurner(burner);
+      }
+    }
+    return results;
+  }
+
   // ============ BALANCE ============
 
   /**

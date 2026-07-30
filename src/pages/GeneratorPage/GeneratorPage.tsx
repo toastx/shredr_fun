@@ -26,23 +26,26 @@ function GeneratorPage() {
     const { publicKey, signMessage, connected } = useWallet();
     const { setVisible } = useWalletModal();
 
-    // Core state — `stealthPdaAddress` is the *PDA* shared with senders
-    // (derived from the current one-time burner). It is NOT the burner pubkey.
+    // Core state — `receiveAddress` is the one-time **burner pubkey** shared
+    // with senders. Deposits land there and are swept into the burner's stealth
+    // PDA by InitializeAndDelegate, which requires the PDA to still be empty.
     const [pageState, setPageState] = useState<PageState>("disconnected");
-    const [stealthPdaAddress, setStealthPdaAddress] = useState<string | null>(null);
+    const [receiveAddress, setReceiveAddress] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [pdaBalance, setPdaBalance] = useState<number>(0);
     const [copied, setCopied] = useState(false);
 
     // Refs
     const copiedTimeout = useRef<NodeJS.Timeout | null>(null);
-    const stealthPdaRef = useRef<string | null>(null);
+    const receiveAddressRef = useRef<string | null>(null);
+    const shreddingRef = useRef(false);
     const wsMessageHandlerRef = useRef<((data: WebSocketMessage) => void) | null>(null);
 
-    // Sync ref with state
+    // Sync ref with state — the WebSocket handler is registered once and needs
+    // the address that is current when a deposit lands, not when it was built.
     useEffect(() => {
-        stealthPdaRef.current = stealthPdaAddress;
-    }, [stealthPdaAddress]);
+        receiveAddressRef.current = receiveAddress;
+    }, [receiveAddress]);
 
     // ============ BALANCE ============
 
@@ -65,7 +68,7 @@ function GeneratorPage() {
     useEffect(() => {
         if (!connected) {
             setPageState("disconnected");
-            setStealthPdaAddress(null);
+            setReceiveAddress(null);
             setCopied(false);
             setError(null);
             // IMPORTANT: Disconnect WebSocket BEFORE destroying client
@@ -101,6 +104,54 @@ function GeneratorPage() {
         setVisible(true);
     }, [setVisible]);
 
+    /**
+     * Consume the used burner and surface a fresh receive address, so the next
+     * sender never reuses an address that has already been shredded.
+     */
+    const rotateBurner = useCallback(async () => {
+        await shredrClient.consumeAndGenerateNew();
+        const next = shredrClient.receiveAddress;
+        if (!next) return;
+
+        setReceiveAddress(next);
+        setPdaBalance(0);
+        webSocketClient.subscribeToAccount(next);
+    }, []);
+
+    /**
+     * Run the on-chain shred for a deposit that just landed on the burner:
+     * sweep + delegate, private-transfer into the main PDA inside the rollup,
+     * then commit and undelegate the drained stealth PDA.
+     *
+     * Only runs in "auto" signing mode; in manual mode the deposit stays on the
+     * burner until the claim page shreds it. Failures are logged rather than
+     * surfaced: the funds stay on the burner and the claim page picks them up
+     * on its next scan.
+     */
+    const handleDeposit = useCallback(async () => {
+        if (shreddingRef.current) return;
+        if (shredrClient.signingMode !== "auto") return;
+
+        const address = receiveAddressRef.current;
+        if (!address) return;
+
+        // Subscriptions to rotated burners are never torn down, so confirm the
+        // balance on-chain instead of trusting the notification.
+        const lamports = await refreshBalance(address);
+        if (lamports <= 0) return;
+
+        shreddingRef.current = true;
+        try {
+            const result = await shredrClient.shredBurner();
+            console.log("Shredded deposit:", result.signatures);
+            await rotateBurner();
+        } catch (err) {
+            console.error("Failed to shred deposit:", err);
+        } finally {
+            shreddingRef.current = false;
+        }
+    }, [refreshBalance, rotateBurner]);
+
     const handleSign = useCallback(async () => {
         if (!publicKey || !signMessage) {
             setError("Wallet not connected or signMessage not available");
@@ -122,19 +173,18 @@ function GeneratorPage() {
             const walletPubkeyBytes = publicKey.toBytes();
             await shredrClient.initFromSignature(signature, walletPubkeyBytes);
 
-            // The stealth PDA (not the burner pubkey) is what the user shares
-            // with senders. It is a program-owned account derived deterministically
-            // from the current one-time burner + fixed salt.
-            const pda = shredrClient.stealthAddress;
-            if (pda) {
-                setStealthPdaAddress(pda);
+            // The burner pubkey is what the user shares with senders: the
+            // program sweeps that balance into the stealth PDA when shredding.
+            const address = shredrClient.receiveAddress;
+            if (address) {
+                setReceiveAddress(address);
                 setPageState("ready");
 
-                // Subscribe to account updates on the stealth PDA
-                webSocketClient.subscribeToAccount(pda);
+                // Subscribe to account updates on the burner
+                webSocketClient.subscribeToAccount(address);
 
-                // Fetch initial balance of the stealth PDA
-                await refreshBalance(pda);
+                // Fetch initial balance of the burner
+                const initialLamports = await refreshBalance(address);
 
                 // Listen for account updates
                 // Store handler ref for cleanup
@@ -167,14 +217,21 @@ function GeneratorPage() {
                         console.log(`WebSocket balance update: ${lamportsFromWs} lamports`);
                         // Update UI balance
                         setPdaBalance(lamportsFromWs / LAMPORTS_PER_SOL);
+                        // A deposit landed on the burner — shred it on-chain.
+                        void handleDeposit();
                     }
                 };
 
                 // Store ref for cleanup and register handler
                 wsMessageHandlerRef.current = messageHandler;
                 webSocketClient.onMessage(messageHandler);
+
+                // A deposit may have landed while the app was closed.
+                if (initialLamports > 0) {
+                    void handleDeposit();
+                }
             } else {
-                throw new Error("Failed to derive stealth PDA address");
+                throw new Error("Failed to derive burner receive address");
             }
         } catch (err) {
             console.error("Failed to initialize:", err);
@@ -185,12 +242,12 @@ function GeneratorPage() {
                 setPageState("error");
             }
         }
-    }, [publicKey, signMessage, refreshBalance]);
+    }, [publicKey, signMessage, refreshBalance, handleDeposit]);
 
     const handleCopy = useCallback(async () => {
-        if (!stealthPdaAddress) return;
+        if (!receiveAddress) return;
         try {
-            await navigator.clipboard.writeText(stealthPdaAddress);
+            await navigator.clipboard.writeText(receiveAddress);
             setCopied(true);
             setPageState("monitoring");
             if (copiedTimeout.current) clearTimeout(copiedTimeout.current);
@@ -198,7 +255,7 @@ function GeneratorPage() {
         } catch (err) {
             console.error("Failed to copy:", err);
         }
-    }, [stealthPdaAddress]);
+    }, [receiveAddress]);
 
     const handleRetry = useCallback(() => {
         setError(null);
@@ -247,10 +304,10 @@ function GeneratorPage() {
 
                         <AddressDisplay
                             label=""
-                            value={stealthPdaAddress || ""}
+                            value={receiveAddress || ""}
                             placeholder=""
                             isCopied={copied}
-                            hasValue={!!stealthPdaAddress}
+                            hasValue={!!receiveAddress}
                             onCopy={handleCopy}
                         />
 
@@ -261,8 +318,8 @@ function GeneratorPage() {
                             </span>
                         </div>
 
-                        {pageState === "monitoring" && stealthPdaAddress && (
-                            <TransactionMonitor burnerAddress={stealthPdaAddress} />
+                        {pageState === "monitoring" && receiveAddress && (
+                            <TransactionMonitor burnerAddress={receiveAddress} />
                         )}
                     </div>
                 );
