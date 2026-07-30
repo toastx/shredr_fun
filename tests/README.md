@@ -43,6 +43,23 @@ npm test
 | `destroy` | ✅ 2 tests | Covered |
 | Edge cases | ✅ Multiple | Covered |
 
+### ShredrProgram (20 tests)
+
+Pins the client's wire format against the on-chain program, so a program
+change that is not regenerated into `src/generated` fails here instead of on
+devnet.
+
+| Area | Tests | Status |
+|------|-------|--------|
+| Program ID and instruction discriminators | ✅ 2 tests | Covered |
+| `deriveStealthPDA` (salt-free, cross-checked with the generated PDA finder) | ✅ 2 tests | Covered |
+| `InitializeAndDelegate` data + 9 accounts | ✅ 4 tests | Covered |
+| `PrivateTransfer` burner authorization | ✅ 2 tests | Covered |
+| `CommitStealth` / `CommitAndUndelegateStealth` | ✅ 2 tests | Covered |
+| `Withdraw` data + accounts | ✅ 2 tests | Covered |
+| `parseStealthAccount` layout and rejections | ✅ 4 tests | Covered |
+| `getShredrErrorMessage` | ✅ 2 tests | Covered |
+
 ### Integration Flow Tests (Complete 5-Phase Flow)
 
 | Phase | Description | Status |
@@ -87,6 +104,14 @@ npm test
 | `Integration.Deterministic Recovery` | Same sig → same burner | 2 |
 | `Integration.Multiple Burners` | Unique burner generation | 1 |
 | `Integration.Error Handling` | Graceful failures | 2 |
+| `ShredrProgram.constants` | Program ID and discriminators | 2 |
+| `ShredrProgram.deriveStealthPDA` | PDA seeds | 2 |
+| `ShredrProgram.createInitializeAndDelegateInstruction` | Data and account metas | 4 |
+| `ShredrProgram.createPrivateTransferInstruction` | Burner-authorized transfer | 2 |
+| `ShredrProgram.commit instructions` | MagicBlock accounts | 2 |
+| `ShredrProgram.createStealthWithdrawInstruction` | Data and account metas | 2 |
+| `ShredrProgram.parseStealthAccount` | Account layout | 4 |
+| `ShredrProgram.getShredrErrorMessage` | Custom error codes | 2 |
 
 ## Future Tests (Nice-to-Have)
 
