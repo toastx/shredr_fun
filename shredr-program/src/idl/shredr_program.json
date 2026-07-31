@@ -1,0 +1,301 @@
+{
+  "version": "0.1.0",
+  "name": "shredr_program",
+  "instructions": [
+    {
+      "name": "InitializeAndDelegate",
+      "accounts": [
+        {
+          "name": "relayer",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Relayer paying for the transaction"
+          ]
+        },
+        {
+          "name": "burner",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "One-time burner keypair derived from mainKey+nonce"
+          ]
+        },
+        {
+          "name": "ownerProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "This program's address"
+          ]
+        },
+        {
+          "name": "stealthAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Stealth PDA derived from the burner"
+          ]
+        },
+        {
+          "name": "permissionAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "ACL permission account"
+          ]
+        },
+        {
+          "name": "delegationBuffer",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "MagicBlock delegation buffer"
+          ]
+        },
+        {
+          "name": "delegationRecord",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "MagicBlock delegation record"
+          ]
+        },
+        {
+          "name": "delegationMetadata",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "MagicBlock delegation metadata"
+          ]
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "System Program"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "depositAmount",
+          "type": "u64"
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 0
+      }
+    },
+    {
+      "name": "PrivateTransfer",
+      "accounts": [
+        {
+          "name": "sourceBurner",
+          "isMut": false,
+          "isSigner": true,
+          "docs": [
+            "Burner that owns the source PDA, authorizes the transfer"
+          ]
+        },
+        {
+          "name": "sourcePda",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Source stealth PDA"
+          ]
+        },
+        {
+          "name": "destinationPda",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Destination stealth PDA"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 1
+      }
+    },
+    {
+      "name": "CommitStealth",
+      "accounts": [
+        {
+          "name": "relayer",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Relayer paying for the transaction"
+          ]
+        },
+        {
+          "name": "stealthAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Stealth PDA to commit"
+          ]
+        },
+        {
+          "name": "magicProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "MagicBlock program"
+          ]
+        },
+        {
+          "name": "magicContext",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "MagicBlock context account"
+          ]
+        }
+      ],
+      "args": [],
+      "discriminant": {
+        "type": "u8",
+        "value": 2
+      }
+    },
+    {
+      "name": "CommitAndUndelegateStealth",
+      "accounts": [
+        {
+          "name": "relayer",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Relayer paying for the transaction"
+          ]
+        },
+        {
+          "name": "stealthAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Stealth PDA to commit and undelegate"
+          ]
+        },
+        {
+          "name": "magicProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "MagicBlock program"
+          ]
+        },
+        {
+          "name": "magicContext",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "MagicBlock context account"
+          ]
+        }
+      ],
+      "args": [],
+      "discriminant": {
+        "type": "u8",
+        "value": 3
+      }
+    },
+    {
+      "name": "Withdraw",
+      "accounts": [
+        {
+          "name": "burner",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Burner keypair that owns the stealth account, proves ownership"
+          ]
+        },
+        {
+          "name": "stealthAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Stealth PDA holding the funds"
+          ]
+        },
+        {
+          "name": "destination",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Any destination address to receive funds"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 4
+      }
+    },
+    {
+      "name": "UndelegationCallback",
+      "accounts": [
+        {
+          "name": "stealthAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Stealth account being undelegated"
+          ]
+        },
+        {
+          "name": "bufferAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "MagicBlock buffer account"
+          ]
+        },
+        {
+          "name": "payer",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Payer for the callback"
+          ]
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "System Program"
+          ]
+        }
+      ],
+      "args": [],
+      "discriminant": {
+        "type": "u8",
+        "value": 5
+      }
+    }
+  ],
+  "metadata": {
+    "origin": "shank",
+    "address": "H9pUQeNA2RwBHRwx52V8nqWpCAKReSA3gGUuRFHbEjG6"
+  }
+}
