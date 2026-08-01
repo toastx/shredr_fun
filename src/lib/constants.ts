@@ -61,11 +61,11 @@ export const PBKDF2_ITERATIONS = 100000;
 
 /** HELIUS RPC URL */
 export const HELIUS_RPC_URL =
-  "https://mainnet.helius-rpc.com/?api-key=f5547a8a-87c5-45e6-b310-933bb1d99a93";
+  "https://devnet.helius-rpc.com/?api-key=1ab08206-1c39-410d-b578-58445eed25ed";
 /** HELIUS WSS URL */
-export const HELIUS_WSS_URL = "wss://mainnet.helius-rpc.com/?api-key=f5547a8a-87c5-45e6-b310-933bb1d99a93";
+export const HELIUS_WSS_URL = "wss://devnet.helius-rpc.com/?api-key=1ab08206-1c39-410d-b578-58445eed25ed";
 /** API Base URL */
-export const API_BASE_URL = "https://backend.shredr.fun";
+export const API_BASE_URL = "http://localhost:8000";
 
 /** Transaction fee buffer for sweep operations (covering deposit + transfer) */
 export const SWEEP_FEE_BUFFER_LAMPORTS = 25000;
@@ -82,12 +82,14 @@ export const SWEEP_THRESHOLD_LAMPORTS = 0.1 * 1e9; // 100,000,000 lamports
  *
  * Override at deploy time as needed.
  */
-export const KORA_RELAYER_URL = "https://kora.shredr.fun";
+export const KORA_RELAYER_URL = "http://localhost:8080";
 
 /** Kora's relayer pubkey (the fee payer account that Kora signs as).
- *  Replace with actual Kora-managed pubkey at deploy time, or fetch via getConfig.
+ *  Set this to the actual Kora-managed pubkey at deploy time, or provide it
+ *  through VITE_KORA_RELAYER_PUBKEY / KORA_RELAYER_PUBKEY. If omitted,
+ *  the client will try to fetch it from the Kora service via getConfig.
  */
-export const KORA_RELAYER_PUBKEY = "11111111111111111111111111111111";
+export const KORA_RELAYER_PUBKEY = "shredrWUYk1famp42neAhaJb9PAB69WoSTDhMUdcbjS";
 
 // ============ MAGICBLOCK ROLLUP ============
 

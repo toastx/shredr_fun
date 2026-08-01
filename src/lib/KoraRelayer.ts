@@ -63,7 +63,17 @@ export class KoraRelayer {
   /** Get the relayer pubkey (used as fee payer + program-level relayer). */
   getRelayerPubkey(): PublicKey {
     if (this.cachedRelayerPubkey) return this.cachedRelayerPubkey;
-    this.cachedRelayerPubkey = new PublicKey(KORA_RELAYER_PUBKEY);
+
+    const configured = getEnvironmentRelayerPubkey();
+    const key = configured || KORA_RELAYER_PUBKEY;
+
+    if (!key) {
+      throw new Error(
+        "Kora relayer pubkey is not configured. Set VITE_KORA_RELAYER_PUBKEY or KORA_RELAYER_PUBKEY, or ensure the Kora service exposes getConfig.",
+      );
+    }
+
+    this.cachedRelayerPubkey = new PublicKey(key);
     return this.cachedRelayerPubkey;
   }
 
@@ -103,7 +113,7 @@ export class KoraRelayer {
     instructions: TransactionInstruction[],
     clientSigners: Signer[],
   ): Promise<string> {
-    const relayer = this.getRelayerPubkey();
+    const relayer = await this.fetchRelayerPubkey();
     const { blockhash } = await connection.getLatestBlockhash("confirmed");
 
     const message = new TransactionMessage({
@@ -123,6 +133,8 @@ export class KoraRelayer {
 
     const res = await this.rpc<KoraSignResult>("signAndSendTransaction", {
       transaction: b64,
+      signer_key: relayer.toBase58(),
+      sig_verify: false,
     });
     return res.signature;
   }
@@ -146,7 +158,7 @@ export class KoraRelayer {
     instructions: TransactionInstruction[],
     clientSigners: Signer[],
   ): Promise<string> {
-    const relayer = this.getRelayerPubkey();
+    const relayer = await this.fetchRelayerPubkey();
     const { blockhash } = await connection.getLatestBlockhash("confirmed");
 
     const message = new TransactionMessage({
@@ -166,6 +178,8 @@ export class KoraRelayer {
       transaction?: string;
     }>("signTransaction", {
       transaction: uint8ArrayToBase64(tx.serialize()),
+      signer_key: relayer.toBase58(),
+      sig_verify: false,
     });
 
     const signed =
@@ -188,7 +202,7 @@ export class KoraRelayer {
     instructions: TransactionInstruction[],
     clientSigners: Signer[],
   ): Promise<string> {
-    const relayer = this.getRelayerPubkey();
+    const relayer = await this.fetchRelayerPubkey();
     const { blockhash } = await connection.getLatestBlockhash("confirmed");
 
     const tx = new Transaction({
@@ -210,6 +224,8 @@ export class KoraRelayer {
 
     const res = await this.rpc<KoraSignResult>("signAndSendTransaction", {
       transaction: b64,
+      signer_key: relayer.toBase58(),
+      sig_verify: false,
     });
     return res.signature;
   }
@@ -242,6 +258,28 @@ export class KoraRelayer {
     }
     return json.result as T;
   }
+}
+
+function getEnvironmentRelayerPubkey(): string | undefined {
+  const env =
+    typeof import.meta !== "undefined"
+      ? (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
+      : undefined;
+
+  const fromImportMeta = env?.VITE_KORA_RELAYER_PUBKEY ?? env?.KORA_RELAYER_PUBKEY;
+  if (fromImportMeta) return fromImportMeta;
+
+  const globalWithEnv = globalThis as typeof globalThis & {
+    __KORA_RELAYER_PUBKEY__?: string;
+    process?: { env?: Record<string, string | undefined> };
+  };
+
+  if (globalWithEnv.__KORA_RELAYER_PUBKEY__) {
+    return globalWithEnv.__KORA_RELAYER_PUBKEY__;
+  }
+
+  return globalWithEnv.process?.env?.KORA_RELAYER_PUBKEY ??
+    globalWithEnv.process?.env?.VITE_KORA_RELAYER_PUBKEY;
 }
 
 // ============ Inline base64 helpers (avoid circular import on utils) ============
