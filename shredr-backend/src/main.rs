@@ -66,11 +66,11 @@ impl KeyExtractor for ForwardedIpKeyExtractor {
 
 /// Build the PostgreSQL connection string from environment variables
 fn build_database_url() -> String {
-    let host = std::env::var("PGHOST").expect("PGHOST is required");
-    let user = std::env::var("PGUSER").expect("PGUSER is required");
-    let password = std::env::var("PGPASSWORD").expect("PGPASSWORD is required");
-    let database = std::env::var("PGDATABASE").expect("PGDATABASE is required");
-
+    let host = std::env::var("DATABASE_HOST").expect("DATABASE_HOST is required");
+    let user = std::env::var("DATABASE_USER").expect("DATABASE_USER is required");
+    let password = std::env::var("DATABASE_PASSWORD").expect("DATABASE_PASSWORD is required");
+    let database = std::env::var("DATABASE_NAME").expect("DATABASE_NAME is required");
+    
     // Default to SSL mode for production (Koyeb, etc.)
     format!(
         "postgres://{}:{}@{}/{}?sslmode=require",

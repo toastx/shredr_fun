@@ -61,11 +61,11 @@ export const PBKDF2_ITERATIONS = 100000;
 
 /** HELIUS RPC URL */
 export const HELIUS_RPC_URL =
-  "https://devnet.helius-rpc.com/?api-key=1ab08206-1c39-410d-b578-58445eed25ed";
+  "https://mainnet.helius-rpc.com/?api-key=f5547a8a-87c5-45e6-b310-933bb1d99a93";
 /** HELIUS WSS URL */
-export const HELIUS_WSS_URL = "wss://devnet.helius-rpc.com/?api-key=1ab08206-1c39-410d-b578-58445eed25ed";
+export const HELIUS_WSS_URL = "wss://mainnet.helius-rpc.com/?api-key=f5547a8a-87c5-45e6-b310-933bb1d99a93";
 /** API Base URL */
-export const API_BASE_URL = "http://localhost:8000";
+export const API_BASE_URL = "https://backend.shredr.fun";
 
 /** Transaction fee buffer for sweep operations (covering deposit + transfer) */
 export const SWEEP_FEE_BUFFER_LAMPORTS = 25000;
@@ -82,7 +82,7 @@ export const SWEEP_THRESHOLD_LAMPORTS = 0.1 * 1e9; // 100,000,000 lamports
  *
  * Override at deploy time as needed.
  */
-export const KORA_RELAYER_URL = "http://localhost:8080";
+export const KORA_RELAYER_URL = "https://kora.shredr.fun";
 
 /** Kora's relayer pubkey (the fee payer account that Kora signs as).
  *  Replace with actual Kora-managed pubkey at deploy time, or fetch via getConfig.
