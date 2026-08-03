@@ -1,234 +1,158 @@
 # Shredr Backend
 
-A Rust backend service for blob storage with WebSocket support and Helius webhook integration for Solana transaction monitoring.
+A Rust/Axum service backing [shredr.fun](https://github.com/toastx/shredr_fun). It does two things:
 
-## Features
+1. Stores **encrypted state blobs** in PostgreSQL so users can recover their burner-chain position on any device.
+2. Exposes thin wrappers over the **Helius webhook API** for address monitoring.
 
-- **Blob Storage**: Upload, retrieve, and delete blobs using PostgreSQL
-- **HTTP API**: RESTful endpoints for blob operations
-- **WebSocket**: Real-time bidirectional communication with clients (UTF-8 bytes)
-- **Helius Webhook**: Receive and broadcast Solana transaction notifications
-- **CORS Enabled**: Cross-origin requests supported
+> **The backend never holds keys, never sees plaintext, and never touches funds.** Blobs are AES-GCM ciphertext encrypted with a key derived from a wallet signature that never leaves the user's browser. There is no authentication and no user table — blobs are anonymous rows. If this service disappeared, users could still recover everything from their wallet signature plus an on-chain scan.
 
 ## Architecture
 
 ```
-┌─────────────┐
-│   Client    │
-└──────┬──────┘
-       │
-       ├─────────► HTTP POST /api/blob/upload (Upload Blob)
-       │
-       ├─────────► HTTP GET /api/blob/:key (Get Blob)
-       │
-       ├─────────► HTTP DELETE /api/blob/:key (Delete Blob)
-       │
-       ├─────────► HTTP GET /api/blobs (List Blobs)
-       │
-       └─────────► WebSocket /ws (Real-time updates)
-                         ▲
-                         │
-┌────────────────────────┴──────────────┐
-│         Shredr Backend                │
-│                                       │
-│  ┌──────────┐      ┌──────────────┐  │
-│  │ Routes   │─────►│  DB Handler  │  │
-│  └──────────┘      └──────┬───────┘  │
-│                           │           │
-│  ┌──────────┐            ▼           │
-│  │ Webhook  │      ┌──────────────┐  │
-│  │ Handler  │      │  PostgreSQL  │  │
-│  └────┬─────┘      └──────────────┘  │
-│       │                               │
-│       └──────► WebSocket Broadcast    │
-│                                       │
-└───────────────────────────────────────┘
-                ▲
-                │
-         ┌──────┴──────┐
-         │   Helius    │
-         │   Webhook   │
-         └─────────────┘
+┌──────────┐
+│  Client  │
+└────┬─────┘
+     │
+     ├──► POST   /api/blobs        create an encrypted blob
+     ├──► GET    /api/blobs        list unconsumed blobs (keyset paginated)
+     ├──► GET    /api/blobs/{id}   get one blob
+     ├──► DELETE /api/blobs/{id}   mark consumed (soft delete)
+     │
+     ├──► POST   /webhook/create   create a Helius webhook
+     ├──► POST   /webhook/address  add addresses to a webhook
+     ├──► DELETE /webhook/address  remove addresses from a webhook
+     │
+     └──► GET    /health
+
+┌──────────────────────────────────────────────┐
+│              Shredr Backend                  │
+│                                              │
+│   db_routes ──► DbHandler ──► PostgreSQL     │
+│   webhook_routes ──► Helius client           │
+│                                              │
+│   middleware: tower_governor (3 rate tiers)  │
+│               tower_http CORS                │
+└──────────────────────────────────────────────┘
 ```
 
-## API Endpoints
+## API
 
-### 1. Upload Blob
-**POST** `/api/blob/upload`
+All blob responses use camelCase (`#[serde(rename_all = "camelCase")]`) to match the frontend's `NonceBlob` interface. No endpoint requires authentication.
 
-Upload a file as a blob to PostgreSQL.
+### `POST /api/blobs`
 
-**Request:**
-- Content-Type: `multipart/form-data`
-- Body: Form field `file` containing the file to upload
+Create an encrypted blob.
 
-**Response:**
+```json
+{ "encryptedBlob": "base64-encoded-IV-plus-ciphertext" }
+```
+
+**`201 Created`**
+
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
-  "key": "uuid-filename.ext",
-  "message": "Blob uploaded successfully"
+  "encryptedBlob": "base64...",
+  "createdAt": 1735689600000,
+  "isConsumed": false
 }
 ```
 
-**Example (curl):**
+`createdAt` is Unix **milliseconds**. Blobs over `MAX_BLOB_SIZE` (2048 bytes) are rejected with `400`; real blobs are ~200 bytes.
+
 ```bash
-curl -X POST http://localhost:8000/api/blob/upload \
-  -F "file=@/path/to/file.txt"
+curl -X POST http://localhost:8000/api/blobs \
+  -H "Content-Type: application/json" \
+  -d '{"encryptedBlob":"eyJub25jZSI6..."}'
 ```
 
-### 2. Get Blob
-**GET** `/api/blob/:key`
+### `GET /api/blobs`
 
-Retrieve a blob from PostgreSQL.
+List **unconsumed** blobs, newest first.
 
-**Parameters:**
-- `key`: The blob key returned from upload
+| Query param | Default | Notes |
+|---|---|---|
+| `limit` | 100 | Clamped to 1–100 |
+| `cursor` | none | Keyset pagination on `created_at` |
 
-**Response:**
-- Returns the raw blob data with appropriate Content-Type header
+Pagination is keyset-based, not offset-based — pass the `createdAt` of the last item you received as the next `cursor`:
 
-**Example (curl):**
+```sql
+WHERE is_consumed = FALSE AND created_at < $1
+ORDER BY created_at DESC
+LIMIT $2
+```
+
 ```bash
-curl -X GET http://localhost:8000/api/blob/uuid-filename.ext \
-  --output downloaded-file.ext
+curl "http://localhost:8000/api/blobs?limit=50"
 ```
 
-### 3. Delete Blob
-**DELETE** `/api/blob/:key`
+> **Known gap:** the frontend's `ApiClient.fetchAllBlobs()` requests a flat `limit=100` with no cursor. Since blobs carry no user identifier, recovery means downloading and trial-decrypting each one — so past ~100 total unconsumed blobs, a returning user's blob may fall outside the response and recovery silently fails. The server supports the cursor; the client does not use it.
 
-Delete a blob from PostgreSQL.
+### `GET /api/blobs/{id}`
 
-**Parameters:**
-- `key`: The blob key returned from upload
+Returns one blob (including consumed ones). `400` on an invalid UUID, `404` if not found.
 
-**Response:**
-```json
-{
-  "message": "Blob deleted successfully"
-}
-```
+### `DELETE /api/blobs/{id}`
 
-**Example (curl):**
-```bash
-curl -X DELETE http://localhost:8000/api/blob/uuid-filename.ext
-```
+**`200 OK`** — `{ "success": true }`
 
-### 4. List Blobs
-**GET** `/api/blobs?limit=50&offset=0`
+> **This is a soft delete.** The row is not removed:
+>
+> ```sql
+> UPDATE nonce_blobs SET is_consumed = TRUE WHERE id = $1
+> ```
+>
+> Consumed blobs are excluded from list results, but every historical blob is retained indefinitely. Plan a retention policy if you operate a deployment.
 
-List all blobs with metadata (paginated).
+### `POST /webhook/create`
 
-**Query Parameters:**
-- `limit`: Maximum number of results (default: 50)
-- `offset`: Number of results to skip (default: 0)
-
-**Response:**
-```json
-[
-  {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "key": "uuid-filename.ext",
-    "content_type": "text/plain",
-    "size": 1024,
-    "created_at": "2024-01-01T00:00:00Z",
-    "updated_at": "2024-01-01T00:00:00Z"
-  }
-]
-```
-
-**Example (curl):**
-```bash
-curl -X GET "http://localhost:8000/api/blobs?limit=10&offset=0"
-```
-
-### 5. WebSocket Connection
-**GET** `/ws` (WebSocket upgrade)
-
-Establish a WebSocket connection for real-time updates. Messages are sent as UTF-8 encoded bytes.
-
-**Messages Received:**
-```json
-{
-  "type": "transaction",
-  "data": { ... },
-  "timestamp": "2024-01-01T00:00:00Z"
-}
-```
-
-or
+Creates a Helius webhook. Note these fields are **snake_case**, unlike the blob endpoints.
 
 ```json
 {
-  "type": "status",
-  "clients_count": 5,
-  "timestamp": "2024-01-01T00:00:00Z"
+  "webhook_url": "https://your-domain.com/webhook/helius",
+  "transaction_types": ["TRANSFER"],
+  "account_addresses": ["BurnerAddress1..."],
+  "webhook_type": "enhanced",
+  "encoding": "jsonParsed",
+  "txn_status": "all"
 }
 ```
 
-**Example (JavaScript):**
-```javascript
-const ws = new WebSocket('ws://localhost:8000/ws');
+**`200 OK`** — `{ "message": "Webhook created: Some(\"<id>\")" }`
 
-ws.onmessage = (event) => {
-  const message = JSON.parse(event.data);
-  console.log('Received:', message);
-};
+### `POST` / `DELETE /webhook/address`
 
-ws.onopen = () => {
-  console.log('Connected to WebSocket');
-};
-```
+Add or remove addresses on an existing webhook.
 
-### 6. Helius Webhook
-**POST** `/webhook/helius`
-
-Receive Solana transaction notifications from Helius.
-
-**Request:**
 ```json
-{
-  // Helius webhook payload
-  // Will be broadcast to all WebSocket clients
-}
+{ "webhook_id": "...", "addresses": ["Address1...", "Address2..."] }
 ```
 
-**Response:**
-```json
-{
-  "message": "Webhook received and broadcast"
-}
-```
+### `GET /health`
 
-### 7. Health Check
-**GET** `/health`
+Returns the plain-text body `OK`.
 
-Check if the server is running.
+## What is *not* here
 
-**Response:**
-```
-OK
-```
+Two things exist in the source but are **disabled**, and the frontend does not use either:
+
+- **The WebSocket module.** `mod websocket;` is commented out in `main.rs`, along with its state and router merge. The frontend's `WebSocketClient` connects directly to Helius over WSS and uses Solana's standard `accountSubscribe` — no server-side registration needed, and the backend never learns which addresses a user is watching.
+- **The `/webhook/helius` receiver.** `helius_webhook_handler` in `webhook.rs` and its route are commented out. It was the counterpart to the WebSocket fan-out design that direct subscription replaced.
+
+The webhook *management* endpoints above do work, but nothing currently calls them.
 
 ## Setup
 
 ### Prerequisites
 
-- Rust 1.70+
+- Rust 1.75+
 - PostgreSQL 14+
-- Shuttle CLI (for deployment) or Docker
 
-### Installation
+### 1. Start PostgreSQL
 
-1. Clone the repository:
-```bash
-git clone <repo-url>
-cd shredr-backend
-```
-
-2. Set up PostgreSQL:
-
-**Option A: Using Docker**
 ```bash
 docker run --name shredr-postgres \
   -e POSTGRES_PASSWORD=password \
@@ -237,171 +161,190 @@ docker run --name shredr-postgres \
   -d postgres:14
 ```
 
-**Option B: Local PostgreSQL**
+Or locally: `createdb shredr_db`
+
+### 2. Configure
+
 ```bash
-createdb shredr_db
+cp .env.example .env
 ```
 
-3. Configure Shuttle Secrets:
-```bash
-cp Secrets.toml.example Secrets.toml
+The connection string is assembled from four separate variables:
+
+```
+postgres://{PGUSER}:{PGPASSWORD}@{PGHOST}/{PGDATABASE}?sslmode=require
 ```
 
-Edit `Secrets.toml`:
-```toml
-DATABASE_URL = "postgres://username:password@localhost:5432/shredr_db"
-```
+> `PGHOST` must include the port if it is not 5432, and `sslmode=require` is **always** appended — a plain local Postgres without TLS will refuse the connection. Either enable SSL or adjust `build_database_url()` in `src/main.rs`.
+>
+> The startup panic messages name the old variable names (`DATABASE_HOST is required`, etc.). If you see one, set the corresponding `PG*` variable.
 
-4. Build and run:
+### 3. Run
 
-**With Shuttle (recommended):**
-```bash
-cargo shuttle run
-```
-
-**Without Shuttle (local development):**
 ```bash
 cargo run
 ```
 
-The database schema will be automatically created on first run.
-
-## Development
-
-### Project Structure
-
-```
-src/
-├── main.rs          # Application entry point and router setup
-├── db.rs            # Database handler for PostgreSQL operations
-├── routes.rs        # HTTP endpoint handlers
-├── websocket.rs     # WebSocket connection handling (UTF-8 bytes)
-└── webhook.rs       # Helius webhook handler
-```
-
-### Database Schema
-
-```sql
-CREATE TABLE blobs (
-    id UUID PRIMARY KEY,
-    key VARCHAR(255) UNIQUE NOT NULL,
-    data BYTEA NOT NULL,  -- Encrypted JSON blob
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
-
-**Note:** All blobs are encrypted JSON from the frontend. No content-type tracking needed.
-
-### Running Tests
+Listens on `0.0.0.0:8000` (or `$PORT`). The schema is created automatically on first run.
 
 ```bash
-cargo test
-```
-
-### Code Formatting
-
-```bash
-cargo fmt
-```
-
-### Linting
-
-```bash
-cargo clippy
+curl http://localhost:8000/health   # → OK
 ```
 
 ## Configuration
 
-### Environment Variables
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `PGHOST` | **Yes** | — | Host, with port if non-default |
+| `PGUSER` | **Yes** | — | Database user |
+| `PGPASSWORD` | **Yes** | — | Database password |
+| `PGDATABASE` | **Yes** | — | Database name |
+| `HELIUS_API_KEY` | **Yes** | — | Helius client — panics without it |
+| `ENVIRONMENT` | No | *(treated as `development`)* | `development` enables permissive CORS |
+| `PORT` | No | `8000` | Listen port |
+| `RUST_LOG` | No | — | Tracing filter |
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | Required |
-| `RUST_LOG` | Logging level | `shredr_backend=debug` |
+Every startup failure is a panic — the service either starts fully working or not at all.
 
-## Helius Webhook Setup
+### CORS
 
-1. Go to your Helius dashboard
-2. Create a new webhook
-3. Set the webhook URL to: `https://your-domain.com/webhook/helius`
-4. Configure the transaction types you want to monitor
-5. Save the webhook
-
-When transactions matching your criteria occur on Solana, Helius will POST to your webhook endpoint, and the data will be automatically broadcast to all connected WebSocket clients.
-
-## WebSocket Message Types
-
-### Transaction Message
-Sent when a Solana transaction is received from Helius:
-```json
-{
-  "type": "transaction",
-  "data": {
-    // Helius transaction data
-  },
-  "timestamp": "2024-01-01T00:00:00Z"
-}
+```rust
+let is_development = std::env::var("ENVIRONMENT")
+    .map(|e| e == "development")
+    .unwrap_or(true);      // ← defaults to development
 ```
 
-### Status Message
-Periodic status updates:
-```json
-{
-  "type": "status",
-  "clients_count": 3,
-  "timestamp": "2024-01-01T00:00:00Z"
-}
+| Mode | Behaviour |
+|---|---|
+| Development (default) | `allow_origin(Any)` |
+| Production | Only `https://shredr.fun` and `https://www.shredr.fun` |
+
+> **Forgetting to set `ENVIRONMENT` in production leaves CORS open to any origin.** Set it explicitly. If you deploy under a different domain, edit the allowlist in `main.rs` — it is hardcoded.
+
+### Rate limiting
+
+Three `tower_governor` tiers, keyed by client IP:
+
+| Tier | Endpoints | Limit |
+|---|---|---|
+| Blob writes | `POST /api/blobs`, `DELETE /api/blobs/{id}` | Burst 5, refill every 10s |
+| Blob reads | `GET /api/blobs`, `GET /api/blobs/{id}` | 30/sec, burst 60 |
+| Webhooks | `/webhook/*` | Burst 5, refill every 12s |
+
+`ForwardedIpKeyExtractor` reads the IP from `X-Forwarded-For` (last entry) → `X-Real-IP` → socket peer address.
+
+> Without a proxy that **overwrites** `X-Forwarded-For`, a client can spoof it to evade rate limiting. Verify your ingress does this.
+
+Exceeding a limit returns `429`.
+
+## Database
+
+One table, created on startup by `DbHandler::init_schema()`:
+
+```sql
+CREATE TABLE IF NOT EXISTS nonce_blobs (
+    id             UUID PRIMARY KEY,
+    encrypted_blob TEXT NOT NULL,
+    created_at     BIGINT NOT NULL,
+    is_consumed    BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_nonce_blobs_created_at ON nonce_blobs(created_at);
 ```
 
-## Error Handling
+There is also an idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS is_consumed` for databases predating that column; its result is deliberately ignored.
 
-All endpoints return appropriate HTTP status codes:
+Connection pool: max 10 connections, 30-second acquire timeout.
 
-- `200 OK`: Success
-- `400 Bad Request`: Invalid request (e.g., no file provided)
-- `404 Not Found`: Blob not found
-- `500 Internal Server Error`: Server-side error (e.g., database failure)
+Note what is **absent**: no wallet address, no user ID, no session, no auth token. That is deliberate — the operator cannot read blob contents, identify whose blob is whose, or group blobs by user.
 
-Error responses include a JSON body:
-```json
-{
-  "error": "Error description"
-}
+## Project structure
+
+```
+src/
+├── main.rs                  # Entry point, router, middleware, IP extractor
+├── error.rs                 # AppError → HTTP responses
+├── db/
+│   ├── db.rs                # DbHandler, NonceBlob, CreateBlobRequest
+│   ├── db_routes.rs         # Blob handlers and routers
+│   └── mod.rs
+├── webhook/
+│   ├── webhook.rs           # Helius webhook management
+│   ├── webhook_routes.rs
+│   └── mod.rs
+└── websocket/               # PRESENT BUT DISABLED (commented out in main.rs)
+    ├── websocket.rs
+    ├── websocket_routes.rs
+    └── mod.rs
 ```
 
-## Database Operations
+## Errors
 
-### Upload Blob
-- Stores encrypted blob data as BYTEA in PostgreSQL
-- Automatically handles duplicates (upsert)
-- All blobs are encrypted JSON from frontend
-- Tracks timestamps only
+Blob endpoints return a structured body:
 
-### Get Blob
-- Retrieves raw encrypted blob data
-- Returns as application/octet-stream
+```json
+{ "error": "Blob not found" }
+```
 
-### Delete Blob
-- Removes blob from database
-- Returns error if blob not found
+| `AppError` | Status | Message |
+|---|---|---|
+| `Database` | 500 | `Internal database error` (details logged, not exposed) |
+| `InvalidUuid` | 400 | `Invalid UUID: <detail>` |
+| `NotFound` | 404 | `Blob not found` |
+| `BlobTooLarge` | 400 | `Blob too large: N bytes (max M bytes)` |
+| `Internal` | 500 | The supplied message |
 
-### List Blobs
-- Returns metadata only (not blob data)
-- Supports pagination
-- Includes file size and timestamps
+Database errors are deliberately opaque to clients so query details never leak. Webhook endpoints return `{ "message": "..." }` instead, including on failure.
 
-## Performance Considerations
+## Development
 
-- **Connection Pooling**: Uses SQLx connection pool for efficient database access
-- **Async I/O**: Non-blocking operations throughout
-- **Binary Storage**: Efficient BYTEA storage in PostgreSQL
-- **Indexed Queries**: Key and timestamp indexes for fast lookups
+```bash
+cargo test      # blob size validation (uses a lazy pool — no live DB needed)
+cargo fmt
+cargo clippy
+```
+
+Test coverage is currently limited to blob size validation. Query correctness is not covered.
+
+## Docker
+
+```bash
+docker build -t shredr-backend .
+
+docker run -p 8000:8000 \
+  -e PGHOST=host.docker.internal:5432 \
+  -e PGUSER=postgres \
+  -e PGPASSWORD=password \
+  -e PGDATABASE=shredr_db \
+  -e HELIUS_API_KEY=your_key \
+  -e ENVIRONMENT=production \
+  shredr-backend
+```
+
+`PORT` is read from the environment, which suits platforms that assign one (Koyeb, Fly, Railway, Render).
+
+## Production checklist
+
+- [ ] Set `ENVIRONMENT` to something other than `development`
+- [ ] Update the CORS allowlist in `main.rs` if your domain differs
+- [ ] Set all four `PG*` variables and `HELIUS_API_KEY`
+- [ ] Ensure PostgreSQL accepts TLS (`sslmode=require` is not optional)
+- [ ] Verify your proxy overwrites `X-Forwarded-For`
+- [ ] Serve over HTTPS
+- [ ] Set `RUST_LOG` quieter than `debug`
+- [ ] Health checks on `GET /health`
+- [ ] A retention job for consumed blobs — rows are never deleted
+
+## Further reading
+
+Full documentation lives in [`docs/`](../docs/) at the repository root:
+
+- [Backend overview](../docs/backend/README.md)
+- [API reference](../docs/backend/api-reference.md)
+- [Database](../docs/backend/database.md)
+- [Helius webhooks](../docs/backend/webhooks.md)
+- [Configuration and deployment](../docs/backend/configuration.md)
 
 ## License
 
 MIT
-
-## Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request.

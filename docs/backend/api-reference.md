@@ -1,0 +1,259 @@
+---
+description: "Every endpoint the backend actually exposes, with request and response shapes."
+icon: plug
+---
+
+# API reference
+
+Base URL in development: `http://localhost:8000`
+
+{% hint style="danger" %}
+`shredr-backend/README.md` documents a **different, older API** — multipart uploads at `/api/blob/upload`, a `/ws` WebSocket, a `/webhook/helius` receiver. None of those exist in the current `main.rs`. This page reflects the code.
+{% endhint %}
+
+No authentication on any endpoint.
+
+## Blobs
+
+### Create a blob
+
+```
+POST /api/blobs
+Content-Type: application/json
+```
+
+```json
+{ "encryptedBlob": "base64-encoded-IV-plus-ciphertext" }
+```
+
+**`201 Created`**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "encryptedBlob": "base64...",
+  "createdAt": 1735689600000,
+  "isConsumed": false
+}
+```
+
+`createdAt` is Unix **milliseconds**. Field names are camelCase (`#[serde(rename_all = "camelCase")]`).
+
+**Errors**
+
+| Status | Cause |
+|---|---|
+| `400` | Blob larger than `MAX_BLOB_SIZE` (2048 bytes) — `Blob too large: N bytes (max 2048 bytes)` |
+| `500` | Database error |
+
+```bash
+curl -X POST http://localhost:8000/api/blobs \
+  -H "Content-Type: application/json" \
+  -d '{"encryptedBlob":"eyJub25jZSI6..."}'
+```
+
+{% hint style="info" %}
+The 2048-byte cap is anti-spam. Real blobs are around 200 bytes — a nonce, an index, and a wallet hash, encrypted.
+{% endhint %}
+
+### List blobs
+
+```
+GET /api/blobs?limit=100&cursor=1735689600000
+```
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `limit` | 100 | Clamped to 1–100 |
+| `cursor` | none | Keyset pagination on `created_at` |
+
+**`200 OK`** — an array, newest first:
+
+```json
+[
+  { "id": "...", "encryptedBlob": "...", "createdAt": 1735689600000, "isConsumed": false }
+]
+```
+
+Only **unconsumed** blobs are returned (`WHERE is_consumed = FALSE`).
+
+Pagination is keyset-based, not offset-based:
+
+```sql
+WHERE is_consumed = FALSE AND created_at < $1
+ORDER BY created_at DESC
+LIMIT $2
+```
+
+Pass the `createdAt` of the last item you received as the next `cursor`.
+
+```bash
+curl "http://localhost:8000/api/blobs?limit=50"
+```
+
+{% hint style="warning" %}
+**The frontend does not paginate.** `ApiClient.fetchAllBlobs()` requests a flat `limit=100` with no cursor.
+
+Since blobs carry no user identifier, recovery means downloading and trying to decrypt each one. With enough total users, a returning user's blob falls outside the newest 100 and **recovery silently fails** — the user is treated as new.
+
+→ [Limitations](../reference/limitations.md)
+{% endhint %}
+
+### Get one blob
+
+```
+GET /api/blobs/{id}
+```
+
+**`200 OK`** — the same object shape. Returns consumed blobs too.
+
+| Status | Cause |
+|---|---|
+| `400` | `id` is not a valid UUID |
+| `404` | Not found |
+
+Not used by the frontend; recovery goes through the list endpoint.
+
+### Delete a blob
+
+```
+DELETE /api/blobs/{id}
+```
+
+**`200 OK`**
+
+```json
+{ "success": true }
+```
+
+| Status | Cause |
+|---|---|
+| `400` | Invalid UUID |
+| `404` | Not found |
+
+{% hint style="warning" %}
+**This is a soft delete.** The row is not removed:
+
+```sql
+UPDATE nonce_blobs SET is_consumed = TRUE WHERE id = $1
+```
+
+Consumed blobs are excluded from list results, so recovery ignores them — but the operator retains every historical encrypted blob indefinitely. Worth knowing if you are reasoning about data retention.
+{% endhint %}
+
+## Webhooks
+
+Thin proxies over the `helius` crate, used to manage address monitoring. Not called by the frontend today.
+
+→ [Helius webhooks](webhooks.md)
+
+### Create a webhook
+
+```
+POST /webhook/create
+Content-Type: application/json
+```
+
+```json
+{
+  "webhook_url": "https://your-domain.com/webhook/helius",
+  "transaction_types": ["TRANSFER"],
+  "account_addresses": ["BurnerAddress1..."],
+  "webhook_type": "enhanced",
+  "encoding": "jsonParsed",
+  "txn_status": "all"
+}
+```
+
+Note these fields are **snake_case**, unlike the blob endpoints.
+
+**`200 OK`**
+
+```json
+{ "message": "Webhook created: Some(\"webhook-id-here\")" }
+```
+
+On failure it returns **`500`** with the error in the same `message` field — the webhook endpoints do not use the structured `AppError` shape.
+
+### Add addresses
+
+```
+POST /webhook/address
+```
+
+```json
+{ "webhook_id": "...", "addresses": ["Address1...", "Address2..."] }
+```
+
+**`200 OK`** — `{ "message": "Addresses added successfully" }`
+
+### Remove addresses
+
+```
+DELETE /webhook/address
+```
+
+Same body shape.
+
+**`200 OK`** — `{ "message": "Addresses removed successfully" }`
+
+## Health
+
+```
+GET /health
+```
+
+**`200 OK`** with the plain-text body `OK`.
+
+```bash
+curl http://localhost:8000/health
+```
+
+## Error format
+
+Blob endpoints return a structured error via `AppError`:
+
+```json
+{ "error": "Blob not found" }
+```
+
+| `AppError` | Status | Message |
+|---|---|---|
+| `Database` | 500 | `Internal database error` (details logged, not exposed) |
+| `InvalidUuid` | 400 | `Invalid UUID: <detail>` |
+| `NotFound` | 404 | `Blob not found` |
+| `BlobTooLarge` | 400 | `Blob too large: N bytes (max M bytes)` |
+| `Internal` | 500 | The supplied message |
+
+Database errors are deliberately opaque to the client — the real error goes to the logs, not the response.
+
+Webhook endpoints return `{ "message": "..." }` instead.
+
+## Rate limits
+
+Keyed by client IP (`X-Forwarded-For` last entry → `X-Real-IP` → socket peer):
+
+| Endpoints | Limit |
+|---|---|
+| `POST /api/blobs`, `DELETE /api/blobs/{id}` | Burst 5, refill every 10s |
+| `GET /api/blobs`, `GET /api/blobs/{id}` | 30/sec, burst 60 |
+| `/webhook/*` | Burst 5, refill every 12s |
+
+Exceeding a limit returns `429 Too Many Requests`.
+
+## Frontend usage
+
+`ApiClient` uses three of these:
+
+| Method | Call | Failure behaviour |
+|---|---|---|
+| `fetchAllBlobs()` | `GET /api/blobs?limit=100` | Returns `[]` — app continues offline |
+| `createBlob(data)` | `POST /api/blobs` | Throws |
+| `deleteBlob(id)` | `DELETE /api/blobs/{id}` | Returns `false` |
+
+→ [ApiClient and WebSocketClient](../frontend/api-and-websocket.md)
+
+## Next
+
+* [Database](database.md)
+* [Configuration and deployment](configuration.md)

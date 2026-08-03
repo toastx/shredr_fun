@@ -67,6 +67,18 @@ export const HELIUS_WSS_URL = "wss://devnet.helius-rpc.com/?api-key=1ab08206-1c3
 /** API Base URL */
 export const API_BASE_URL = "http://localhost:8000";
 
+// ============ DOCUMENTATION ============
+
+/**
+ * Public documentation URL, linked from the navbar.
+ *
+ * The docs live in `docs/` as a GitBook Git-Sync repo. Until that site is
+ * published, this points at the rendered markdown on GitHub — swap it for the
+ * GitBook hostname once the site is live.
+ */
+export const DOCS_URL =
+  "https://github.com/toastx/shredr_fun/tree/main/docs";
+
 /** Transaction fee buffer for sweep operations (covering deposit + transfer) */
 export const SWEEP_FEE_BUFFER_LAMPORTS = 25000;
 

@@ -1,5 +1,6 @@
 import { Link, useLocation } from 'react-router-dom';
 import { WalletButton } from '../WalletButton';
+import { DOCS_URL } from '../../lib/constants';
 import './Navbar.css';
 
 interface NavbarProps {
@@ -33,7 +34,13 @@ function Navbar({ brandName = "ProxyAddress" }: NavbarProps) {
                         </Link>
                     </li>
                     <li>
-                        <a href="#docs">Docs</a>
+                        <a
+                            href={DOCS_URL}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+                            Docs
+                        </a>
                     </li>
                 </ul>
             </div>

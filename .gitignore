@@ -15,7 +15,7 @@ dist-ssr
 .vite
 
 # Editor directories and files
-.vscode/*    
+.vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
@@ -42,3 +42,5 @@ shredr-backend/.env
 
 keypairs
 target
+
+dev.md
