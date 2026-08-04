@@ -72,12 +72,9 @@ export const API_BASE_URL = "http://localhost:8000";
 /**
  * Public documentation URL, linked from the navbar.
  *
- * The docs live in `docs/` as a GitBook Git-Sync repo. Until that site is
- * published, this points at the rendered markdown on GitHub — swap it for the
- * GitBook hostname once the site is live.
+ * Published GitBook site, synced from the `docs/` directory in this repo.
  */
-export const DOCS_URL =
-  "https://github.com/toastx/shredr_fun/tree/main/docs";
+export const DOCS_URL = "https://toastx.gitbook.io/shredr";
 
 /** Transaction fee buffer for sweep operations (covering deposit + transfer) */
 export const SWEEP_FEE_BUFFER_LAMPORTS = 25000;
