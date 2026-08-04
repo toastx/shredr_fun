@@ -9,6 +9,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 
 # Install dependencies
+RUN apk add --no-cache python3 make g++
 RUN npm ci
 
 # Copy source code and configuration files
