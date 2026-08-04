@@ -60,6 +60,5 @@
 ## Reference
 
 * [Security model](reference/security-model.md)
-* [Limitations and known gaps](reference/limitations.md)
 * [Troubleshooting](reference/troubleshooting.md)
 * [FAQ](reference/faq.md)
