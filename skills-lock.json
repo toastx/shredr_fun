@@ -1,11 +1,47 @@
 {
   "version": 1,
   "skills": {
+    "build-integration": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/build-integration/SKILL.md",
+      "computedHash": "1163fe6cad37d35a5af3733d6215161db2ede91e5d9916b7a81ab9ba7b4ae165"
+    },
+    "configure-site": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/configure-site/SKILL.md",
+      "computedHash": "b5db637a4765652f0cd02e0d0389b99ffa8e47d61606e4c45f86218ce506fd5c"
+    },
+    "cr-create": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/cr-create/SKILL.md",
+      "computedHash": "fdcc20832c0fb050881b0629963c2e27dda89a27d04efc4b8aab813501881545"
+    },
+    "cr-review": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/cr-review/SKILL.md",
+      "computedHash": "8ea89a48bc7d5ee3b8430a47ad0fbcf6b0f1e8ccc72609da2a2fdeaab0d0a61f"
+    },
     "magicblock": {
       "source": "magicblock-labs/magicblock-dev-skill",
       "sourceType": "github",
       "skillPath": "skill/SKILL.md",
       "computedHash": "2c9d989f4c7fa762f3f6ec2179af4585d2d3d81734df3c42bf2a026d039bc36c"
+    },
+    "write-docs": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/write-docs/SKILL.md",
+      "computedHash": "ed696d33f8417054a32cab7d1f5fcc6ff475ed25c48466df10c789e4830d8f8c"
+    },
+    "write-openapi": {
+      "source": "GitbookIO/gitbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/write-openapi/SKILL.md",
+      "computedHash": "76584c99669810d391897964a55fe4f8d958a15d4eb4c85b6dc56c2c531d3e50"
     }
   }
 }

@@ -67,6 +67,15 @@ export const HELIUS_WSS_URL = "wss://devnet.helius-rpc.com/?api-key=1ab08206-1c3
 /** API Base URL */
 export const API_BASE_URL = "http://localhost:8000";
 
+// ============ DOCUMENTATION ============
+
+/**
+ * Public documentation URL, linked from the navbar.
+ *
+ * Published GitBook site, synced from the `docs/` directory in this repo.
+ */
+export const DOCS_URL = "https://toastx.gitbook.io/shredr";
+
 /** Transaction fee buffer for sweep operations (covering deposit + transfer) */
 export const SWEEP_FEE_BUFFER_LAMPORTS = 25000;
 
