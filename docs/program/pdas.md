@@ -91,7 +91,7 @@ const {
 
 | PDA | Seeds | **Owning program** |
 |---|---|---|
-| Permission | `["permission", stealthPda]` | `EPHpaA1tt7nJpEgAjRwkPx5tWHiV6cfKZjPPDDZxFKa9` |
+| Permission | `["permission:", stealthPda]` | `ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1` |
 | Buffer | `["buffer", stealthPda]` | **`H9pUQeNA...` (shredr)** |
 | Delegation record | `["delegation", stealthPda]` | `DELeGGvX...` (delegation) |
 | Delegation metadata | `["delegation-metadata", stealthPda]` | `DELeGGvX...` (delegation) |
@@ -108,7 +108,7 @@ Note the seeds use the **stealth PDA**, not the burner.
 const BUFFER_SEED              = Buffer.from("buffer");
 const DELEGATION_SEED          = Buffer.from("delegation");
 const DELEGATION_METADATA_SEED = Buffer.from("delegation-metadata");
-const PERMISSION_SEED          = Buffer.from("permission");
+const PERMISSION_SEED          = Buffer.from("permission:");
 ```
 
 ### What each is for
@@ -138,7 +138,7 @@ Wallet signature
       │
       ├──▶ nonce[N] ──▶ burner[N] ──▶ PDA(["shredr_stealth_address", burner[N]])
       │                                        │
-      │                                        ├──▶ PDA(["permission", pda])          @ permission program
+      │                                        ├──▶ PDA(["permission:", pda])          @ permission program
       │                                        ├──▶ PDA(["buffer", pda])              @ SHREDR program
       │                                        ├──▶ PDA(["delegation", pda])          @ delegation program
       │                                        └──▶ PDA(["delegation-metadata", pda]) @ delegation program

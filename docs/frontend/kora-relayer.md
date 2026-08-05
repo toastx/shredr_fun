@@ -113,10 +113,10 @@ Both propagate to the caller. There is no retry logic.
 
 ## Configuration
 
-| Setting | Default | Source |
+| Setting | Source | Notes |
 |---|---|---|
-| Endpoint | `http://localhost:8080` | `KORA_RELAYER_URL` in `constants.ts` |
-| Relayer pubkey | `shredrWUYk1famp42neAhaJb9PAB69WoSTDhMUdcbjS` | `VITE_KORA_RELAYER_PUBKEY` or the constant |
+| Endpoint | `VITE_KORA_RELAYER_URL` → `KORA_RELAYER_URL` in `constants.ts` | No hardcoded default |
+| Relayer pubkey | `VITE_KORA_RELAYER_PUBKEY` → `KORA_RELAYER_PUBKEY` | Falls back to Kora's `getConfig` when unset |
 
 ```typescript
 const custom = new KoraRelayer("https://relayer.example.com");

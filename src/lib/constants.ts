@@ -2,6 +2,37 @@
  * Shared constants for SHREDR cryptographic operations
  */
 
+// ============ ENVIRONMENT ============
+
+/**
+ * Reads a deployment-configured value from the environment.
+ *
+ * Vite inlines `import.meta.env.VITE_*` at build time; the `process.env`
+ * fallback covers non-Vite consumers (node scripts, tests). Missing values
+ * come back as `""` so callers fail loudly at the point of use rather than
+ * silently talking to a stale hardcoded default.
+ *
+ * See `.env.example` for the full list.
+ */
+function env(key: string): string {
+  const viteEnv =
+    typeof import.meta !== "undefined"
+      ? (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
+      : undefined;
+
+  const nodeEnv = (globalThis as typeof globalThis & {
+    process?: { env?: Record<string, string | undefined> };
+  }).process?.env;
+
+  const value = viteEnv?.[key] ?? nodeEnv?.[key] ?? "";
+
+  if (!value && viteEnv?.DEV) {
+    console.warn(`[shredr] missing environment variable ${key} — see .env.example`);
+  }
+
+  return value;
+}
+
 // ============ CRYPTO CONSTANTS ============
 
 /** AES-GCM encryption algorithm */
@@ -59,13 +90,12 @@ export const SALT_LENGTH = 16;
 /** PBKDF2 iteration count */
 export const PBKDF2_ITERATIONS = 100000;
 
-/** HELIUS RPC URL */
-export const HELIUS_RPC_URL =
-  "https://devnet.helius-rpc.com/?api-key=1ab08206-1c39-410d-b578-58445eed25ed";
-/** HELIUS WSS URL */
-export const HELIUS_WSS_URL = "wss://devnet.helius-rpc.com/?api-key=1ab08206-1c39-410d-b578-58445eed25ed";
-/** API Base URL */
-export const API_BASE_URL = "http://localhost:8000";
+/** HELIUS RPC URL (env: VITE_HELIUS_RPC_URL) */
+export const HELIUS_RPC_URL = env("VITE_HELIUS_RPC_URL");
+/** HELIUS WSS URL (env: VITE_HELIUS_WSS_URL) */
+export const HELIUS_WSS_URL = env("VITE_HELIUS_WSS_URL");
+/** API Base URL (env: VITE_API_BASE_URL) */
+export const API_BASE_URL = env("VITE_API_BASE_URL");
 
 // ============ DOCUMENTATION ============
 
@@ -89,34 +119,46 @@ export const SWEEP_THRESHOLD_LAMPORTS = 0.1 * 1e9; // 100,000,000 lamports
  * Kora signs transactions as the fee payer (and as the on-chain `relayer` account
  * for InitializeAndDelegate / CommitAndUndelegate instructions).
  *
- * Override at deploy time as needed.
+ * env: VITE_KORA_RELAYER_URL
  */
-export const KORA_RELAYER_URL = "http://localhost:8080";
+export const KORA_RELAYER_URL = env("VITE_KORA_RELAYER_URL");
 
 /** Kora's relayer pubkey (the fee payer account that Kora signs as).
- *  Set this to the actual Kora-managed pubkey at deploy time, or provide it
- *  through VITE_KORA_RELAYER_PUBKEY / KORA_RELAYER_PUBKEY. If omitted,
- *  the client will try to fetch it from the Kora service via getConfig.
+ *  env: VITE_KORA_RELAYER_PUBKEY. If unset, the client falls back to the other
+ *  sources in `getEnvironmentRelayerPubkey()` and finally fetches it from the
+ *  Kora service via getConfig.
  */
-export const KORA_RELAYER_PUBKEY = "shredrWUYk1famp42neAhaJb9PAB69WoSTDhMUdcbjS";
+export const KORA_RELAYER_PUBKEY = env("VITE_KORA_RELAYER_PUBKEY");
 
 // ============ MAGICBLOCK ROLLUP ============
 
 /** MagicBlock ephemeral rollup RPC URL.
  *  Used to send PrivateTransfer instructions inside the rollup
  *  (as opposed to the base layer Solana RPC).
+ *
+ *  env: VITE_MAGICBLOCK_RPC_URL / VITE_MAGICBLOCK_WSS_URL
  */
-export const MAGICBLOCK_RPC_URL = "https://devnet.magicblock.app";
-export const MAGICBLOCK_WSS_URL = "wss://devnet.magicblock.app";
+export const MAGICBLOCK_RPC_URL = env("VITE_MAGICBLOCK_RPC_URL");
+export const MAGICBLOCK_WSS_URL = env("VITE_MAGICBLOCK_WSS_URL");
 
-/** MagicBlock delegation program ID (base layer). */
-export const MAGIC_BLOCK_PROGRAM_ID = "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS";
+/** MagicBlock delegation program ID (base layer).
+ *  Matches `DELEGATION_PROGRAM_ID` in ephemeral-rollups-pinocchio. */
+export const MAGIC_BLOCK_PROGRAM_ID = "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh";
+
+/** MagicBlock magic program ID — the rollup-side program that handles
+ *  ScheduleCommit / ScheduleCommitAndUndelegate. This is the CPI target for
+ *  CommitStealth and CommitAndUndelegateStealth, *not* the delegation program.
+ *  Matches `MAGIC_PROGRAM_ID` in ephemeral-rollups-pinocchio. */
+export const MAGIC_PROGRAM_ID = "Magic11111111111111111111111111111111111111";
 
 /** MagicBlock context account (singleton, static). */
 export const MAGIC_CONTEXT = "MagicContext1111111111111111111111111111111";
 
-/** ACL Permission program ID (used by InitializeAndDelegate). */
-export const PERMISSION_PROGRAM_ID = "EPHpaA1tt7nJpEgAjRwkPx5tWHiV6cfKZjPPDDZxFKa9";
+/** ACL Permission program ID (used by InitializeAndDelegate).
+ *  Matches `acl::consts::PERMISSION_PROGRAM_ID` in ephemeral-rollups-pinocchio,
+ *  which is what the program CPIs into — the client must derive the permission
+ *  PDA under this same address. */
+export const PERMISSION_PROGRAM_ID = "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1";
 
 // ============ SHREDR DENOMINATIONS ============
 

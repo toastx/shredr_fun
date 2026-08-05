@@ -48,7 +48,7 @@ That last property is what makes the rollup a *privacy* tool rather than just a 
 
 ## Delegation
 
-Handing an account to the rollup is called **delegation**. `InitializeAndDelegate` does it via CPI to the MagicBlock delegation program (`DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS`).
+Handing an account to the rollup is called **delegation**. `InitializeAndDelegate` does it via CPI to the MagicBlock delegation program (`DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh`).
 
 Once delegated:
 
@@ -76,7 +76,7 @@ Delegation creates several accounts, all derived deterministically:
 | Delegation record | `["delegation", stealth_pda]` | Delegation program | Tracks that the account is delegated and to whom |
 | Delegation metadata | `["delegation-metadata", stealth_pda]` | Delegation program | Delegation configuration |
 | Delegation buffer | `["buffer", stealth_pda]` | **shredr program** | Stages state during settlement |
-| Permission account | `["permission", stealth_pda]` | Permission program (`EPHpaA1...`) | ACL — who may act on the account in the rollup |
+| Permission account | `["permission:", stealth_pda]` | Permission program (`ACLseo...`) | ACL — who may act on the account in the rollup |
 
 The buffer being owned by the *delegated account's owner program* rather than the delegation program is easy to get wrong; `deriveDelegationPDAs()` in `src/lib/ShredrProgram.ts` handles all four.
 
@@ -221,9 +221,9 @@ That second point has a real consequence: **withdraw fully before shredding agai
 |---|---|
 | Rollup RPC (devnet) | `https://devnet.magicblock.app` |
 | Rollup WSS (devnet) | `wss://devnet.magicblock.app` |
-| Delegation program | `DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS` |
+| Delegation program | `DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh` |
 | Magic context (singleton) | `MagicContext1111111111111111111111111111111` |
-| Permission program | `EPHpaA1tt7nJpEgAjRwkPx5tWHiV6cfKZjPPDDZxFKa9` |
+| Permission program | `ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1` |
 | TEE validator (mainnet) | `MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo` |
 
 Defined in `src/lib/constants.ts` (source of truth) and mirrored in `shredr-program/src/constants.rs`.

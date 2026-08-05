@@ -9,30 +9,34 @@ All frontend configuration lives in `src/lib/constants.ts`. This page documents 
 
 ## The environment variable situation
 
-{% hint style="danger" %}
-**`.env.example` is aspirational.** Of the seven `VITE_*` variables it lists, only **one** is read at runtime:
+All seven network endpoints are read from the environment. `constants.ts` holds
+no hardcoded URLs or keys for them:
 
-| Variable | Actually read? |
+| Variable | Constant |
 |---|---|
-| `VITE_KORA_RELAYER_PUBKEY` | ✅ Yes, via `getEnvironmentRelayerPubkey()` in `KoraRelayer.ts` |
-| `VITE_KORA_RELAYER_URL` | ❌ No — `KORA_RELAYER_URL` is hardcoded |
-| `VITE_HELIUS_RPC_URL` | ❌ No — hardcoded, **including an API key** |
-| `VITE_HELIUS_WSS_URL` | ❌ No — hardcoded, including the same key |
-| `VITE_MAGICBLOCK_RPC_URL` | ❌ No — hardcoded |
-| `VITE_MAGICBLOCK_WSS_URL` | ❌ No — hardcoded, and unused entirely |
-| `VITE_API_BASE_URL` | ❌ No — hardcoded |
+| `VITE_KORA_RELAYER_URL` | `KORA_RELAYER_URL` |
+| `VITE_KORA_RELAYER_PUBKEY` | `KORA_RELAYER_PUBKEY` — also read directly by `getEnvironmentRelayerPubkey()` in `KoraRelayer.ts` |
+| `VITE_HELIUS_RPC_URL` | `HELIUS_RPC_URL` |
+| `VITE_HELIUS_WSS_URL` | `HELIUS_WSS_URL` |
+| `VITE_MAGICBLOCK_RPC_URL` | `MAGICBLOCK_RPC_URL` |
+| `VITE_MAGICBLOCK_WSS_URL` | `MAGICBLOCK_WSS_URL` — **declared, unused** |
+| `VITE_API_BASE_URL` | `API_BASE_URL` |
 
-To change any of them today, **edit `src/lib/constants.ts`**. Setting the environment variable has no effect.
+Reading goes through the local `env()` helper in `constants.ts`: `import.meta.env`
+first, then `process.env` for non-Vite consumers (node scripts, tests).
+
+{% hint style="warning" %}
+**There are no fallbacks.** An unset variable resolves to `""` — the dependent
+feature then fails at the point of use, with a `console.warn` in dev builds.
+
+Vite inlines `VITE_*` at **build** time, so container and CI builds need these
+present in the *build* environment. `.env` is gitignored and the `Dockerfile`
+does not copy it; pass the values via build args or a mounted env file, or the
+image ships with empty endpoints.
 {% endhint %}
 
-There is also a **committed Helius API key** in `constants.ts`. It ships in the client bundle, so it is public by construction — but it should be rotated and moved behind `import.meta.env` before any real deployment.
-
-Wiring the rest up is a small change:
-
-```typescript
-export const HELIUS_RPC_URL =
-  import.meta.env.VITE_HELIUS_RPC_URL ?? "https://devnet.helius-rpc.com/?api-key=...";
-```
+The Helius API key ships in the client bundle either way, so it is public by
+construction — use a key scoped and rate-limited accordingly.
 
 ## Crypto
 
@@ -83,23 +87,27 @@ If you fork shredr for your own deployment, change `MASTER_MESSAGE` **before** a
 
 ## Network endpoints
 
-| Constant | Value |
-|---|---|
-| `HELIUS_RPC_URL` | `https://devnet.helius-rpc.com/?api-key=<committed key>` |
-| `HELIUS_WSS_URL` | `wss://devnet.helius-rpc.com/?api-key=<committed key>` |
-| `API_BASE_URL` | `http://localhost:8000` |
-| `KORA_RELAYER_URL` | `http://localhost:8080` |
-| `MAGICBLOCK_RPC_URL` | `https://devnet.magicblock.app` |
-| `MAGICBLOCK_WSS_URL` | `wss://devnet.magicblock.app` — **declared, unused** |
+All of these come from the environment (see above); the values below are the
+devnet defaults documented in `.env.example`.
+
+| Constant | Env var | Example value |
+|---|---|---|
+| `HELIUS_RPC_URL` | `VITE_HELIUS_RPC_URL` | `https://devnet.helius-rpc.com/?api-key=<key>` |
+| `HELIUS_WSS_URL` | `VITE_HELIUS_WSS_URL` | `wss://devnet.helius-rpc.com/?api-key=<key>` |
+| `API_BASE_URL` | `VITE_API_BASE_URL` | `http://localhost:8000` |
+| `KORA_RELAYER_URL` | `VITE_KORA_RELAYER_URL` | `http://localhost:8080` |
+| `MAGICBLOCK_RPC_URL` | `VITE_MAGICBLOCK_RPC_URL` | `https://devnet.magicblock.app` |
+| `MAGICBLOCK_WSS_URL` | `VITE_MAGICBLOCK_WSS_URL` | `wss://devnet.magicblock.app` — **declared, unused** |
 
 ## Program IDs
 
 | Constant | Value |
 |---|---|
-| `KORA_RELAYER_PUBKEY` | `shredrWUYk1famp42neAhaJb9PAB69WoSTDhMUdcbjS` |
-| `MAGIC_BLOCK_PROGRAM_ID` | `DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS` |
+| `KORA_RELAYER_PUBKEY` | from `VITE_KORA_RELAYER_PUBKEY`, e.g. `shredrWUYk1famp42neAhaJb9PAB69WoSTDhMUdcbjS` |
+| `MAGIC_BLOCK_PROGRAM_ID` | `DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh` — base-layer delegation program |
+| `MAGIC_PROGRAM_ID` | `Magic11111111111111111111111111111111111111` — rollup-side program, CPI target of the commit instructions |
 | `MAGIC_CONTEXT` | `MagicContext1111111111111111111111111111111` |
-| `PERMISSION_PROGRAM_ID` | `EPHpaA1tt7nJpEgAjRwkPx5tWHiV6cfKZjPPDDZxFKa9` |
+| `PERMISSION_PROGRAM_ID` | `ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1` |
 
 The shredr program ID itself comes from the generated client (`SHREDR_PROGRAM_PROGRAM_ADDRESS`), not from `constants.ts`.
 

@@ -45,7 +45,7 @@ npm run preview          # serve the production build locally
 
 ### Configuration
 
-`.env.example` lists the intended variables:
+Copy `.env.example` to `.env` and fill it in — every value below is read at runtime:
 
 ```bash
 VITE_KORA_RELAYER_URL=http://localhost:8080
@@ -58,9 +58,9 @@ VITE_API_BASE_URL=http://localhost:8000
 ```
 
 {% hint style="warning" %}
-**Only `VITE_KORA_RELAYER_PUBKEY` is actually read at runtime today.** Every other value in that list is currently hardcoded in `src/lib/constants.ts`, including a committed Helius API key. To change an RPC endpoint or the backend URL, edit `constants.ts` — setting the environment variable alone will not take effect.
+**There are no hardcoded fallbacks.** `src/lib/constants.ts` reads each of these from `import.meta.env`; an unset variable becomes `""` and the dependent feature fails (with a `console.warn` in dev). Vite inlines them at build time, so `npm run build` and container builds need them present in the build environment — `.env` is gitignored and the `Dockerfile` does not copy it.
 
-See [Constants and configuration](../frontend/configuration.md) for the full picture and what wiring the rest would involve.
+See [Constants and configuration](../frontend/configuration.md) for the full picture.
 {% endhint %}
 
 ## On-chain program

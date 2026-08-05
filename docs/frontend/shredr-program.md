@@ -22,9 +22,9 @@ import {
 ```typescript
 SHREDR_PROGRAM_ID      // H9pUQeNA2RwBHRwx52V8nqWpCAKReSA3gGUuRFHbEjG6
 STEALTH_ACCOUNT_LEN    // 96 = 8-byte discriminator + StealthAccount
-MAGIC_BLOCK_PROGRAM_ID // DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS
+MAGIC_BLOCK_PROGRAM_ID // DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh
 MAGIC_CONTEXT          // MagicContext1111111111111111111111111111111
-PERMISSION_PROGRAM_ID  // EPHpaA1tt7nJpEgAjRwkPx5tWHiV6cfKZjPPDDZxFKa9
+PERMISSION_PROGRAM_ID  // ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1
 
 SEEDS = {
   STEALTH_ADDRESS: Buffer.from("shredr_stealth_address"),
@@ -65,7 +65,7 @@ const {
 
 | PDA | Seeds | Owning program |
 |---|---|---|
-| `permissionAccount` | `["permission", stealthPda]` | Permission program |
+| `permissionAccount` | `["permission:", stealthPda]` | Permission program |
 | `delegationBuffer` | `["buffer", stealthPda]` | **shredr program** |
 | `delegationRecord` | `["delegation", stealthPda]` | Delegation program |
 | `delegationMetadata` | `["delegation-metadata", stealthPda]` | Delegation program |

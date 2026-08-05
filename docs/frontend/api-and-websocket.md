@@ -60,7 +60,7 @@ The backend supports keyset pagination via a `cursor` parameter (`created_at` ba
 const client = new ApiClient("https://api.example.com");
 ```
 
-Defaults to `API_BASE_URL` (`http://localhost:8000`), which is **hardcoded** in `constants.ts` — `VITE_API_BASE_URL` is not read.
+Defaults to `API_BASE_URL`, which `constants.ts` reads from `VITE_API_BASE_URL`. There is no hardcoded fallback — if the variable is unset at build time the client is constructed with an empty base URL and every request fails.
 
 → [Backend API reference](../backend/api-reference.md)
 

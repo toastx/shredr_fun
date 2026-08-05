@@ -122,10 +122,10 @@ A legacy (non-versioned) `Transaction` variant, using `partialSign` and `seriali
 
 ## Configuration
 
-| Setting | Default | Override |
+| Setting | Source | Notes |
 |---|---|---|
-| Endpoint | `http://localhost:8080` | `KORA_RELAYER_URL` in `src/lib/constants.ts` |
-| Relayer pubkey | `shredrWUYk1famp42neAhaJb9PAB69WoSTDhMUdcbjS` | `VITE_KORA_RELAYER_PUBKEY` / `KORA_RELAYER_PUBKEY`, or `globalThis.__KORA_RELAYER_PUBKEY__` |
+| Endpoint | `VITE_KORA_RELAYER_URL` → `KORA_RELAYER_URL` | No hardcoded default; e.g. `http://localhost:8080` locally |
+| Relayer pubkey | `VITE_KORA_RELAYER_PUBKEY` / `KORA_RELAYER_PUBKEY`, or `globalThis.__KORA_RELAYER_PUBKEY__` | Falls back to Kora's `getConfig` when unset |
 
 `getEnvironmentRelayerPubkey()` checks `import.meta.env`, then a global, then `process.env`. The result is cached after first resolution.
 
