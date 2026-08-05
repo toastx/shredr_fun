@@ -16,7 +16,7 @@ import {
     SHREDR_PROGRAM_ID,
     STEALTH_ACCOUNT_LEN,
     StealthInstruction,
-    MAGIC_BLOCK_PROGRAM_ID,
+    MAGIC_PROGRAM_ID,
     MAGIC_CONTEXT,
     deriveStealthPDA,
     deriveDelegationPDAs,
@@ -157,7 +157,7 @@ describe('ShredrProgram', () => {
             expect(ix.keys.map((k) => k.pubkey.toBase58())).to.deep.equal([
                 relayer.toBase58(),
                 stealthPda.toBase58(),
-                MAGIC_BLOCK_PROGRAM_ID.toBase58(),
+                MAGIC_PROGRAM_ID.toBase58(),
                 MAGIC_CONTEXT.toBase58(),
             ]);
             expect(ix.keys[2].isWritable).to.equal(false);

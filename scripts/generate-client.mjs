@@ -52,9 +52,14 @@ const outputDir = join(rootDir, "src/generated");
 // Mirrors `src/lib/constants.ts` and `shredr-program/src/constants.rs`.
 
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
-const MAGIC_BLOCK_PROGRAM_ID = "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS";
+/** Base-layer delegation program — owns delegated accounts, derives the
+ *  delegation record/metadata PDAs. */
+const MAGIC_BLOCK_PROGRAM_ID = "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh";
+/** Rollup-side program handling ScheduleCommit — the CPI target of
+ *  CommitStealth / CommitAndUndelegateStealth. */
+const MAGIC_PROGRAM_ID = "Magic11111111111111111111111111111111111111";
 const MAGIC_CONTEXT = "MagicContext1111111111111111111111111111111";
-const PERMISSION_PROGRAM_ID = "EPHpaA1tt7nJpEgAjRwkPx5tWHiV6cfKZjPPDDZxFKa9";
+const PERMISSION_PROGRAM_ID = "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1";
 
 // ============ PDAs ============
 // Seeds mirror `shredr-program/src/constants.rs` (stealth account) and the
@@ -110,7 +115,7 @@ const pdas = [
     name: "permission",
     programId: PERMISSION_PROGRAM_ID,
     seeds: [
-      constantPdaSeedNodeFromString("utf8", "permission"),
+      constantPdaSeedNodeFromString("utf8", "permission:"),
       variablePdaSeedNode("stealthAccount", publicKeyTypeNode(), [
         "The stealth PDA the permission is created for.",
       ]),
@@ -224,7 +229,7 @@ codama.update(
       accounts: {
         magicContext: { defaultValue: publicKeyValueNode(MAGIC_CONTEXT, "magicContext") },
         magicProgram: {
-          defaultValue: publicKeyValueNode(MAGIC_BLOCK_PROGRAM_ID, "magicProgram"),
+          defaultValue: publicKeyValueNode(MAGIC_PROGRAM_ID, "magicProgram"),
         },
       },
     },
@@ -232,7 +237,7 @@ codama.update(
       accounts: {
         magicContext: { defaultValue: publicKeyValueNode(MAGIC_CONTEXT, "magicContext") },
         magicProgram: {
-          defaultValue: publicKeyValueNode(MAGIC_BLOCK_PROGRAM_ID, "magicProgram"),
+          defaultValue: publicKeyValueNode(MAGIC_PROGRAM_ID, "magicProgram"),
         },
       },
     },

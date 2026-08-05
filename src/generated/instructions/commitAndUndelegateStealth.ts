@@ -47,7 +47,7 @@ export type CommitAndUndelegateStealthInstruction<
   TAccountRelayer extends string | AccountMeta<string> = string,
   TAccountStealthAccount extends string | AccountMeta<string> = string,
   TAccountMagicProgram extends string | AccountMeta<string> =
-    "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS",
+    "Magic11111111111111111111111111111111111111",
   TAccountMagicContext extends string | AccountMeta<string> =
     "MagicContext1111111111111111111111111111111",
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
@@ -158,7 +158,7 @@ export function getCommitAndUndelegateStealthInstruction<
   // Resolve default values.
   if (!accounts.magicProgram.value) {
     accounts.magicProgram.value =
-      "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS" as Address<"DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS">;
+      "Magic11111111111111111111111111111111111111" as Address<"Magic11111111111111111111111111111111111111">;
   }
   if (!accounts.magicContext.value) {
     accounts.magicContext.value =

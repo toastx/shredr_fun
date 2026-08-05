@@ -49,6 +49,7 @@ import {
 import {
   MAGIC_BLOCK_PROGRAM_ID as MAGIC_BLOCK_PROGRAM_ID_STR,
   MAGIC_CONTEXT as MAGIC_CONTEXT_STR,
+  MAGIC_PROGRAM_ID as MAGIC_PROGRAM_ID_STR,
   PERMISSION_PROGRAM_ID as PERMISSION_PROGRAM_ID_STR,
 } from "./constants";
 
@@ -79,8 +80,11 @@ export const STEALTH_ACCOUNT_LEN = 96;
 
 // ============ MagicBlock Constants ============
 
-/** MagicBlock Delegation Program ID */
+/** MagicBlock Delegation Program ID (base layer — owns delegated accounts). */
 export const MAGIC_BLOCK_PROGRAM_ID = new PublicKey(MAGIC_BLOCK_PROGRAM_ID_STR);
+
+/** MagicBlock Magic Program ID (rollup side — handles ScheduleCommit). */
+export const MAGIC_PROGRAM_ID = new PublicKey(MAGIC_PROGRAM_ID_STR);
 
 /** MagicBlock context account (singleton, used by Commit/Undelegate). */
 export const MAGIC_CONTEXT = new PublicKey(MAGIC_CONTEXT_STR);
@@ -92,7 +96,8 @@ export const PERMISSION_PROGRAM_ID = new PublicKey(PERMISSION_PROGRAM_ID_STR);
 const BUFFER_SEED = Buffer.from("buffer");
 const DELEGATION_SEED = Buffer.from("delegation");
 const DELEGATION_METADATA_SEED = Buffer.from("delegation-metadata");
-const PERMISSION_SEED = Buffer.from("permission");
+/** Note the trailing colon — `acl::consts::PERMISSION` is `b"permission:"`. */
+const PERMISSION_SEED = Buffer.from("permission:");
 
 // ============ KIT <-> WEB3.JS v1 ADAPTERS ============
 
@@ -155,7 +160,7 @@ export function deriveStealthPDA(burnerPubkey: PublicKey): [PublicKey, number] {
  *   - delegation_record:   PDA(["delegation", account.key], DELEGATION_PROGRAM_ID)
  *   - delegation_metadata: PDA(["delegation-metadata", account.key], DELEGATION_PROGRAM_ID)
  *   - delegation_buffer:   PDA(["buffer", account.key], OWNER_PROGRAM_ID)  ← under owner program
- *   - permission_account:  PDA(["permission", account.key], PERMISSION_PROGRAM_ID)
+ *   - permission_account:  PDA(["permission:", account.key], PERMISSION_PROGRAM_ID)
  */
 export function deriveDelegationPDAs(stealthPda: PublicKey) {
   const [permissionAccount] = PublicKey.findProgramAddressSync(
@@ -262,7 +267,7 @@ export function createPrivateTransferInstruction(
 export function createCommitStealthInstruction(
   relayer: PublicKey,
   stealthAccount: PublicKey,
-  magicProgram: PublicKey = MAGIC_BLOCK_PROGRAM_ID,
+  magicProgram: PublicKey = MAGIC_PROGRAM_ID,
   magicContext: PublicKey = MAGIC_CONTEXT,
 ): TransactionInstruction {
   return toTransactionInstruction(
@@ -283,7 +288,7 @@ export function createCommitStealthInstruction(
 export function createCommitAndUndelegateStealthInstruction(
   relayer: PublicKey,
   stealthAccount: PublicKey,
-  magicProgram: PublicKey = MAGIC_BLOCK_PROGRAM_ID,
+  magicProgram: PublicKey = MAGIC_PROGRAM_ID,
   magicContext: PublicKey = MAGIC_CONTEXT,
 ): TransactionInstruction {
   return toTransactionInstruction(

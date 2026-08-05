@@ -65,16 +65,27 @@ pub const SHREDR_FIXED_SALT: [u8; 32] = [0u8; 32];
 // runtime accounts are passed in via `AccountView`s.
 
 /// MagicBlock delegation program ID (base layer).
-/// Base58: `DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS`.
-pub const MAGIC_BLOCK_PROGRAM_ID_B58: &str = "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS";
+/// Base58: `DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh`.
+/// Mirrors `ephemeral_rollups_pinocchio::consts::DELEGATION_PROGRAM_ID`.
+pub const MAGIC_BLOCK_PROGRAM_ID_B58: &str = "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh";
+
+/// MagicBlock magic program ID — the rollup-side program that handles
+/// ScheduleCommit / ScheduleCommitAndUndelegate, and therefore the CPI target
+/// of `CommitStealth` / `CommitAndUndelegateStealth` (the `magic_program`
+/// account). Distinct from the base-layer delegation program above.
+/// Base58: `Magic11111111111111111111111111111111111111`.
+/// Mirrors `ephemeral_rollups_pinocchio::consts::MAGIC_PROGRAM_ID`.
+pub const MAGIC_PROGRAM_ID_B58: &str = "Magic11111111111111111111111111111111111111";
 
 /// MagicBlock context account (singleton, static).
 /// Base58: `MagicContext1111111111111111111111111111111`.
 pub const MAGIC_CONTEXT_B58: &str = "MagicContext1111111111111111111111111111111";
 
 /// ACL Permission program ID (used by InitializeAndDelegate).
-/// Base58: `EPHpaA1tt7nJpEgAjRwkPx5tWHiV6cfKZjPPDDZxFKa9`.
-pub const PERMISSION_PROGRAM_ID_B58: &str = "EPHpaA1tt7nJpEgAjRwkPx5tWHiV6cfKZjPPDDZxFKa9";
+/// Base58: `ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1`.
+/// Mirrors `ephemeral_rollups_pinocchio::acl::consts::PERMISSION_PROGRAM_ID`,
+/// which is the address `InitializeAndDelegate` actually CPIs into.
+pub const PERMISSION_PROGRAM_ID_B58: &str = "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1";
 
 // ============ TEE VALIDATOR ============
 

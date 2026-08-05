@@ -14,6 +14,7 @@ export {
     STEALTH_ACCOUNT_LEN,
     StealthInstruction,
     MAGIC_BLOCK_PROGRAM_ID,
+    MAGIC_PROGRAM_ID,
     MAGIC_CONTEXT,
     PERMISSION_PROGRAM_ID,
     deriveStealthPDA,

@@ -25,7 +25,7 @@ export async function findDelegationRecordPda(
   config: { programAddress?: Address | undefined } = {},
 ): Promise<ProgramDerivedAddress> {
   const {
-    programAddress = "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS" as Address<"DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSS">,
+    programAddress = "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh" as Address<"DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh">,
   } = config;
   return await getProgramDerivedAddress({
     programAddress,

@@ -25,12 +25,12 @@ export async function findPermissionPda(
   config: { programAddress?: Address | undefined } = {},
 ): Promise<ProgramDerivedAddress> {
   const {
-    programAddress = "EPHpaA1tt7nJpEgAjRwkPx5tWHiV6cfKZjPPDDZxFKa9" as Address<"EPHpaA1tt7nJpEgAjRwkPx5tWHiV6cfKZjPPDDZxFKa9">,
+    programAddress = "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1" as Address<"ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1">,
   } = config;
   return await getProgramDerivedAddress({
     programAddress,
     seeds: [
-      getUtf8Encoder().encode("permission"),
+      getUtf8Encoder().encode("permission:"),
       getAddressEncoder().encode(seeds.stealthAccount),
     ],
   });
