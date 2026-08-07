@@ -56,6 +56,7 @@ use ephemeral_rollups_pinocchio::acl::{
 use ephemeral_rollups_pinocchio::instruction::delegate_account;
 use ephemeral_rollups_pinocchio::types::DelegateConfig;
 
+use pinocchio::cpi::{Seed, Signer};
 use pinocchio::sysvars::clock::Clock;
 use pinocchio::sysvars::rent::Rent;
 use pinocchio::sysvars::Sysvar;
@@ -112,6 +113,20 @@ impl<'a> InitializeAndDelegate<'a> {
 
         let bump_slice = [bump];
 
+        // The PDA's own seeds, *without* the bump. The SDK helpers below
+        // (`CreatePermissionCpiBuilder::invoke`, `delegate_account`) append the
+        // bump themselves, so passing it here would sign with it twice.
+        let pda_seeds: &[&[u8]] = &[seeds::STEALTH_ADDRESS, burner_key.as_array()];
+
+        // System's CreateAccount requires the new account to sign, and the new
+        // account is a PDA — so this program signs for it. Unlike the SDK
+        // helpers, `invoke_signed` takes the full seed list, bump included.
+        let create_seeds = [
+            Seed::from(seeds::STEALTH_ADDRESS),
+            Seed::from(burner_key.as_array()),
+            Seed::from(&bump_slice),
+        ];
+
         CreateAccount {
             from: relayer,
             to: stealth_account,
@@ -119,7 +134,7 @@ impl<'a> InitializeAndDelegate<'a> {
             space: account_space,
             owner: &PROGRAM_ADDRESS,
         }
-        .invoke()?;
+        .invoke_signed(&[Signer::from(&create_seeds)])?;
 
         // ── Step 2: Sweep the burner's received funds into the PDA ──
         // People send SOL to the burner (a one-time keypair); the burner signs
@@ -154,8 +169,6 @@ impl<'a> InitializeAndDelegate<'a> {
         // ── Step 4: Create ACL permission for the burner ──
         let permission_program = PERMISSION_PROGRAM_ID;
 
-        let signer_seeds: &[&[u8]] = &[seeds::STEALTH_ADDRESS, burner_key.as_array(), &bump_slice];
-
         let member = [Member {
             flags: MemberFlags::new(),
             pubkey: burner_key.clone(),
@@ -173,7 +186,8 @@ impl<'a> InitializeAndDelegate<'a> {
             &permission_program,
         )
         .members(members)
-        .seeds(signer_seeds)
+        .seeds(pda_seeds)
+        .bump(bump)
         .invoke()?;
 
         // ── Step 5: Delegate to MagicBlock TEE validator ──
@@ -184,9 +198,15 @@ impl<'a> InitializeAndDelegate<'a> {
             ..Default::default()
         };
 
+        // The relayer is the delegation payer, not the burner: `cpi_delegate`
+        // marks this account `writable_signer` so the delegation program can
+        // fund `delegation_record` and `delegation_metadata`, and Step 2 has
+        // already swept the burner's entire balance into the stealth PDA. The
+        // relayer also paid the PDA's rent in Step 1, so this keeps the
+        // invariant that `deposited_amount` holds only user funds.
         delegate_account(
             &[
-                burner,
+                relayer,
                 stealth_account,
                 owner_program,
                 delegation_buffer,
@@ -194,7 +214,7 @@ impl<'a> InitializeAndDelegate<'a> {
                 delegation_metadata,
                 system_program,
             ],
-            signer_seeds,
+            pda_seeds,
             bump,
             delegate_config,
         )?;

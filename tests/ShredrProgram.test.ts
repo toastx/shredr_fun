@@ -17,7 +17,9 @@ import {
     STEALTH_ACCOUNT_LEN,
     StealthInstruction,
     MAGIC_PROGRAM_ID,
+    MAGIC_BLOCK_PROGRAM_ID,
     MAGIC_CONTEXT,
+    PERMISSION_PROGRAM_ID,
     deriveStealthPDA,
     deriveDelegationPDAs,
     createInitializeAndDelegateInstruction,
@@ -93,7 +95,7 @@ describe('ShredrProgram', () => {
             const [stealthPda] = deriveStealthPDA(burner);
             const delegation = deriveDelegationPDAs(stealthPda);
 
-            expect(ix.keys.map((k) => k.pubkey.toBase58())).to.deep.equal([
+            expect(ix.keys.slice(0, 9).map((k) => k.pubkey.toBase58())).to.deep.equal([
                 relayer.toBase58(),
                 burner.toBase58(),
                 SHREDR_PROGRAM_ID.toBase58(),
@@ -104,6 +106,17 @@ describe('ShredrProgram', () => {
                 delegation.delegationMetadata.toBase58(),
                 SystemProgram.programId.toBase58(),
             ]);
+        });
+
+        it('appends the CPI target programs so the runtime can dispatch to them', () => {
+            expect(ix.keys).to.have.lengthOf(11);
+            expect(ix.keys.slice(9).map((k) => k.pubkey.toBase58())).to.deep.equal([
+                PERMISSION_PROGRAM_ID.toBase58(),
+                MAGIC_BLOCK_PROGRAM_ID.toBase58(),
+            ]);
+            for (const meta of ix.keys.slice(9)) {
+                expect(meta).to.include({ isSigner: false, isWritable: false });
+            }
         });
 
         it('marks the relayer and burner as writable signers', () => {

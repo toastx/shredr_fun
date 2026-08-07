@@ -217,7 +217,7 @@ export function createInitializeAndDelegateInstruction(
   const [stealthAccount] = deriveStealthPDA(burner);
   const delegationPDAs = deriveDelegationPDAs(stealthAccount);
 
-  return toTransactionInstruction(
+  const instruction = toTransactionInstruction(
     getInitializeAndDelegateInstruction({
       relayer: toSigner(relayer),
       burner: toSigner(burner),
@@ -229,6 +229,18 @@ export function createInitializeAndDelegateInstruction(
       depositAmount,
     }),
   );
+
+  // The program CPIs into the ACL permission program and the MagicBlock
+  // delegation program. Solana resolves a CPI's callee from the transaction's
+  // account keys, so both must appear here or the CPI cannot be dispatched.
+  // `InitializeAndDelegate::try_from` reads exactly nine accounts positionally,
+  // so these trailing entries are ignored by the program itself.
+  instruction.keys.push(
+    { pubkey: PERMISSION_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: MAGIC_BLOCK_PROGRAM_ID, isSigner: false, isWritable: false },
+  );
+
+  return instruction;
 }
 
 /**
