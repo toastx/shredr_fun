@@ -482,12 +482,17 @@ export class ShredrClient {
    *
    * @param sourceBurner   Burner that owns the source stealth PDA
    * @param amountLamports Amount to transfer (typically the full deposit)
+   * @param destinationPda Defaults to the main PDA (deposits consolidating in).
+   *                       `withdrawToWallet` passes an exit PDA to send funds
+   *                       back out without the main PDA appearing on base layer.
    */
-  async privateTransferToMainPda(
+  async privateTransfer(
     sourceBurner: BurnerKeyPair,
     amountLamports: bigint,
+    destinationPda?: PublicKey,
   ): Promise<string> {
-    if (!this._mainPda) throw new Error("Main PDA not initialized");
+    const destination = destinationPda ?? this._mainPda;
+    if (!destination) throw new Error("Main PDA not initialized");
 
     const burnerKp = this.burnerToKeypair(sourceBurner);
     const [sourcePda] = deriveStealthPDA(burnerKp.publicKey);
@@ -495,7 +500,7 @@ export class ShredrClient {
     const ix = createPrivateTransferInstruction(
       burnerKp.publicKey,
       sourcePda,
-      this._mainPda,
+      destination,
       amountLamports,
     );
 
@@ -586,7 +591,7 @@ export class ShredrClient {
 
     const initializeAndDelegate = await this.initializeAndDelegate(b, deposit);
     const initializeMainPda = await this.ensureMainPdaDelegated();
-    const privateTransfer = await this.privateTransferToMainPda(b, deposit);
+    const privateTransfer = await this.privateTransfer(b, deposit);
     const commitAndUndelegate = await this.commitAndUndelegate(stealthPda);
 
     return {
@@ -627,16 +632,15 @@ export class ShredrClient {
     }
 
     const connection = this.getConnection();
-    const mainBurnerKp = this.burnerToKeypair(this._mainBurner);
     const destination = new PublicKey(destinationAddress);
 
-    let state = await this.fetchStealthState(this._mainPda, connection);
+    // The main PDA stays delegated throughout, so its live balance is in the
+    // rollup — the base-layer copy is only as fresh as the last commit.
+    const state = await this.fetchStealthState(
+      this._mainPda,
+      this.getRollupConnection(),
+    );
     if (!state) throw new Error("Main PDA has not been initialized on-chain");
-
-    if (state.delegated) {
-      await this.commitAndUndelegate(this._mainPda);
-      state = await this.waitForUndelegation(this._mainPda);
-    }
 
     const availableLamports = Number(state.depositedAmount);
 
@@ -656,23 +660,55 @@ export class ShredrClient {
       );
     }
 
-    const ix = createStealthWithdrawInstruction(
-      mainBurnerKp.publicKey,
-      this._mainPda,
-      destination,
-      BigInt(withdrawLamports),
-    );
+    // Route the exit through a throwaway PDA so the main PDA never appears as
+    // the source of a base-layer transfer. The hop to it happens inside the
+    // rollup and is invisible on Solana, so consecutive withdrawals have
+    // unrelated sources instead of a shared, linkable parent.
+    //
+    // The exit burner comes off the deposit nonce chain rather than being
+    // random: if this flow dies between the transfer and the withdraw, the
+    // funds must stay derivable. `scanPendingUtxos` walks the same indices and
+    // reports the stranded PDA as `ready`.
+    const exitBurner = await this.consumeAndGenerateNew();
+    // Advance again so the exit burner is not left as the displayed deposit
+    // address: its withdrawal is public on base layer, so a later deposit to it
+    // would link the depositor to the withdrawal destination.
+    await this.consumeAndGenerateNew();
 
-    const signature = await koraRelayer.signAndSend(
-      connection,
-      [ix],
-      [mainBurnerKp],
-    );
+    try {
+      const exitBurnerKp = this.burnerToKeypair(exitBurner);
+      const [exitPda] = deriveStealthPDA(exitBurnerKp.publicKey);
 
-    return {
-      signature,
-      amount: withdrawLamports / LAMPORTS_PER_SOL,
-    };
+      await this.initializeAndDelegate(exitBurner, 0n);
+      await this.privateTransfer(
+        this._mainBurner,
+        BigInt(withdrawLamports),
+        exitPda,
+      );
+
+      await this.commitAndUndelegate(exitPda);
+      await this.waitForUndelegation(exitPda);
+
+      const ix = createStealthWithdrawInstruction(
+        exitBurnerKp.publicKey,
+        exitPda,
+        destination,
+        BigInt(withdrawLamports),
+      );
+
+      const signature = await koraRelayer.signAndSend(
+        connection,
+        [ix],
+        [exitBurnerKp],
+      );
+
+      return {
+        signature,
+        amount: withdrawLamports / LAMPORTS_PER_SOL,
+      };
+    } finally {
+      burnerService.clearBurner(exitBurner);
+    }
   }
 
   /**
@@ -727,7 +763,17 @@ export class ShredrClient {
       throw new Error("Main PDA not initialized. Call initFromSignature first.");
     }
 
-    const state = await this.fetchStealthState(this._mainPda);
+    // Read the base layer first to learn whether it is delegated, then re-read
+    // from the rollup if so — while delegated the base-layer copy only reflects
+    // the last commit, which understates the balance.
+    let state = await this.fetchStealthState(this._mainPda);
+    if (state?.delegated) {
+      state =
+        (await this.fetchStealthState(
+          this._mainPda,
+          this.getRollupConnection(),
+        )) ?? state;
+    }
     const lamports = state ? Number(state.depositedAmount) : 0;
 
     return {

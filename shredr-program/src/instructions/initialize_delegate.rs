@@ -13,35 +13,8 @@
 //! | 6 | delegation_record   |        | ✓        | MagicBlock delegation record                   |
 //! | 7 | delegation_metadata |        | ✓        | MagicBlock delegation metadata                 |
 //! | 8 | system_program      |        |          | System Program                                 |
-//!
-//! ## Instruction Data
-//!
-//! `[deposit_amount: u64]` — 8 bytes. The burner's identity comes from the
-//! `burner` account (index 1); the PDA is `[STEALTH_ADDRESS, burner_pubkey]`, so
-//! no salt or separate pubkey is passed — the one-time burner alone makes it
-//! unique.
-//!
-//! `deposit_amount` is the amount of SOL the burner has already received and is
-//! swept into the PDA here. Pass `0` to create an empty delegated PDA (used for
-//! the destination account, which is funded later by a private transfer).
-//!
-//! ## Flow
-//!
-//! 1. Derive and verify the stealth PDA address from the burner.
-//! 2. **Create the PDA account** via System Program CPI (relayer pays rent).
-//! 3. **Sweep `deposit_amount` from the burner into the PDA** (burner signs).
-//! 4. Write discriminator + stealth state.
-//! 5. Create ACL permission for the burner.
-//! 6. Delegate the account to MagicBlock TEE validator.
-//!
-//! ## Security
-//!
-//! - Relayer must sign (pays for account creation + delegation).
-//! - Burner must sign (proves ownership of the derived keypair *and* authorizes
-//!   moving its received funds into the PDA).
-//! - The stealth PDA is re-derived and compared to the provided account.
-//! - Account must not already exist (prevents re-initialization attacks).
-//! - A discriminator is written before any state to prevent type confusion.
+
+
 
 use crate::constants::{seeds, tee_validator, PROGRAM_ADDRESS};
 use crate::errors::ShredrError;
