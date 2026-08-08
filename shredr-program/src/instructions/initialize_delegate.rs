@@ -48,11 +48,13 @@ use crate::errors::ShredrError;
 use crate::helpers::{get_stealth_mut, verify_stealth_pda, write_stealth_discriminator};
 use crate::state::STEALTH_ACCOUNT_SIZE;
 
+use crate::Address;
 use crate::{ProgramError, ProgramResult};
 
 use ephemeral_rollups_pinocchio::acl::{
     consts::PERMISSION_PROGRAM_ID, CreatePermissionCpiBuilder, Member, MemberFlags, MembersArgs,
 };
+use ephemeral_rollups_pinocchio::consts::DELEGATION_PROGRAM_ID;
 use ephemeral_rollups_pinocchio::instruction::delegate_account;
 use ephemeral_rollups_pinocchio::types::DelegateConfig;
 
@@ -98,18 +100,33 @@ impl<'a> InitializeAndDelegate<'a> {
 
         let bump = verify_stealth_pda(stealth_account, &burner_key)?;
 
-        // Guard: account must not already exist (lamports == 0 means uninitialized)
-        if stealth_account.lamports() > 0 {
-            return Err(ShredrError::AccountAlreadyInitialized.into());
+        // A PDA that is currently delegated is owned by the delegation program on
+        // base, so `get_stealth_mut` below would report the misleading
+        // `InvalidProgramOwner`. Name the real condition instead.
+        if stealth_account.owned_by(&DELEGATION_PROGRAM_ID) {
+            return Err(ShredrError::AlreadyDelegated.into());
+        }
+
+        // A stealth PDA outlives its first cycle: after `CommitAndUndelegateStealth`
+        // and `Withdraw` it still holds its rent-exempt lamports. Reuse it rather
+        // than refusing, so a burner can take a second deposit and the main PDA can
+        // be re-delegated for the next accumulate/withdraw round.
+        let is_new = stealth_account.lamports() == 0;
+
+        if !is_new {
+            let existing = get_stealth_mut(stealth_account)?;
+            if existing.delegated {
+                return Err(ShredrError::AlreadyDelegated.into());
+            }
+
+            if existing.owner != Address::default() && existing.owner != burner_key {
+                return Err(ProgramError::IllegalOwner);
+            }
         }
 
         // ── Step 1: Create the PDA account ──
         // The relayer pays rent. The PDA is owned by the SHREDR program.
         let account_space = (8 + STEALTH_ACCOUNT_SIZE) as u64;
-
-        let rent =
-            Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
-        let rent_lamports = rent.try_minimum_balance(account_space as usize)?;
 
         let bump_slice = [bump];
 
@@ -127,14 +144,20 @@ impl<'a> InitializeAndDelegate<'a> {
             Seed::from(&bump_slice),
         ];
 
-        CreateAccount {
-            from: relayer,
-            to: stealth_account,
-            lamports: rent_lamports,
-            space: account_space,
-            owner: &PROGRAM_ADDRESS,
+        if is_new {
+            let rent =
+                Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
+            let rent_lamports = rent.try_minimum_balance(account_space as usize)?;
+
+            CreateAccount {
+                from: relayer,
+                to: stealth_account,
+                lamports: rent_lamports,
+                space: account_space,
+                owner: &PROGRAM_ADDRESS,
+            }
+            .invoke_signed(&[Signer::from(&create_seeds)])?;
         }
-        .invoke_signed(&[Signer::from(&create_seeds)])?;
 
         // ── Step 2: Sweep the burner's received funds into the PDA ──
         // People send SOL to the burner (a one-time keypair); the burner signs
@@ -153,42 +176,57 @@ impl<'a> InitializeAndDelegate<'a> {
         }
 
         // ── Step 3: Write discriminator + stealth state ──
-        write_stealth_discriminator(stealth_account)?;
+        if is_new {
+            write_stealth_discriminator(stealth_account)?;
+        }
 
         let stealth_state = get_stealth_mut(stealth_account)?;
 
         let clock =
             Clock::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
 
+        // Accumulate: a reused PDA may still hold funds from a partial withdraw.
+        let previous_deposited = stealth_state.deposited_amount;
+
         stealth_state.owner = burner_key.clone();
-        stealth_state.deposited_amount = deposit_amount;
-        stealth_state.deposit_timestamp = clock.unix_timestamp;
+        stealth_state.deposited_amount = previous_deposited
+            .checked_add(deposit_amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        // Keep the original deposit time across a top-up; stamp it when funds
+        // first land in an empty account.
+        if previous_deposited == 0 {
+            stealth_state.deposit_timestamp = clock.unix_timestamp;
+        }
         stealth_state.delegated = true;
         stealth_state.bump = bump;
 
         // ── Step 4: Create ACL permission for the burner ──
-        let permission_program = PERMISSION_PROGRAM_ID;
+        // `cpi_create_permission` forwards a bare create, so a second one on an
+        // existing permission PDA fails. The member set never changes for a given
+        // stealth PDA (the burner is baked into its derivation), so on reuse the
+        // permission from the previous cycle is still correct.
+        if permission_account.lamports() == 0 {
+            let member = [Member {
+                flags: MemberFlags::new(),
+                pubkey: burner_key.clone(),
+            }];
 
-        let member = [Member {
-            flags: MemberFlags::new(),
-            pubkey: burner_key.clone(),
-        }];
+            let members = MembersArgs {
+                members: Some(&member),
+            };
 
-        let members = MembersArgs {
-            members: Some(&member),
-        };
-
-        CreatePermissionCpiBuilder::new(
-            stealth_account,
-            permission_account,
-            relayer,
-            system_program,
-            &permission_program,
-        )
-        .members(members)
-        .seeds(pda_seeds)
-        .bump(bump)
-        .invoke()?;
+            CreatePermissionCpiBuilder::new(
+                stealth_account,
+                permission_account,
+                relayer,
+                system_program,
+                &PERMISSION_PROGRAM_ID,
+            )
+            .members(members)
+            .seeds(pda_seeds)
+            .bump(bump)
+            .invoke()?;
+        }
 
         // ── Step 5: Delegate to MagicBlock TEE validator ──
         // The validator is selected at build time by Cargo feature (see

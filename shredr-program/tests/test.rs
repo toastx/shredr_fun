@@ -1063,19 +1063,95 @@ fn initialize_rejects_wrong_pda() {
     );
 }
 
-/// Re-initialization guard: a stealth PDA that already holds lamports is treated
-/// as live and cannot be re-created (which would reset `owner` to a new burner).
+/// Replace the freshly-created stealth account with one that already exists:
+/// program-owned, discriminator written, carrying prior state. This is the shape
+/// a PDA has after `CommitAndUndelegateStealth` + `Withdraw`.
+/// `owner: None` means the account's own burner — the normal reuse case.
+fn init_setup_reused(
+    mollusk: &Mollusk,
+    owner: Option<Pubkey>,
+    deposited: u64,
+    delegated: bool,
+) -> InitAccounts {
+    let mut setup = init_setup(None, 0);
+    let (_, bump) = derive_stealth_pda(&setup.burner);
+    let state = StealthState::new(owner.unwrap_or(setup.burner), [0u8; 32], bump)
+        .deposited(deposited)
+        .delegated(delegated);
+    setup.accounts[3].1 = state.to_account(stealth_rent(mollusk) + deposited);
+    setup
+}
+
+/// A stealth PDA outlives its first cycle, so a second `InitializeAndDelegate`
+/// must reuse it rather than refuse it — this is what lets a burner take another
+/// deposit and the main PDA be re-delegated for the next round. Reaching the
+/// unresolvable ACL CPI proves the reuse branch let it through.
 #[test]
-fn initialize_rejects_existing_account() {
+fn initialize_reuses_undelegated_account() {
     let mollusk = mollusk();
-    let setup = init_setup(None, LAMPORTS_PER_SOL);
+    let setup = init_setup_reused(&mollusk, None, 0, false);
+
+    let result = mollusk.process_instruction(
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
+        &setup.accounts,
+    );
+
+    assert!(
+        !matches!(
+            result.raw_result,
+            Err(InstructionError::Custom(6000..=6011))
+        ),
+        "reuse must not be blocked by a SHREDR check, got {:?}",
+        result.raw_result,
+    );
+}
+
+/// A PDA still delegated cannot be delegated again.
+#[test]
+fn initialize_rejects_delegated_account() {
+    let mollusk = mollusk();
+    let setup = init_setup_reused(&mollusk, None, LAMPORTS_PER_SOL, true);
 
     mollusk.process_and_validate_instruction(
         &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
         &setup.accounts,
-        &[Check::err(shredr_err(
-            ShredrError::AccountAlreadyInitialized,
-        ))],
+        &[Check::err(shredr_err(ShredrError::AlreadyDelegated))],
+    );
+}
+
+/// The post-full-withdraw shape: `Withdraw` zeroes `owner` once drained, and that
+/// account must still be reusable by the burner it derives from.
+#[test]
+fn initialize_reuses_fully_drained_account() {
+    let mollusk = mollusk();
+    let setup = init_setup_reused(&mollusk, Some(Pubkey::default()), 0, false);
+
+    let result = mollusk.process_instruction(
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
+        &setup.accounts,
+    );
+
+    assert!(
+        !matches!(
+            result.raw_result,
+            Err(InstructionError::Custom(6000..=6011))
+        ),
+        "drained account must be reusable, got {:?}",
+        result.raw_result,
+    );
+}
+
+/// Reuse is only for the account's own burner (or a fully-drained account, whose
+/// `owner` `Withdraw` has zeroed). Someone else's live PDA stays off limits.
+#[test]
+fn initialize_rejects_reuse_by_another_burner() {
+    let mollusk = mollusk();
+    let setup = init_setup_reused(&mollusk, Some(Pubkey::new_unique()), LAMPORTS_PER_SOL, false);
+
+    mollusk.process_and_validate_instruction(
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
+        &setup.accounts,
+        &[Check::err(ProgramError::IllegalOwner)],
     );
 }
 

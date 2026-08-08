@@ -463,16 +463,10 @@ export class ShredrClient {
     }
 
     const state = await this.fetchStealthState(this._mainPda);
-    if (state) {
-      if (!state.delegated) {
-        throw new Error(
-          "Main PDA is undelegated and cannot be re-delegated. Withdraw its " +
-            "balance before shredding again.",
-        );
-      }
-      return null;
-    }
+    if (state?.delegated) return null;
 
+    // Covers both the first run and re-delegation after a withdraw cycle: the
+    // program reuses an existing undelegated PDA instead of rejecting it.
     return this.initializeAndDelegate(this._mainBurner, 0n);
   }
 
