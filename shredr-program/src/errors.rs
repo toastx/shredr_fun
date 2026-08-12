@@ -32,6 +32,8 @@ pub enum ShredrError {
     AccountAlreadyInitialized = 6010,
     /// Source and destination stealth accounts are the same account.
     SelfTransferNotAllowed = 6011,
+    /// The undelegation buffer is not the delegation program's buffer for this account.
+    InvalidBufferAccount = 6012,
 }
 
 impl From<ShredrError> for ProgramError {

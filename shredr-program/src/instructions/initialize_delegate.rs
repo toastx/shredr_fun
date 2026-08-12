@@ -258,6 +258,22 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             return Err(ShredrError::MissingSigner.into());
         }
 
+        // `owner_program` is forwarded to `delegate_account`, which uses it both
+        // to derive the delegation buffer's bump *and* as the owner it creates
+        // that buffer with. A mismatched bump makes the runtime reject the
+        // buffer's signature, but the bump is only one byte: a caller can grind
+        // addresses until one collides (~1/256, and this account is never
+        // required to be executable) and thereby hand the delegation buffer to
+        // an owner of their choosing. Pin it to this program instead.
+        if owner_program.address() != &PROGRAM_ADDRESS {
+            return Err(ProgramError::IncorrectProgramId);
+        }
+
+        // Passed through to CreateAccount/Transfer/the ACL CPI below.
+        if system_program.address() != &pinocchio_system::ID {
+            return Err(ProgramError::IncorrectProgramId);
+        }
+
         // Expecting: [deposit_amount(8)] = 8 bytes
         if instruction_data.len() < 8 {
             return Err(ProgramError::InvalidInstructionData);

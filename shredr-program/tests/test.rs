@@ -1023,6 +1023,42 @@ fn initialize_requires_burner_signature() {
 }
 
 #[test]
+fn initialize_rejects_wrong_owner_program() {
+    let mollusk = mollusk();
+    let mut setup = init_setup(None, 0);
+
+    // `owner_program` reaches `delegate_account`, which uses it to derive the
+    // delegation buffer's bump *and* as the owner it creates the buffer with.
+    // A bump collision is only a 1-in-256 grind, so the address itself must be
+    // pinned to this program.
+    let impostor = Pubkey::new_unique();
+    setup.metas[2].pubkey = impostor;
+    setup.accounts[2].0 = impostor;
+
+    mollusk.process_and_validate_instruction(
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
+        &setup.accounts,
+        &[Check::err(ProgramError::IncorrectProgramId)],
+    );
+}
+
+#[test]
+fn initialize_rejects_wrong_system_program() {
+    let mollusk = mollusk();
+    let mut setup = init_setup(None, 0);
+
+    let impostor = Pubkey::new_unique();
+    setup.metas[8].pubkey = impostor;
+    setup.accounts[8] = (impostor, system_account(0));
+
+    mollusk.process_and_validate_instruction(
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
+        &setup.accounts,
+        &[Check::err(ProgramError::IncorrectProgramId)],
+    );
+}
+
+#[test]
 fn initialize_requires_deposit_amount_bytes() {
     let mollusk = mollusk();
     let setup = init_setup(None, 0);
@@ -1269,5 +1305,88 @@ fn undelegation_callback_requires_four_accounts() {
             (buffer, system_account(0)),
         ],
         &[Check::err(ProgramError::NotEnoughAccountKeys)],
+    );
+}
+
+/// The MagicBlock delegation program.
+const DELEGATION_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh");
+
+/// The delegation program's undelegation buffer for a delegated account:
+/// `["undelegate-buffer", delegated]` derived from the *delegation program*.
+/// Only that program can sign for this address, which is what authorizes the
+/// callback.
+fn derive_undelegate_buffer(delegated: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"undelegate-buffer", delegated.as_ref()],
+        &DELEGATION_PROGRAM_ID,
+    )
+    .0
+}
+
+#[test]
+fn undelegation_callback_rejects_foreign_buffer() {
+    let mollusk = mollusk();
+    let stealth = funded_stealth(&mollusk, &Pubkey::new_unique(), [4u8; 32], LAMPORTS_PER_SOL);
+
+    // An attacker-controlled keypair, signing. `undelegate` only checks
+    // `is_signer`, and takes the seeds of the account it re-creates from
+    // `ix_data` — so without the address check this would let anyone mint a
+    // program-owned PDA holding state of their choosing.
+    let rogue_buffer = Pubkey::new_unique();
+    let payer = Pubkey::new_unique();
+    let (system_program_key, system_program_account) =
+        mollusk_svm::program::keyed_account_for_system_program();
+
+    mollusk.process_and_validate_instruction(
+        &Instruction::new_with_bytes(
+            program_id(),
+            &[IX_UNDELEGATION_CALLBACK],
+            vec![
+                AccountMeta::new(stealth.key, false),
+                AccountMeta::new(rogue_buffer, true),
+                AccountMeta::new(payer, true),
+                AccountMeta::new_readonly(system_program_key, false),
+            ],
+        ),
+        &[
+            (stealth.key, stealth.account.clone()),
+            (rogue_buffer, system_account(LAMPORTS_PER_SOL)),
+            (payer, system_account(LAMPORTS_PER_SOL)),
+            (system_program_key, system_program_account),
+        ],
+        &[Check::err(shredr_err(ShredrError::InvalidBufferAccount))],
+    );
+}
+
+#[test]
+fn undelegation_callback_requires_buffer_signature() {
+    let mollusk = mollusk();
+    let stealth = funded_stealth(&mollusk, &Pubkey::new_unique(), [5u8; 32], LAMPORTS_PER_SOL);
+
+    // Right address, but not signing — the address alone proves nothing.
+    let buffer = derive_undelegate_buffer(&stealth.key);
+    let payer = Pubkey::new_unique();
+    let (system_program_key, system_program_account) =
+        mollusk_svm::program::keyed_account_for_system_program();
+
+    mollusk.process_and_validate_instruction(
+        &Instruction::new_with_bytes(
+            program_id(),
+            &[IX_UNDELEGATION_CALLBACK],
+            vec![
+                AccountMeta::new(stealth.key, false),
+                AccountMeta::new(buffer, false),
+                AccountMeta::new(payer, true),
+                AccountMeta::new_readonly(system_program_key, false),
+            ],
+        ),
+        &[
+            (stealth.key, stealth.account.clone()),
+            (buffer, system_account(0)),
+            (payer, system_account(LAMPORTS_PER_SOL)),
+            (system_program_key, system_program_account),
+        ],
+        &[Check::err(shredr_err(ShredrError::MissingSigner))],
     );
 }
