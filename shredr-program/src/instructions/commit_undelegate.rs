@@ -7,6 +7,12 @@
 //! - **CommitAndUndelegateStealth**: Flush state AND release the account back to base layer.
 //! - **UndelegationCallback**: Called by the delegation program after finalization (not user-invoked).
 //!
+//! Undelegation runs on **both** PDAs of a cycle, for different reasons: the exit
+//! PDA so it can pay out on the base layer, and the drained deposit PDA so it can
+//! be closed and its rent reclaimed. Both base-layer events are observable, so the
+//! client must space them apart in time — issued together they re-associate the
+//! two accounts and undo what the in-rollup transfer bought.
+//!
 //! ## Security
 //!
 //! - Commit operations require the relayer to sign.

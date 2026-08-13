@@ -3,9 +3,9 @@
 //! `StealthAccount` is the core struct stored in stealth PDAs. It tracks
 //! ownership, deposited lamports, delegation status, and PDA derivation info.
 //!
-//! `UserAddress` and `ProgramConfig` are reserved for future use:
-//! - `UserAddress`: per-user aggregation of received funds.
-//! - `ProgramConfig`: global admin config (paused state, validator key, etc.).
+//! It is the program's only account type. Deposit and exit PDAs are both
+//! `StealthAccount`s — the role distinction is a client convention and is
+//! deliberately not recorded here.
 
 use pinocchio::Address;
 
@@ -35,26 +35,5 @@ pub struct StealthAccount {
     pub deposited_amount: u64,
     pub deposit_timestamp: i64,
     pub delegated: bool,
-    pub bump: u8,
-}
-
-/// Reserved: Per-user address tracking for future aggregation features.
-#[repr(C)]
-pub struct UserAddress {
-    pub owner: Address,
-    pub available_balance: u64,
-    pub total_ever_received: u64,
-    pub bump: u8,
-}
-
-/// Reserved: Global program configuration for future admin features.
-///
-/// Planned use: store the TEE validator pubkey per-environment,
-/// pause/unpause the program, set minimum flush delays, etc.
-#[repr(C)]
-pub struct ProgramConfig {
-    pub admin_multisig: Address,
-    pub paused: bool,
-    pub min_flush_delay_secs: i64,
     pub bump: u8,
 }

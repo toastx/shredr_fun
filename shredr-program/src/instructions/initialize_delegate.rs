@@ -13,8 +13,49 @@
 //! | 6 | delegation_record   |        | ✓        | MagicBlock delegation record                   |
 //! | 7 | delegation_metadata |        | ✓        | MagicBlock delegation metadata                 |
 //! | 8 | system_program      |        |          | System Program                                 |
-
-
+//!
+//! ## Instruction Data
+//!
+//! `[deposit_amount: u64]` — 8 bytes. The burner's identity comes from the
+//! `burner` account (index 1); the PDA is `[STEALTH_ADDRESS, burner_pubkey]`, so
+//! no salt or separate pubkey is passed — the one-time burner alone makes it
+//! unique.
+//!
+//! ## The two roles
+//!
+//! `deposit_amount` selects which kind of stealth PDA this creates. The program
+//! stores no role marker; the distinction is entirely the client's:
+//!
+//! - **`> 0` — deposit PDA.** The amount is what the burner has already received
+//!   and is swept into the PDA here.
+//! - **`0` — exit PDA.** An empty delegated PDA, funded later by a
+//!   `PrivateTransfer` from a deposit PDA inside the rollup, and undelegated
+//!   afterwards so it can pay out on the base layer.
+//!
+//! ## Flow
+//!
+//! 1. Derive and verify the stealth PDA address from the burner.
+//! 2. **Create the PDA account** (relayer pays rent). A pre-funded address is
+//!    built with Transfer + Allocate + Assign, since System's `CreateAccount`
+//!    refuses a non-empty account.
+//! 3. **Sweep `deposit_amount` from the burner into the PDA** (burner signs).
+//! 4. Write discriminator + stealth state.
+//! 5. Create ACL permission for the burner.
+//! 6. Delegate the account to a MagicBlock TEE validator.
+//!
+//! Both PDAs in a cycle must be delegated to the **same** validator, or the
+//! `PrivateTransfer` between them is not executable — see `constants::tee_validator`.
+//!
+//! ## Security
+//!
+//! - Relayer must sign (pays for account creation + delegation).
+//! - Burner must sign (proves ownership of the derived keypair *and* authorizes
+//!   moving its received funds into the PDA).
+//! - The stealth PDA is re-derived and compared to the provided account.
+//! - `owner_program` and `system_program` are pinned to their expected addresses.
+//! - A discriminator is written before any state to prevent type confusion.
+//! - An existing PDA is reused rather than rejected, but only by its original
+//!   burner and only while undelegated.
 
 use crate::constants::{seeds, tee_validator, PROGRAM_ADDRESS};
 use crate::errors::ShredrError;
@@ -80,10 +121,11 @@ impl<'a> InitializeAndDelegate<'a> {
             return Err(ShredrError::AlreadyDelegated.into());
         }
 
-        // A stealth PDA outlives its first cycle: after `CommitAndUndelegateStealth`
-        // and `Withdraw` it still holds its rent-exempt lamports. Reuse it rather
-        // than refusing, so a burner can take a second deposit and the main PDA can
-        // be re-delegated for the next accumulate/withdraw round.
+        // A stealth PDA can outlive its first cycle: until `CloseStealthAccount`
+        // reclaims it, it still holds its rent-exempt lamports. Reuse it rather
+        // than refusing, so a burner that receives a second deposit — or a PDA
+        // left stranded by an interrupted cycle and picked back up by the client's
+        // pending-deposit scan — can be re-delegated instead of being written off.
         //
         // "Already initialized" means *this program owns it and it has data*, not
         // merely "it has lamports". Anyone can send lamports to an address, and a

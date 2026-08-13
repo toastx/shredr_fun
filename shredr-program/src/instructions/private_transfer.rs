@@ -1,4 +1,18 @@
-//! Private transfer between two stealth PDAs inside the MagicBlock rollup.
+//! Private transfer from a deposit PDA to an exit PDA inside the MagicBlock rollup.
+//!
+//! This is the hop that breaks the on-chain link: the address that received a
+//! deposit is not the address that later pays out, and the move between them
+//! happens in the rollup, so it never appears on Solana. Both accounts must be
+//! delegated to the *same* validator for this to be executable — see
+//! `constants::tee_validator`.
+//!
+//! Transferring the source's full balance leaves it at exactly its rent-exempt
+//! minimum with `deposited_amount == 0`, which is the state
+//! `CloseStealthAccount` requires: undelegate the drained deposit PDA, then close
+//! it to reclaim the rent.
+//!
+//! The instruction itself is symmetric and role-agnostic — it moves lamports
+//! between any two stealth PDAs. "Deposit" and "exit" are client conventions.
 //!
 //! ## Accounts
 //!

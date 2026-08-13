@@ -130,6 +130,27 @@ pub enum StealthInstruction {
     )]
     Withdraw { amount: u64 },
 
+    /// Close a spent stealth PDA and reclaim its rent to the payee
+    #[account(
+        0,
+        signer,
+        name = "burner",
+        desc = "Burner keypair that owns the stealth account, proves ownership"
+    )]
+    #[account(
+        1,
+        writable,
+        name = "stealth_account",
+        desc = "Spent stealth PDA to close (deposited_amount must be zero)"
+    )]
+    #[account(
+        2,
+        writable,
+        name = "rent_payee",
+        desc = "Receives the reclaimed rent, normally the relayer"
+    )]
+    CloseStealthAccount {},
+
     /// Undelegation callback invoked by MagicBlock delegation program
     #[account(
         0,

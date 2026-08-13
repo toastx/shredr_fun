@@ -1,4 +1,13 @@
-//! Withdraw lamports from a stealth PDA to any destination address.
+//! Withdraw lamports from an undelegated exit PDA to any destination address.
+//!
+//! The last step of a cycle's rollup phase: the exit PDA has received funds via
+//! `PrivateTransfer` and been returned to the base layer by
+//! `CommitAndUndelegateStealth`, and now pays out to an arbitrary address.
+//!
+//! A full withdrawal leaves the PDA at its rent-exempt minimum with
+//! `deposited_amount == 0` — the state `CloseStealthAccount` needs to reclaim the
+//! rent. Note this instruction deliberately leaves `owner` intact when draining:
+//! `Close` authorizes against that field, so clearing it would strand the rent.
 //!
 //! ## Accounts
 //!
@@ -29,7 +38,6 @@ use crate::helpers::get_stealth_mut;
 use crate::helpers::parse_amount;
 use crate::helpers::verify_stealth_pda;
 use crate::AccountView;
-use crate::Address;
 use crate::ProgramError;
 use crate::ProgramResult;
 
@@ -99,17 +107,14 @@ impl<'a> Withdraw<'a> {
         stealth_account.set_lamports(new_stealth_lamports);
         destination.set_lamports(new_destination_lamports);
 
+        // A fully drained account keeps its `owner` and `bump`: `CloseStealthAccount`
+        // authorizes the caller by matching the recorded owner against the signer,
+        // and a drained exit PDA is exactly the account we want to close. Zeroing
+        // the owner here would destroy that proof and strand the rent forever.
         stealth_data.deposited_amount = stealth_data
             .deposited_amount
             .checked_sub(amount)
             .ok_or(ProgramError::InsufficientFunds)?;
-
-        // If fully drained, zero out the account state
-        if stealth_data.deposited_amount == 0 {
-            stealth_data.owner = Address::default();
-            stealth_data.delegated = false;
-            stealth_data.bump = 0;
-        }
 
         Ok(())
     }

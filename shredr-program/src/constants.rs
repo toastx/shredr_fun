@@ -16,48 +16,26 @@ pub const PROGRAM_ADDRESS: Address = Address::new_from_array(crate::ID);
 ///
 /// Mirrors `SEEDS` in [`src/lib/ShredrProgram.ts`].
 pub mod seeds {
-    /// Seed for the global program config PDA (reserved for future use).
-    pub const PROGRAM_CONFIG: &[u8] = b"shredr_program_config";
     /// Seed for stealth account PDAs: `[STEALTH_ADDRESS, burner_pubkey]`.
+    ///
+    /// The only seed prefix the program uses. Deposit and exit PDAs share it —
+    /// the program does not distinguish the two roles.
     pub const STEALTH_ADDRESS: &[u8] = b"shredr_stealth_address";
-    /// Seed for user address PDAs (reserved for future use).
-    pub const USER_ADDRESS: &[u8] = b"shredr_user_address";
 }
 
-// ============ SHREDR DENOMINATIONS ============
-// Mirrors `NORMALIZED_DENOMINATIONS_SOL` / `DEFAULT_DENOMINATION_SOL` in
-// `src/lib/constants.ts`.
-
-/// Lamports per SOL.
-pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
-
-/// Allowed normalized denominations (in lamports) for amount-correlation
-/// resistance. Mirrors `NORMALIZED_DENOMINATIONS_SOL = [1, 10, 100, 1000]` SOL.
-pub const NORMALIZED_DENOMINATIONS_LAMPORTS: [u64; 4] = [
-    1 * LAMPORTS_PER_SOL,
-    10 * LAMPORTS_PER_SOL,
-    100 * LAMPORTS_PER_SOL,
-    1_000 * LAMPORTS_PER_SOL,
-];
-
-/// Default user-preferred denomination (in lamports). Mirrors
-/// `DEFAULT_DENOMINATION_SOL = 1` SOL.
-pub const DEFAULT_DENOMINATION_LAMPORTS: u64 = 1 * LAMPORTS_PER_SOL;
-
-// ============ COMMIT DELAY WINDOW ============
-// Mirrors `COMMIT_DELAY_MIN_SECS` / `COMMIT_DELAY_MAX_SECS` in
-// `src/lib/constants.ts`.
-
-/// Minimum commit-delay window (seconds): 6 hours.
-pub const COMMIT_DELAY_MIN_SECS: i64 = 6 * 60 * 60;
-/// Maximum commit-delay window (seconds): 48 hours.
-pub const COMMIT_DELAY_MAX_SECS: i64 = 48 * 60 * 60;
-
-// ============ FIXED SALT ============
-
-/// Fixed salt used when deriving stealth/main PDAs from a burner pubkey.
-/// Mirrors `SHREDR_FIXED_SALT` (all-zero 32 bytes) in `src/lib/constants.ts`.
-pub const SHREDR_FIXED_SALT: [u8; 32] = [0u8; 32];
+// ============ POLICY: NOT ENFORCED ON-CHAIN ============
+//
+// Amount normalization (`NORMALIZED_DENOMINATIONS_SOL`) and the commit-delay
+// window (`COMMIT_DELAY_MIN_SECS` / `COMMIT_DELAY_MAX_SECS`) live in
+// `src/lib/constants.ts` and are enforced by the client alone. They are
+// deliberately absent here: mirroring them as unused constants implied an
+// on-chain guarantee the program never made.
+//
+// The consequence is worth stating plainly. A deposit flows to a single exit
+// PDA rather than through a shared aggregation account, so the amount arriving
+// on the base layer equals the amount that left it. An observer watching both
+// legs links them by amount alone unless the client normalizes deposit sizes
+// and spaces the legs apart in time.
 
 // ============ MAGICBLOCK / ACL PROGRAM IDS ============
 // Mirrors `MAGIC_BLOCK_PROGRAM_ID`, `MAGIC_CONTEXT`, `PERMISSION_PROGRAM_ID`
@@ -101,6 +79,18 @@ pub const TEE_VALIDATOR_MAINNET: &str = "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n
 ///   a devnet validator identity that would be invalid on-chain there.
 ///
 /// Build for mainnet with `cargo build-sbf --features mainnet`.
+///
+/// # Co-residency
+///
+/// `PrivateTransfer` needs the deposit PDA and the exit PDA program-owned and
+/// writable **in the same rollup at the same time**, so both must be delegated to
+/// the same validator. Returning `None` delegates to whatever the network picks,
+/// which is only safe while that choice is stable — if two PDAs in one cycle land
+/// on different ephemeral rollups, the transfer between them is simply not
+/// executable and the funds sit in the deposit PDA until it is undelegated.
+///
+/// This is on the critical path of every withdrawal, so on devnet either confirm
+/// the network default is a single validator or pin one here.
 #[cfg(feature = "mainnet")]
 pub fn tee_validator() -> Option<Address> {
     Some(Address::from_str_const(TEE_VALIDATOR_MAINNET))

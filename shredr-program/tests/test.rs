@@ -42,6 +42,7 @@ const IX_PRIVATE_TRANSFER: u8 = 1;
 const IX_COMMIT_STEALTH: u8 = 2;
 const IX_COMMIT_AND_UNDELEGATE_STEALTH: u8 = 3;
 const IX_WITHDRAW: u8 = 4;
+const IX_CLOSE_STEALTH_ACCOUNT: u8 = 5;
 const IX_UNDELEGATION_CALLBACK: u8 = 0xFF;
 
 // ─────────────────────────────────────────────
@@ -258,6 +259,25 @@ fn withdraw_ix(owner: &Pubkey, stealth: &Pubkey, destination: &Pubkey, amount: u
     )
 }
 
+fn close_ix(owner: &Pubkey, stealth: &Pubkey, rent_payee: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        program_id(),
+        &[IX_CLOSE_STEALTH_ACCOUNT],
+        vec![
+            AccountMeta::new_readonly(*owner, true),
+            AccountMeta::new(*stealth, false),
+            AccountMeta::new(*rent_payee, false),
+        ],
+    )
+}
+
+/// A spent stealth PDA: drained to `deposited_amount == 0`, holding only rent,
+/// undelegated. This is the state both roles reach at the end of a cycle — the
+/// deposit PDA after `PrivateTransfer`, the exit PDA after `Withdraw`.
+fn spent_stealth(mollusk: &Mollusk, burner: &Pubkey) -> Stealth {
+    funded_stealth(mollusk, burner, [12u8; 32], 0)
+}
+
 // ─────────────────────────────────────────────
 // Layout
 // ─────────────────────────────────────────────
@@ -319,7 +339,7 @@ fn unknown_discriminator_is_rejected() {
     let mollusk = mollusk();
     let key = Pubkey::new_unique();
 
-    for discriminator in [5u8, 6, 42, 0xFE] {
+    for discriminator in [6u8, 7, 42, 0xFE] {
         mollusk.process_and_validate_instruction(
             &Instruction::new_with_bytes(
                 program_id(),
@@ -744,7 +764,7 @@ fn withdraw_moves_lamports_to_destination() {
 }
 
 #[test]
-fn withdraw_of_full_balance_clears_state_and_leaves_rent() {
+fn withdraw_of_full_balance_leaves_rent_and_preserves_owner() {
     let mollusk = mollusk();
     let rent = stealth_rent(&mollusk);
 
@@ -752,13 +772,12 @@ fn withdraw_of_full_balance_clears_state_and_leaves_rent() {
     let stealth = funded_stealth(&mollusk, &burner, [7u8; 32], 5 * LAMPORTS_PER_SOL);
     let destination = Pubkey::new_unique();
 
-    // A fully drained account is reset: owner zeroed, undelegated, bump cleared.
-    // `salt` and `deposit_timestamp` are deliberately left intact by the program.
+    // Only `deposited_amount` moves. `owner` and `bump` must survive the drain:
+    // `CloseStealthAccount` authorizes against `owner`, so clearing it here would
+    // make the rent unreclaimable. `salt` and `deposit_timestamp` are likewise
+    // left intact.
     let mut expected_state = stealth.state.clone();
-    expected_state.owner = Pubkey::default();
     expected_state.deposited_amount = 0;
-    expected_state.delegated = false;
-    expected_state.bump = 0;
     let expected_state = expected_state.to_bytes();
 
     mollusk.process_and_validate_instruction(
@@ -973,6 +992,247 @@ fn withdraw_requires_three_accounts() {
             (stealth.key, stealth.account.clone()),
         ],
         &[Check::err(ProgramError::NotEnoughAccountKeys)],
+    );
+}
+
+// ─────────────────────────────────────────────
+// CloseStealthAccount
+// ─────────────────────────────────────────────
+
+#[test]
+fn close_reclaims_rent_and_returns_account_to_system() {
+    let mollusk = mollusk();
+    let rent = stealth_rent(&mollusk);
+    let burner = Pubkey::new_unique();
+    let stealth = spent_stealth(&mollusk, &burner);
+    let payee = Pubkey::new_unique();
+
+    let result = mollusk.process_and_validate_instruction(
+        &close_ix(&burner, &stealth.key, &payee),
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (stealth.key, stealth.account.clone()),
+            (payee, system_account(0)),
+        ],
+        &[
+            Check::success(),
+            Check::account(&stealth.key).lamports(0).build(),
+            Check::account(&payee).lamports(rent).build(),
+        ],
+    );
+
+    // The rent is not merely moved — the account is handed back to the System
+    // Program with no data, so it stops being an enumerable SHREDR account.
+    let closed = result
+        .get_account(&stealth.key)
+        .expect("closed account still present in result");
+    assert_eq!(closed.owner, solana_sdk_ids::system_program::ID);
+    assert!(closed.data.is_empty(), "data should be truncated to zero");
+}
+
+#[test]
+fn close_rejects_non_empty_account() {
+    let mollusk = mollusk();
+    let burner = Pubkey::new_unique();
+
+    // The interlock: an account still holding a deposit must never be closable,
+    // or `Close` becomes a way to sweep user funds to an arbitrary payee.
+    let stealth = funded_stealth(&mollusk, &burner, [13u8; 32], LAMPORTS_PER_SOL);
+    let payee = Pubkey::new_unique();
+
+    mollusk.process_and_validate_instruction(
+        &close_ix(&burner, &stealth.key, &payee),
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (stealth.key, stealth.account.clone()),
+            (payee, system_account(0)),
+        ],
+        &[Check::err(shredr_err(ShredrError::AccountNotEmpty))],
+    );
+}
+
+#[test]
+fn close_rejects_delegated_account() {
+    let mollusk = mollusk();
+    let burner = Pubkey::new_unique();
+    let (key, bump) = derive_stealth_pda(&burner);
+    let state = StealthState::new(burner, [14u8; 32], bump).delegated(true);
+    let payee = Pubkey::new_unique();
+
+    mollusk.process_and_validate_instruction(
+        &close_ix(&burner, &key, &payee),
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (key, state.to_account(stealth_rent(&mollusk))),
+            (payee, system_account(0)),
+        ],
+        &[Check::err(shredr_err(ShredrError::AlreadyDelegated))],
+    );
+}
+
+#[test]
+fn close_rejects_delegation_program_owned_account() {
+    let mollusk = mollusk();
+    let burner = Pubkey::new_unique();
+    let stealth = spent_stealth(&mollusk, &burner);
+
+    // The realistic on-chain shape of a delegated PDA: the delegation program owns
+    // it. Without the pre-check this would surface as the misleading
+    // `InvalidProgramOwner` from `get_stealth_mut`.
+    let mut account = stealth.account.clone();
+    account.owner = DELEGATION_PROGRAM_ID;
+    let payee = Pubkey::new_unique();
+
+    mollusk.process_and_validate_instruction(
+        &close_ix(&burner, &stealth.key, &payee),
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (stealth.key, account),
+            (payee, system_account(0)),
+        ],
+        &[Check::err(shredr_err(ShredrError::AlreadyDelegated))],
+    );
+}
+
+#[test]
+fn close_requires_owner_signature() {
+    let mollusk = mollusk();
+    let burner = Pubkey::new_unique();
+    let stealth = spent_stealth(&mollusk, &burner);
+    let payee = Pubkey::new_unique();
+
+    let mut ix = close_ix(&burner, &stealth.key, &payee);
+    ix.accounts[0].is_signer = false;
+
+    mollusk.process_and_validate_instruction(
+        &ix,
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (stealth.key, stealth.account.clone()),
+            (payee, system_account(0)),
+        ],
+        &[Check::err(shredr_err(ShredrError::MissingSigner))],
+    );
+}
+
+#[test]
+fn close_rejects_non_owner_signer() {
+    let mollusk = mollusk();
+    let burner = Pubkey::new_unique();
+    let stealth = spent_stealth(&mollusk, &burner);
+    let stranger = Pubkey::new_unique();
+    let payee = Pubkey::new_unique();
+
+    mollusk.process_and_validate_instruction(
+        &close_ix(&stranger, &stealth.key, &payee),
+        &[
+            (stranger, system_account(LAMPORTS_PER_SOL)),
+            (stealth.key, stealth.account.clone()),
+            (payee, system_account(0)),
+        ],
+        &[Check::err(ProgramError::IllegalOwner)],
+    );
+}
+
+#[test]
+fn close_rejects_non_derived_stealth_account() {
+    let mollusk = mollusk();
+    let burner = Pubkey::new_unique();
+    let (_, bump) = derive_stealth_pda(&burner);
+
+    // Program-owned, valid discriminator, owner matches the signer — but not the
+    // canonical `[STEALTH_ADDRESS, burner]` address.
+    let impostor_key = Pubkey::new_unique();
+    let state = StealthState::new(burner, [15u8; 32], bump);
+    let payee = Pubkey::new_unique();
+
+    mollusk.process_and_validate_instruction(
+        &close_ix(&burner, &impostor_key, &payee),
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (impostor_key, state.to_account(stealth_rent(&mollusk))),
+            (payee, system_account(0)),
+        ],
+        &[Check::err(shredr_err(ShredrError::InvalidStealthPDA))],
+    );
+}
+
+#[test]
+fn close_rejects_stealth_account_as_payee() {
+    let mollusk = mollusk();
+    let burner = Pubkey::new_unique();
+    let stealth = spent_stealth(&mollusk, &burner);
+
+    mollusk.process_and_validate_instruction(
+        &close_ix(&burner, &stealth.key, &stealth.key),
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (stealth.key, stealth.account.clone()),
+        ],
+        &[Check::err(shredr_err(ShredrError::SelfTransferNotAllowed))],
+    );
+}
+
+#[test]
+fn close_requires_three_accounts() {
+    let mollusk = mollusk();
+    let burner = Pubkey::new_unique();
+    let stealth = spent_stealth(&mollusk, &burner);
+
+    mollusk.process_and_validate_instruction(
+        &Instruction::new_with_bytes(
+            program_id(),
+            &[IX_CLOSE_STEALTH_ACCOUNT],
+            vec![
+                AccountMeta::new_readonly(burner, true),
+                AccountMeta::new(stealth.key, false),
+            ],
+        ),
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (stealth.key, stealth.account.clone()),
+        ],
+        &[Check::err(ProgramError::NotEnoughAccountKeys)],
+    );
+}
+
+/// The Phase A regression: `Withdraw` used to zero `owner` on a full drain, which
+/// would leave the exit PDA permanently unclosable and its rent stranded. Drain
+/// it, then close it, in that order.
+#[test]
+fn withdraw_full_drain_leaves_account_closable() {
+    let mollusk = mollusk();
+    let rent = stealth_rent(&mollusk);
+    let burner = Pubkey::new_unique();
+    let stealth = funded_stealth(&mollusk, &burner, [16u8; 32], 2 * LAMPORTS_PER_SOL);
+    let destination = Pubkey::new_unique();
+    let payee = Pubkey::new_unique();
+
+    let drained = mollusk.process_and_validate_instruction(
+        &withdraw_ix(&burner, &stealth.key, &destination, 2 * LAMPORTS_PER_SOL),
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (stealth.key, stealth.account.clone()),
+            (destination, system_account(0)),
+        ],
+        &[Check::success()],
+    );
+
+    let drained_account = drained
+        .get_account(&stealth.key)
+        .expect("drained account present");
+
+    mollusk.process_and_validate_instruction(
+        &close_ix(&burner, &stealth.key, &payee),
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (stealth.key, drained_account.clone()),
+            (payee, system_account(0)),
+        ],
+        &[
+            Check::success(),
+            Check::account(&payee).lamports(rent).build(),
+        ],
     );
 }
 
@@ -1269,7 +1529,7 @@ fn initialize_clears_program_validation_before_cpi() {
     assert!(
         !matches!(
             result.raw_result,
-            Err(InstructionError::Custom(6000..=6012))
+            Err(InstructionError::Custom(6000..=6013))
         ),
         "expected failure to come from the missing MagicBlock/ACL programs, \
          not from SHREDR validation; got {:?}",
@@ -1300,7 +1560,7 @@ fn initialize_survives_prefunded_stealth_pda() {
     assert!(
         !matches!(
             result.raw_result,
-            Err(InstructionError::Custom(6000..=6012))
+            Err(InstructionError::Custom(6000..=6013))
         ),
         "a pre-funded stealth PDA must still initialize (failure should come from \
          the missing MagicBlock/ACL programs); got {:?}",

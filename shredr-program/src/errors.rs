@@ -34,6 +34,8 @@ pub enum ShredrError {
     SelfTransferNotAllowed = 6011,
     /// The undelegation buffer is not the delegation program's buffer for this account.
     InvalidBufferAccount = 6012,
+    /// The stealth account still holds a deposit and cannot be closed.
+    AccountNotEmpty = 6013,
 }
 
 impl From<ShredrError> for ProgramError {
