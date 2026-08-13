@@ -36,7 +36,7 @@ use pinocchio::sysvars::clock::Clock;
 use pinocchio::sysvars::rent::Rent;
 use pinocchio::sysvars::Sysvar;
 use pinocchio::AccountView;
-use pinocchio_system::instructions::{CreateAccount, Transfer};
+use pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer};
 
 pub struct InitializeAndDelegate<'a> {
     pub relayer: &'a AccountView,
@@ -84,7 +84,14 @@ impl<'a> InitializeAndDelegate<'a> {
         // and `Withdraw` it still holds its rent-exempt lamports. Reuse it rather
         // than refusing, so a burner can take a second deposit and the main PDA can
         // be re-delegated for the next accumulate/withdraw round.
-        let is_new = stealth_account.lamports() == 0;
+        //
+        // "Already initialized" means *this program owns it and it has data*, not
+        // merely "it has lamports". Anyone can send lamports to an address, and a
+        // stealth PDA is derivable from its burner pubkey — so keying off the
+        // balance would let a single lamport sent ahead of initialization brick the
+        // address forever: the account would be skipped by the creation step below
+        // and then fail `get_stealth_mut` as system-owned on every retry.
+        let is_new = !stealth_account.owned_by(&PROGRAM_ADDRESS) || stealth_account.data_len() == 0;
 
         if !is_new {
             let existing = get_stealth_mut(stealth_account)?;
@@ -121,15 +128,49 @@ impl<'a> InitializeAndDelegate<'a> {
             let rent =
                 Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
             let rent_lamports = rent.try_minimum_balance(account_space as usize)?;
+            let existing_lamports = stealth_account.lamports();
 
-            CreateAccount {
-                from: relayer,
-                to: stealth_account,
-                lamports: rent_lamports,
-                space: account_space,
-                owner: &PROGRAM_ADDRESS,
+            if existing_lamports == 0 {
+                CreateAccount {
+                    from: relayer,
+                    to: stealth_account,
+                    lamports: rent_lamports,
+                    space: account_space,
+                    owner: &PROGRAM_ADDRESS,
+                }
+                .invoke_signed(&[Signer::from(&create_seeds)])?;
+            } else {
+                // The address was funded before it was initialized. System's
+                // CreateAccount refuses a non-empty account, so build it in the
+                // three steps CreateAccount would otherwise fuse: top up to rent,
+                // allocate, assign.
+                //
+                // Whatever was already sitting here stays in the account but is
+                // deliberately not credited to `deposited_amount` — its sender is
+                // unknown, so it becomes an unwithdrawable rent buffer rather than
+                // a balance the burner could claim.
+                let shortfall = rent_lamports.saturating_sub(existing_lamports);
+                if shortfall > 0 {
+                    Transfer {
+                        from: relayer,
+                        to: stealth_account,
+                        lamports: shortfall,
+                    }
+                    .invoke()?;
+                }
+
+                Allocate {
+                    account: stealth_account,
+                    space: account_space,
+                }
+                .invoke_signed(&[Signer::from(&create_seeds)])?;
+
+                Assign {
+                    account: stealth_account,
+                    owner: &PROGRAM_ADDRESS,
+                }
+                .invoke_signed(&[Signer::from(&create_seeds)])?;
             }
-            .invoke_signed(&[Signer::from(&create_seeds)])?;
         }
 
         // ── Step 2: Sweep the burner's received funds into the PDA ──

@@ -34,6 +34,9 @@ use crate::AccountView;
 use crate::ProgramError;
 use crate::ProgramResult;
 
+use pinocchio::sysvars::rent::Rent;
+use pinocchio::sysvars::Sysvar;
+
 pub struct PrivateTransfer<'a> {
     pub source_burner: &'a AccountView,
     pub source_pda: &'a AccountView,
@@ -66,6 +69,19 @@ impl<'a> PrivateTransfer<'a> {
             .lamports()
             .checked_sub(amount)
             .ok_or(ProgramError::InsufficientFunds)?;
+
+        // Same floor `Withdraw` enforces: `deposited_amount` excludes rent, so a
+        // well-formed transfer always leaves the rent-exempt minimum behind. The
+        // check is a safety net against a lamports/deposited_amount desync —
+        // dropping below rent lets the runtime reap the account, stranding both
+        // the residual lamports and the delegation the rollup depends on.
+        let rent =
+            Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
+        let rent_minimum = rent.try_minimum_balance(source_pda.data_len())?;
+        if new_source_lamports < rent_minimum {
+            return Err(ShredrError::BalanceInvariantViolation.into());
+        }
+
         source_pda.set_lamports(new_source_lamports);
 
         source_data.deposited_amount = source_data

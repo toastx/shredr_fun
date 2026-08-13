@@ -548,6 +548,33 @@ fn private_transfer_rejects_amount_above_deposited() {
 }
 
 #[test]
+fn private_transfer_refuses_to_break_rent_exemption() {
+    let mollusk = mollusk();
+    let burner = Pubkey::new_unique();
+    let (source_key, bump) = derive_stealth_pda(&burner);
+
+    // A desynced account: `deposited_amount` claims 5_000 but only 100 lamports
+    // sit above the rent-exempt minimum. Moving the full claimed balance would
+    // drop the account below rent and let the runtime reap it.
+    let source_state = StealthState::new(burner, [9u8; 32], bump).deposited(5_000);
+    let source_account = source_state.to_account(stealth_rent(&mollusk) + 100);
+
+    let destination = funded_stealth(&mollusk, &Pubkey::new_unique(), [10u8; 32], 0);
+
+    mollusk.process_and_validate_instruction(
+        &private_transfer_ix(&burner, &source_key, &destination.key, 5_000),
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (source_key, source_account),
+            (destination.key, destination.account.clone()),
+        ],
+        &[Check::err(shredr_err(
+            ShredrError::BalanceInvariantViolation,
+        ))],
+    );
+}
+
+#[test]
 fn private_transfer_rejects_zero_amount() {
     let mollusk = mollusk();
     let source_burner = Pubkey::new_unique();
@@ -877,6 +904,31 @@ fn withdraw_rejects_stealth_account_as_destination() {
             (stealth.key, stealth.account.clone()),
         ],
         &[Check::err(shredr_err(ShredrError::SelfTransferNotAllowed))],
+    );
+}
+
+#[test]
+fn withdraw_rejects_non_derived_stealth_account() {
+    let mollusk = mollusk();
+    let burner = Pubkey::new_unique();
+    let destination = Pubkey::new_unique();
+
+    // Program-owned, correct discriminator, `owner` matches the signer — but the
+    // address is not `[STEALTH_ADDRESS, burner]`. Ownership plus discriminator
+    // must not be enough on their own.
+    let (_, bump) = derive_stealth_pda(&burner);
+    let impostor_key = Pubkey::new_unique();
+    let state = StealthState::new(burner, [11u8; 32], bump).deposited(LAMPORTS_PER_SOL);
+    let account = state.to_account(stealth_rent(&mollusk) + LAMPORTS_PER_SOL);
+
+    mollusk.process_and_validate_instruction(
+        &withdraw_ix(&burner, &impostor_key, &destination, LAMPORTS_PER_SOL),
+        &[
+            (burner, system_account(LAMPORTS_PER_SOL)),
+            (impostor_key, account),
+            (destination, system_account(0)),
+        ],
+        &[Check::err(shredr_err(ShredrError::InvalidStealthPDA))],
     );
 }
 
@@ -1217,10 +1269,41 @@ fn initialize_clears_program_validation_before_cpi() {
     assert!(
         !matches!(
             result.raw_result,
-            Err(InstructionError::Custom(6000..=6011))
+            Err(InstructionError::Custom(6000..=6012))
         ),
         "expected failure to come from the missing MagicBlock/ACL programs, \
          not from SHREDR validation; got {:?}",
+        result.raw_result
+    );
+}
+
+#[test]
+fn initialize_survives_prefunded_stealth_pda() {
+    let mollusk = mollusk();
+
+    // Anyone can send lamports to a stealth PDA, and the address is derivable
+    // from the burner pubkey. One lamport sent ahead of initialization must not
+    // be able to brick the address: keying "already initialized" off the balance
+    // would skip account creation and then fail as system-owned forever.
+    let setup = init_setup(None, 1);
+
+    let result = mollusk.process_instruction(
+        &Instruction::new_with_bytes(
+            program_id(),
+            &init_ix_data(LAMPORTS_PER_SOL / 2),
+            setup.metas.clone(),
+        ),
+        &setup.accounts,
+    );
+
+    assert_eq!(setup.stealth, derive_stealth_pda(&setup.burner).0);
+    assert!(
+        !matches!(
+            result.raw_result,
+            Err(InstructionError::Custom(6000..=6012))
+        ),
+        "a pre-funded stealth PDA must still initialize (failure should come from \
+         the missing MagicBlock/ACL programs); got {:?}",
         result.raw_result
     );
 }

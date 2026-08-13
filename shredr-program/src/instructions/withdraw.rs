@@ -27,6 +27,7 @@
 use crate::errors::ShredrError;
 use crate::helpers::get_stealth_mut;
 use crate::helpers::parse_amount;
+use crate::helpers::verify_stealth_pda;
 use crate::AccountView;
 use crate::Address;
 use crate::ProgramError;
@@ -56,6 +57,13 @@ impl<'a> Withdraw<'a> {
         if &stealth_data.owner != owner.address() {
             return Err(ProgramError::IllegalOwner);
         }
+
+        // Confirm this really is the stealth PDA for that owner, not just some
+        // program-owned account carrying a valid discriminator. Ownership and
+        // discriminator alone would make the withdraw path depend on no other
+        // instruction ever minting a program-owned account outside the
+        // `[STEALTH_ADDRESS, burner]` family.
+        verify_stealth_pda(stealth_account, owner.address())?;
 
         // Must be undelegated — can only withdraw on base layer
         if stealth_data.delegated {
