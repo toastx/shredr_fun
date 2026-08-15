@@ -1,73 +1,41 @@
 //! # SHREDR Privacy Program
 //!
-//! A Solana program implementing stealth account functionality with MagicBlock
-//! ephemeral rollup delegation for private transfers.
+//! Stealth accounts on Solana, using MagicBlock ephemeral rollup delegation to
+//! keep transfers private. State lives in **stealth PDAs** derived from one-time
+//! burner keypairs, each tracking ownership, deposited lamports, and delegation.
 //!
-//! ## Architecture
+//! ## Account roles
 //!
-//! The program manages **stealth PDAs** derived from one-time burner keypairs.
-//! Each stealth PDA tracks deposited lamports, ownership, and delegation status.
+//! A cycle uses two stealth PDAs: a **deposit PDA** receives funds sent to a
+//! one-time burner, and an **exit PDA** receives them *inside the rollup* before
+//! undelegating and paying out on the base layer. The hop between them never
+//! appears on Solana, so the address that takes a deposit is not the one that
+//! pays it out.
 //!
-//! ### Account roles
+//! **The program does not distinguish the two roles**, and should not start to.
+//! Both are `[STEALTH_ADDRESS, burner_pubkey]`; the roles are a client
+//! convention, which is what lets every instruction apply one uniform set of
+//! checks.
 //!
-//! A full cycle uses two stealth PDAs:
+//! ### Instructions
 //!
-//! - **Deposit PDA** — receives the funds sent to a one-time burner.
-//! - **Exit PDA** — receives those funds *inside the rollup*, then undelegates
-//!   and pays out on the base layer.
+//! 1. **InitializeAndDelegate** — create a stealth PDA, set up ACL permissions,
+//!    delegate to a MagicBlock TEE validator.
+//! 2. **PrivateTransfer** — deposit PDA → exit PDA, inside the rollup.
+//! 3. **CommitStealth** — flush rollup state, stay delegated.
+//! 4. **CommitAndUndelegateStealth** — flush and release to the base layer. Runs
+//!    on both PDAs: the deposit PDA once drained, the exit PDA before payout.
+//! 5. **Withdraw** — exit PDA → any address, once undelegated.
+//! 6. **CloseStealthAccount** — reclaim a spent PDA's rent. Both PDAs end here.
+//! 7. **UndelegationCallback** — invoked by the delegation program, not by users.
 //!
-//! The hop between them happens in the rollup and is invisible on Solana, so the
-//! address that receives a deposit is never the address that pays it out.
+//! ### Security model
 //!
-//! **The program does not distinguish these roles**, and should not start to.
-//! Both are the same derivation, `[STEALTH_ADDRESS, burner_pubkey]`, and which
-//! one is a deposit and which an exit is purely a client convention. Keeping the
-//! roles out of on-chain state is what lets every instruction apply one uniform
-//! set of checks.
-//!
-//! ### Instruction Flow
-//!
-//! 1. **InitializeAndDelegate**: Creates a stealth PDA from a burner, writes
-//!    initial state, sets up ACL permissions, and delegates to a MagicBlock TEE
-//!    validator. `deposit_amount > 0` sweeps the burner's funds in (deposit PDA);
-//!    `0` creates an empty delegated PDA to be funded later (exit PDA).
-//!
-//! 2. **PrivateTransfer**: Moves lamports from the deposit PDA to the exit PDA
-//!    inside the rollup. Both accounts must be program-owned and delegated to the
-//!    same validator, and the source's burner must sign.
-//!
-//! 3. **CommitStealth**: Flushes rollup state to the base layer while keeping
-//!    the account delegated.
-//!
-//! 4. **CommitAndUndelegateStealth**: Flushes state AND releases the account
-//!    back to the base layer. Runs on both PDAs — the deposit PDA once drained,
-//!    the exit PDA before it pays out.
-//!
-//! 5. **Withdraw**: After undelegation, the owner (burner) can withdraw
-//!    lamports from the exit PDA to any destination address.
-//!
-//! 6. **CloseStealthAccount**: Reclaims the rent from a spent PDA and hands it
-//!    back to the System Program. Both PDAs end here; without it every cycle
-//!    strands the relayer's rent and leaves an enumerable account behind.
-//!
-//! 7. **UndelegationCallback**: Called by the MagicBlock delegation program
-//!    after finalization. Not user-invoked.
-//!
-//! ### Security Model
-//!
-//! - Stealth PDAs are derived deterministically: `[STEALTH_ADDRESS, burner_pubkey]`.
-//! - The burner keypair is a one-time key derived client-side from `mainKey + nonce`.
-//! - Private transfers happen inside the MagicBlock ephemeral rollup (TEE-secured).
+//! - The burner is a one-time key derived client-side from `mainKey + nonce`.
+//! - Private transfers happen inside the TEE-secured ephemeral rollup.
 //! - Withdrawals require the burner to sign and the account to be undelegated.
-//!
-//! ### What this program does *not* enforce
-//!
-//! Amount- and timing-correlation resistance are **client-side policy**. The
-//! program accepts any deposit and withdrawal amount and imposes no delay between
-//! them. Since a deposit now flows to a single exit PDA rather than through a
-//! shared aggregation account, an on-chain observer who sees both legs can link
-//! them by amount alone. Normalizing deposit sizes and spacing the base-layer
-//! legs apart in time is the client's responsibility.
+//! - Amount- and timing-correlation resistance are **client-side policy**; the
+//!   program accepts any amount and imposes no delay. See `constants`.
 
 #![no_std]
 #![allow(unexpected_cfgs)]

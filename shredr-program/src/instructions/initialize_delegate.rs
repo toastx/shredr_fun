@@ -1,61 +1,12 @@
 //! Initialize a stealth PDA and delegate it to a MagicBlock TEE validator.
 //!
-//! ## Accounts
+//! Instruction data is `[deposit_amount: u64]`; accounts are listed in `idl.rs`.
+//! `deposit_amount > 0` sweeps the burner's funds in (deposit PDA), `0` creates an
+//! empty PDA to be funded later by a `PrivateTransfer` (exit PDA). The program
+//! stores no role marker — the distinction is the client's.
 //!
-//! | # | Account             | Signer | Writable | Description                                    |
-//! |---|---------------------|--------|----------|------------------------------------------------|
-//! | 0 | relayer             | ✓      | ✓        | Pays for the transaction + rent                |
-//! | 1 | burner              | ✓      | ✓        | One-time burner keypair (mainKey+nonce derived) |
-//! | 2 | owner_program       |        |          | This program's address                         |
-//! | 3 | stealth_account     |        | ✓        | Stealth PDA derived from the burner            |
-//! | 4 | permission_account  |        | ✓        | ACL permission account                         |
-//! | 5 | delegation_buffer   |        | ✓        | MagicBlock delegation buffer                   |
-//! | 6 | delegation_record   |        | ✓        | MagicBlock delegation record                   |
-//! | 7 | delegation_metadata |        | ✓        | MagicBlock delegation metadata                 |
-//! | 8 | system_program      |        |          | System Program                                 |
-//!
-//! ## Instruction Data
-//!
-//! `[deposit_amount: u64]` — 8 bytes. The burner's identity comes from the
-//! `burner` account (index 1); the PDA is `[STEALTH_ADDRESS, burner_pubkey]`, so
-//! no salt or separate pubkey is passed — the one-time burner alone makes it
-//! unique.
-//!
-//! ## The two roles
-//!
-//! `deposit_amount` selects which kind of stealth PDA this creates. The program
-//! stores no role marker; the distinction is entirely the client's:
-//!
-//! - **`> 0` — deposit PDA.** The amount is what the burner has already received
-//!   and is swept into the PDA here.
-//! - **`0` — exit PDA.** An empty delegated PDA, funded later by a
-//!   `PrivateTransfer` from a deposit PDA inside the rollup, and undelegated
-//!   afterwards so it can pay out on the base layer.
-//!
-//! ## Flow
-//!
-//! 1. Derive and verify the stealth PDA address from the burner.
-//! 2. **Create the PDA account** (relayer pays rent). A pre-funded address is
-//!    built with Transfer + Allocate + Assign, since System's `CreateAccount`
-//!    refuses a non-empty account.
-//! 3. **Sweep `deposit_amount` from the burner into the PDA** (burner signs).
-//! 4. Write discriminator + stealth state.
-//! 5. Create ACL permission for the burner.
-//! 6. Delegate the account to a MagicBlock TEE validator.
-//!
-//! Both PDAs in a cycle must be delegated to the **same** validator, or the
-//! `PrivateTransfer` between them is not executable — see `constants::tee_validator`.
-//!
-//! ## Security
-//!
-//! - Relayer must sign (pays for account creation + delegation).
-//! - Burner must sign (proves ownership of the derived keypair *and* authorizes
-//!   moving its received funds into the PDA).
-//! - The stealth PDA is re-derived and compared to the provided account.
-//! - `owner_program` and `system_program` are pinned to their expected addresses.
-//! - A discriminator is written before any state to prevent type confusion.
-//! - An existing PDA is reused rather than rejected, but only by its original
-//!   burner and only while undelegated.
+//! Both PDAs in a cycle must be delegated to the *same* validator or the transfer
+//! between them is not executable — see `constants::tee_validator`.
 
 use crate::constants::{seeds, tee_validator, PROGRAM_ADDRESS};
 use crate::errors::ShredrError;
@@ -107,32 +58,20 @@ impl<'a> InitializeAndDelegate<'a> {
             deposit_amount,
         } = self;
 
-        // The burner's identity is the burner account itself — no pubkey is
-        // passed in the instruction data. Kept owned so its bytes can back the
-        // PDA signer seeds through the CPIs below.
+        // Owned so its bytes can back the PDA signer seeds through the CPIs below.
         let burner_key = burner.address().clone();
 
         let bump = verify_stealth_pda(stealth_account, &burner_key)?;
 
-        // A PDA that is currently delegated is owned by the delegation program on
-        // base, so `get_stealth_mut` below would report the misleading
-        // `InvalidProgramOwner`. Name the real condition instead.
+        // Delegated PDAs are owned by the delegation program, so `get_stealth_mut`
+        // would report the misleading `InvalidProgramOwner`.
         if stealth_account.owned_by(&DELEGATION_PROGRAM_ID) {
             return Err(ShredrError::AlreadyDelegated.into());
         }
 
-        // A stealth PDA can outlive its first cycle: until `CloseStealthAccount`
-        // reclaims it, it still holds its rent-exempt lamports. Reuse it rather
-        // than refusing, so a burner that receives a second deposit — or a PDA
-        // left stranded by an interrupted cycle and picked back up by the client's
-        // pending-deposit scan — can be re-delegated instead of being written off.
-        //
-        // "Already initialized" means *this program owns it and it has data*, not
-        // merely "it has lamports". Anyone can send lamports to an address, and a
-        // stealth PDA is derivable from its burner pubkey — so keying off the
-        // balance would let a single lamport sent ahead of initialization brick the
-        // address forever: the account would be skipped by the creation step below
-        // and then fail `get_stealth_mut` as system-owned on every retry.
+        // "Initialized" means owned-with-data, not merely funded: anyone can send a
+        // lamport to a derivable address, and keying off the balance would let that
+        // brick the PDA forever. An existing undelegated PDA is reused, not refused.
         let is_new = !stealth_account.owned_by(&PROGRAM_ADDRESS) || stealth_account.data_len() == 0;
 
         if !is_new {
@@ -146,20 +85,16 @@ impl<'a> InitializeAndDelegate<'a> {
             }
         }
 
-        // ── Step 1: Create the PDA account ──
-        // The relayer pays rent. The PDA is owned by the SHREDR program.
+        // ── Step 1: Create the PDA account (relayer pays rent) ──
         let account_space = (8 + STEALTH_ACCOUNT_SIZE) as u64;
 
         let bump_slice = [bump];
 
-        // The PDA's own seeds, *without* the bump. The SDK helpers below
-        // (`CreatePermissionCpiBuilder::invoke`, `delegate_account`) append the
-        // bump themselves, so passing it here would sign with it twice.
+        // Bump omitted: the SDK helpers below append it themselves, so including it
+        // here would sign with it twice.
         let pda_seeds: &[&[u8]] = &[seeds::STEALTH_ADDRESS, burner_key.as_array()];
 
-        // System's CreateAccount requires the new account to sign, and the new
-        // account is a PDA — so this program signs for it. Unlike the SDK
-        // helpers, `invoke_signed` takes the full seed list, bump included.
+        // `invoke_signed`, unlike those helpers, wants the full seed list.
         let create_seeds = [
             Seed::from(seeds::STEALTH_ADDRESS),
             Seed::from(burner_key.as_array()),
@@ -167,8 +102,8 @@ impl<'a> InitializeAndDelegate<'a> {
         ];
 
         if is_new {
-            let rent =
-                Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
+            let rent = Rent::get()
+                .map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
             let rent_lamports = rent.try_minimum_balance(account_space as usize)?;
             let existing_lamports = stealth_account.lamports();
 
@@ -182,15 +117,10 @@ impl<'a> InitializeAndDelegate<'a> {
                 }
                 .invoke_signed(&[Signer::from(&create_seeds)])?;
             } else {
-                // The address was funded before it was initialized. System's
-                // CreateAccount refuses a non-empty account, so build it in the
-                // three steps CreateAccount would otherwise fuse: top up to rent,
-                // allocate, assign.
-                //
-                // Whatever was already sitting here stays in the account but is
-                // deliberately not credited to `deposited_amount` — its sender is
-                // unknown, so it becomes an unwithdrawable rent buffer rather than
-                // a balance the burner could claim.
+                // Pre-funded address: CreateAccount refuses a non-empty account, so
+                // do the three steps it fuses. The lamports already here are not
+                // credited to `deposited_amount` — their sender is unknown, so they
+                // must not become a balance the burner can claim.
                 let shortfall = rent_lamports.saturating_sub(existing_lamports);
                 if shortfall > 0 {
                     Transfer {
@@ -216,12 +146,8 @@ impl<'a> InitializeAndDelegate<'a> {
         }
 
         // ── Step 2: Sweep the burner's received funds into the PDA ──
-        // People send SOL to the burner (a one-time keypair); the burner signs
-        // here to move that deposit into its program-owned stealth PDA. The
-        // relayer paid rent above, so only user funds land in `deposited_amount`,
-        // preserving the invariant `lamports == rent_exempt_minimum + deposited`.
-        // `deposit_amount == 0` creates an empty delegated PDA (the destination
-        // account, funded later by a private transfer).
+        // The relayer paid rent above, so only user funds land in
+        // `deposited_amount`, preserving `lamports == rent_minimum + deposited`.
         if deposit_amount > 0 {
             Transfer {
                 from: burner,
@@ -248,8 +174,7 @@ impl<'a> InitializeAndDelegate<'a> {
         stealth_state.deposited_amount = previous_deposited
             .checked_add(deposit_amount)
             .ok_or(ProgramError::ArithmeticOverflow)?;
-        // Keep the original deposit time across a top-up; stamp it when funds
-        // first land in an empty account.
+        // Preserve the original deposit time across a top-up.
         if previous_deposited == 0 {
             stealth_state.deposit_timestamp = clock.unix_timestamp;
         }
@@ -257,10 +182,9 @@ impl<'a> InitializeAndDelegate<'a> {
         stealth_state.bump = bump;
 
         // ── Step 4: Create ACL permission for the burner ──
-        // `cpi_create_permission` forwards a bare create, so a second one on an
-        // existing permission PDA fails. The member set never changes for a given
-        // stealth PDA (the burner is baked into its derivation), so on reuse the
-        // permission from the previous cycle is still correct.
+        // A bare create, so it fails on an existing permission PDA. The member set
+        // never changes for a given stealth PDA (the burner is baked into its
+        // derivation), so on reuse the previous cycle's permission still holds.
         if permission_account.lamports() == 0 {
             let member = [Member {
                 flags: MemberFlags::new(),
@@ -285,19 +209,14 @@ impl<'a> InitializeAndDelegate<'a> {
         }
 
         // ── Step 5: Delegate to MagicBlock TEE validator ──
-        // The validator is selected at build time by Cargo feature (see
-        // `constants::tee_validator`): pinned on mainnet, network-default on devnet.
         let delegate_config = DelegateConfig {
             validator: tee_validator(),
             ..Default::default()
         };
 
-        // The relayer is the delegation payer, not the burner: `cpi_delegate`
-        // marks this account `writable_signer` so the delegation program can
-        // fund `delegation_record` and `delegation_metadata`, and Step 2 has
-        // already swept the burner's entire balance into the stealth PDA. The
-        // relayer also paid the PDA's rent in Step 1, so this keeps the
-        // invariant that `deposited_amount` holds only user funds.
+        // The relayer, not the burner, is the delegation payer: this account funds
+        // `delegation_record` and `delegation_metadata`, and Step 2 already swept
+        // the burner dry.
         delegate_account(
             &[
                 relayer,
@@ -341,23 +260,17 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             return Err(ShredrError::MissingSigner.into());
         }
 
-        // `owner_program` is forwarded to `delegate_account`, which uses it both
-        // to derive the delegation buffer's bump *and* as the owner it creates
-        // that buffer with. A mismatched bump makes the runtime reject the
-        // buffer's signature, but the bump is only one byte: a caller can grind
-        // addresses until one collides (~1/256, and this account is never
-        // required to be executable) and thereby hand the delegation buffer to
-        // an owner of their choosing. Pin it to this program instead.
+        // `delegate_account` uses `owner_program` as the delegation buffer's owner,
+        // and only its derived bump is checked — one byte, so a caller can grind a
+        // colliding address and take the buffer. Pin it.
         if owner_program.address() != &PROGRAM_ADDRESS {
             return Err(ProgramError::IncorrectProgramId);
         }
 
-        // Passed through to CreateAccount/Transfer/the ACL CPI below.
         if system_program.address() != &pinocchio_system::ID {
             return Err(ProgramError::IncorrectProgramId);
         }
 
-        // Expecting: [deposit_amount(8)] = 8 bytes
         if instruction_data.len() < 8 {
             return Err(ProgramError::InvalidInstructionData);
         }

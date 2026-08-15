@@ -1,52 +1,16 @@
-//! Close a spent stealth PDA and reclaim its rent.
+//! Close a spent stealth PDA and reclaim its rent. Accounts are listed in `idl.rs`.
 //!
-//! ## Accounts
+//! Both roles end here: the deposit PDA once `PrivateTransfer` has emptied it, the
+//! exit PDA once `Withdraw` has paid out — in each case after undelegation.
+//! Without it every cycle strands the relayer's rent and leaves an enumerable
+//! program-owned account behind.
 //!
-//! | # | Account          | Signer | Writable | Description                                  |
-//! |---|------------------|--------|----------|----------------------------------------------|
-//! | 0 | owner            | ✓      |          | Burner that owns the stealth account         |
-//! | 1 | stealth_account  |        | ✓        | Stealth PDA to close                         |
-//! | 2 | rent_payee       |        | ✓        | Receives the reclaimed rent (the relayer)    |
-//!
-//! ## Instruction Data
-//!
-//! None.
-//!
-//! ## When it runs
-//!
-//! Both stealth PDA roles end here, and both are one-shot because the client
-//! rotates burners:
-//!
-//! - **Deposit PDA** — after its balance has been moved to an exit PDA inside the
-//!   rollup by `PrivateTransfer`, then committed and undelegated.
-//! - **Exit PDA** — after `Withdraw` has paid out to a base-layer address.
-//!
-//! Without this, every cycle would permanently strand the relayer's rent (~0.0011
-//! SOL per PDA) and leave a program-owned account that anyone can enumerate.
-//!
-//! ## Security
-//!
-//! - The owner (burner) must sign, and must match the PDA's recorded `owner`.
-//! - The account must be the real `[STEALTH_ADDRESS, burner]` derivation, not just
-//!   some program-owned account carrying a valid discriminator.
-//! - The account must be undelegated — closing is a base-layer operation.
-//! - `deposited_amount` must be zero. This is the interlock that keeps `Close`
-//!   from ever becoming a theft primitive: an account holding user funds cannot
-//!   be closed, so the only lamports this instruction can ever move are the
-//!   rent-exempt minimum.
-//!
-//! ## Privacy note
-//!
-//! Closing the deposit PDA and closing the exit PDA are both *base-layer* events.
-//! Issued in one transaction, or close together in time, they re-associate the two
-//! accounts — undoing exactly what moving the transfer into the rollup bought. The
-//! client must decorrelate them in time, and should pass the shared relayer as
-//! `rent_payee`: a counterparty common to every user is an anonymity set, not a
-//! leak.
-//!
-//! `rent_payee` is chosen by the burner even though the relayer paid the rent, so
-//! a user can route it to themselves. The relayer pays the transaction fee and so
-//! decides whether the close happens at all; not worth enforcing on-chain.
+//! Closing both PDAs are *base-layer* events; issued together they re-associate
+//! the two accounts and undo what the in-rollup hop bought, so the client must
+//! space them apart in time. `rent_payee` should be the shared relayer — a
+//! counterparty common to every user is an anonymity set, not a leak. It is the
+//! burner's choice rather than the rent payer's, but the relayer pays the fee and
+//! so decides whether the close happens at all.
 
 use crate::errors::ShredrError;
 use crate::helpers::{get_stealth_mut, verify_stealth_pda};
@@ -78,22 +42,17 @@ impl<'a> CloseStealthAccount<'a> {
 
         verify_stealth_pda(stealth_account, owner.address())?;
 
-        // Closing is a base-layer operation. A delegated account is owned by the
-        // delegation program, so `get_stealth_mut` above would already have
-        // failed — this catches the case where the flag outlived the ownership.
+        // Catches a `delegated` flag that outlived the ownership change.
         if stealth_data.delegated {
             return Err(ShredrError::AlreadyDelegated.into());
         }
 
-        // The interlock: only a spent PDA can be closed, so the lamports moved
-        // below are always just the rent-exempt minimum.
+        // The interlock that keeps this from becoming a theft primitive: only a
+        // spent PDA closes, so the lamports moved are only ever the rent.
         if stealth_data.deposited_amount != 0 {
             return Err(ShredrError::AccountNotEmpty.into());
         }
 
-        // Sweep the rent, then hand the account back to the System Program. This
-        // mirrors `ephemeral_rollups_pinocchio::utils::close_pda_acc`, open-coded
-        // to keep the crate's checked-arithmetic convention.
         let remaining = stealth_account.lamports();
         let payee_lamports = rent_payee
             .lamports()
@@ -107,11 +66,9 @@ impl<'a> CloseStealthAccount<'a> {
             .resize(0)
             .map_err(|_| -> ProgramError { ShredrError::AccountDataTooSmall.into() })?;
 
-        // SAFETY: the account is program-owned (checked by `get_stealth_mut`), is
-        // the verified stealth PDA, and has been drained to zero lamports and zero
-        // data above. The `&mut StealthAccount` from `get_stealth_mut` is dead by
-        // this point — `resize(0)` has already invalidated that view, and nothing
-        // reads it afterwards.
+        // SAFETY: verified program-owned stealth PDA, now at zero lamports and zero
+        // data. The `&mut StealthAccount` is dead — `resize(0)` invalidated it and
+        // nothing reads it after this point.
         unsafe { stealth_account.assign(&pinocchio_system::ID) };
 
         Ok(())
@@ -129,9 +86,8 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for CloseStealthAccount<'a> {
         let stealth_account = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let rent_payee = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
 
-        // Paying the rent to the account being closed would credit and debit the
-        // same account, which the runtime rejects as a lamports imbalance. Fail
-        // early with a clear error, as `Withdraw` does for its destination.
+        // Paying into the account being closed credits and debits the same account,
+        // which the runtime rejects as a lamports imbalance.
         if rent_payee.address() == stealth_account.address() {
             return Err(ShredrError::SelfTransferNotAllowed.into());
         }
@@ -140,9 +96,8 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for CloseStealthAccount<'a> {
             return Err(ShredrError::MissingSigner.into());
         }
 
-        // A still-delegated PDA is owned by the delegation program on base layer,
-        // so `get_stealth_mut` would report the misleading `InvalidProgramOwner`.
-        // Name the real condition instead, as `InitializeAndDelegate` does.
+        // Delegated PDAs are owned by the delegation program, so `get_stealth_mut`
+        // would report the misleading `InvalidProgramOwner`.
         if stealth_account.owned_by(&DELEGATION_PROGRAM_ID) {
             return Err(ShredrError::AlreadyDelegated.into());
         }

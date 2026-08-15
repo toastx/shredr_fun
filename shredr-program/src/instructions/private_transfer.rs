@@ -1,45 +1,17 @@
 //! Private transfer from a deposit PDA to an exit PDA inside the MagicBlock rollup.
+//! Instruction data is `[amount: u64]`; accounts are listed in `idl.rs`.
 //!
-//! This is the hop that breaks the on-chain link: the address that received a
-//! deposit is not the address that later pays out, and the move between them
-//! happens in the rollup, so it never appears on Solana. Both accounts must be
-//! delegated to the *same* validator for this to be executable — see
-//! `constants::tee_validator`.
+//! This is the hop that breaks the on-chain link — it happens in the rollup and
+//! never appears on Solana. Both accounts must be delegated to the *same*
+//! validator to be writable together; see `constants::tee_validator`.
 //!
-//! Transferring the source's full balance leaves it at exactly its rent-exempt
-//! minimum with `deposited_amount == 0`, which is the state
-//! `CloseStealthAccount` requires: undelegate the drained deposit PDA, then close
-//! it to reclaim the rent.
+//! Moving the full balance leaves the source at its rent-exempt minimum with
+//! `deposited_amount == 0`, the state `CloseStealthAccount` requires.
 //!
-//! The instruction itself is symmetric and role-agnostic — it moves lamports
-//! between any two stealth PDAs. "Deposit" and "exit" are client conventions.
-//!
-//! ## Accounts
-//!
-//! | # | Account          | Signer | Writable | Description                                  |
-//! |---|------------------|--------|----------|----------------------------------------------|
-//! | 0 | source_burner    | ✓      |          | Burner that owns the source PDA, authorizes  |
-//! | 1 | source_pda       |        | ✓        | Source stealth PDA                           |
-//! | 2 | destination_pda  |        | ✓        | Destination stealth PDA                      |
-//!
-//! ## Instruction Data
-//!
-//! `[amount: u64]` — 8 bytes, little-endian.
-//!
-//! ## Security
-//!
-//! - A PDA can never sign, so the transfer is authorized by the source's burner:
-//!   it must sign, and its address must equal the source PDA's recorded `owner`.
-//!   This is the burner registered as the ACL member at delegation time.
-//! - Both accounts must be owned by the SHREDR program.
-//! - Lamports are moved directly (valid inside MagicBlock ephemeral rollups).
-//! - `deposited_amount` is updated atomically for both accounts.
-//!
-//! ## Note on lamport manipulation
-//!
-//! Direct `set_lamports` is used instead of CPI `SystemTransfer` because this
-//! instruction executes inside a MagicBlock ephemeral rollup where the program
-//! owns both accounts and CPI to the System Program may not be available.
+//! A PDA can never sign, so the source's burner authorizes: it signs, and must
+//! match the PDA's recorded `owner` (the ACL member registered at delegation).
+//! Lamports move via `set_lamports` rather than a System CPI because both
+//! accounts are program-owned and the rollup may not offer that CPI.
 
 use crate::constants::PROGRAM_ADDRESS;
 use crate::errors::ShredrError;
@@ -69,8 +41,6 @@ impl<'a> PrivateTransfer<'a> {
 
         let source_data = get_stealth_mut(source_pda)?;
 
-        // Authorize against the recorded owner: the signer must be the burner
-        // that owns the source PDA, not the PDA itself (a PDA never signs).
         if &source_data.owner != source_burner.address() {
             return Err(ProgramError::IllegalOwner);
         }
@@ -84,11 +54,9 @@ impl<'a> PrivateTransfer<'a> {
             .checked_sub(amount)
             .ok_or(ProgramError::InsufficientFunds)?;
 
-        // Same floor `Withdraw` enforces: `deposited_amount` excludes rent, so a
-        // well-formed transfer always leaves the rent-exempt minimum behind. The
-        // check is a safety net against a lamports/deposited_amount desync —
-        // dropping below rent lets the runtime reap the account, stranding both
-        // the residual lamports and the delegation the rollup depends on.
+        // Safety net against a lamports/deposited_amount desync: below rent the
+        // runtime reaps the account, stranding the residue. Same floor `Withdraw`
+        // enforces.
         let rent =
             Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
         let rent_minimum = rent.try_minimum_balance(source_pda.data_len())?;
@@ -133,17 +101,13 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for PrivateTransfer<'a> {
         let destination_pda = &accounts[2];
         let amount = parse_amount(data)?;
 
-        // Reject self-transfer. Passing the same account as both source and
-        // destination would make `get_stealth_mut` hand out two aliasing
-        // `&mut StealthAccount` references to the same bytes (undefined
-        // behavior, and a violation of that helper's documented SAFETY
-        // contract), on top of being a meaningless no-op transfer.
+        // One account passed twice would make `get_stealth_mut` hand out two
+        // aliasing `&mut` to the same bytes — UB, and a violation of its SAFETY
+        // contract.
         if source_pda.address() == destination_pda.address() {
             return Err(ShredrError::SelfTransferNotAllowed.into());
         }
 
-        // The source's burner authorizes the move (owner match is checked in
-        // `process` against the PDA's recorded owner).
         if !source_burner.is_signer() {
             return Err(ShredrError::MissingSigner.into());
         }

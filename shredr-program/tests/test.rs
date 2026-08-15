@@ -1494,7 +1494,12 @@ fn initialize_reuses_fully_drained_account() {
 #[test]
 fn initialize_rejects_reuse_by_another_burner() {
     let mollusk = mollusk();
-    let setup = init_setup_reused(&mollusk, Some(Pubkey::new_unique()), LAMPORTS_PER_SOL, false);
+    let setup = init_setup_reused(
+        &mollusk,
+        Some(Pubkey::new_unique()),
+        LAMPORTS_PER_SOL,
+        false,
+    );
 
     mollusk.process_and_validate_instruction(
         &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),

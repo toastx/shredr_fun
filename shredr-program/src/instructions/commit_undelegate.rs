@@ -1,22 +1,12 @@
 //! Commit and undelegate instructions for stealth PDAs.
 //!
-//! These instructions manage the lifecycle of delegated stealth accounts
-//! in the MagicBlock ephemeral rollup:
+//! - **CommitStealth**: flush rollup state to base layer, stay delegated.
+//! - **CommitAndUndelegateStealth**: flush and release to base layer.
+//! - **UndelegationCallback**: invoked by the delegation program, not by users.
 //!
-//! - **CommitStealth**: Flush rollup state to base layer, keeping delegation active.
-//! - **CommitAndUndelegateStealth**: Flush state AND release the account back to base layer.
-//! - **UndelegationCallback**: Called by the delegation program after finalization (not user-invoked).
-//!
-//! Undelegation runs on **both** PDAs of a cycle, for different reasons: the exit
-//! PDA so it can pay out on the base layer, and the drained deposit PDA so it can
-//! be closed and its rent reclaimed. Both base-layer events are observable, so the
-//! client must space them apart in time — issued together they re-associate the
-//! two accounts and undo what the in-rollup transfer bought.
-//!
-//! ## Security
-//!
-//! - Commit operations require the relayer to sign.
-//! - UndelegationCallback is invoked by the MagicBlock delegation program via CPI.
+//! Undelegation runs on both PDAs of a cycle — the exit PDA so it can pay out, the
+//! drained deposit PDA so it can be closed. Both are observable base-layer events,
+//! so the client must space them apart in time or they re-associate the accounts.
 
 use crate::errors::ShredrError;
 use crate::helpers::{get_stealth_mut, verify_stealth_pda};
@@ -30,9 +20,7 @@ use ephemeral_rollups_pinocchio::instruction::{
 };
 use ephemeral_rollups_pinocchio::pda::undelegate_buffer_pda_from_delegated_account;
 
-// ─────────────────────────────────────────────
-// Commit  (keeps account delegated, just flushes state to base layer)
-// ─────────────────────────────────────────────
+// ── Commit: flush state, stay delegated ──
 
 pub struct CommitStealth<'a> {
     pub relayer: &'a AccountView,
@@ -88,9 +76,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for CommitStealth<'a> {
     }
 }
 
-// ─────────────────────────────────────────────
-// Commit + Undelegate  (flush state AND release the account back to base layer)
-// ─────────────────────────────────────────────
+// ── Commit + undelegate: flush and release to base layer ──
 
 pub struct CommitAndUndelegateStealth<'a> {
     pub relayer: &'a AccountView,
@@ -146,9 +132,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for CommitAndUndelegateStealth<'
     }
 }
 
-// ─────────────────────────────────────────────
-// Undelegation callback  (called by the delegation program after finalization)
-// ─────────────────────────────────────────────
+// ── Undelegation callback: driven by the delegation program ──
 
 pub struct UndelegationCallback<'a> {
     pub stealth_account: &'a AccountView,
@@ -172,19 +156,12 @@ impl<'a> UndelegationCallback<'a> {
 
         let stealth_state = get_stealth_mut(stealth_account)?;
 
-        // `undelegate` derives the account it re-creates from seeds carried in
-        // `ix_data`, not from anything this program pins down. Confirm what came
-        // back really is this program's stealth PDA for the recorded owner, so
-        // the callback can never mint a program-owned account outside the
-        // `[STEALTH_ADDRESS, burner]` family.
+        // `undelegate` derives the account it re-creates from `ix_data` seeds, so
+        // confirm what came back is really a `[STEALTH_ADDRESS, burner]` PDA.
         verify_stealth_pda(stealth_account, &stealth_state.owner)?;
 
-        // `undelegate` has just recreated the base-layer account (program-owned)
-        // and copied the buffered rollup state back verbatim — which still carries
-        // `delegated = true` from initialization. Clear it now so the account
-        // reflects that it lives on the base layer again; otherwise `Withdraw`
-        // would permanently reject with `AlreadyDelegated` and funds could never
-        // be claimed.
+        // The buffered state was copied back verbatim and still says `delegated`.
+        // Left set, `Withdraw` and `Close` would reject the account forever.
         stealth_state.delegated = false;
 
         Ok(())
@@ -204,28 +181,19 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for UndelegationCallback<'a> {
         let payer = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let system_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
 
-        // Only the MagicBlock delegation program may drive this callback, and
-        // the buffer account is what proves it: the delegation program's
-        // undelegation buffer is the PDA `["undelegate-buffer", stealth_account]`
-        // derived from *its own* program ID, so nothing else can sign for that
-        // address.
-        //
-        // `undelegate` checks `is_signer` but not the address, and it takes the
-        // seeds of the account it re-creates straight from `ix_data`. Without
-        // the address check any caller could pass their own signing keypair as
-        // `buffer_account` and have `undelegate` mint a program-owned PDA of
-        // their choosing with fully attacker-chosen `StealthAccount` bytes —
-        // including pre-creating a victim's stealth PDA with a foreign `owner`,
-        // which would make their `InitializeAndDelegate` fail forever.
+        // These two checks *are* the authorization: the undelegation buffer is a
+        // PDA of the delegation program, so only that program can sign for it.
+        // `undelegate` checks the signature but not the address, and takes the
+        // seeds of the account it re-creates straight from `ix_data` — so without
+        // the address check any caller could pass their own signing keypair and
+        // mint a program-owned PDA with attacker-chosen state.
         let expected_buffer =
             undelegate_buffer_pda_from_delegated_account(stealth_account.address());
         if buffer_account.address() != &expected_buffer {
             return Err(ShredrError::InvalidBufferAccount.into());
         }
 
-        // Re-checked here (and not left to `undelegate`) so the authorization
-        // argument above holds locally: the address alone means nothing if the
-        // account never actually signs.
+        // Duplicated from `undelegate` so the argument above holds locally.
         if !buffer_account.is_signer() {
             return Err(ShredrError::MissingSigner.into());
         }
