@@ -5,9 +5,9 @@
  * Used by NonceService for secure nonce state persistence.
  */
 
-import { ALGORITHM, IV_LENGTH, DB_NAME, DB_VERSION, STORE_NAME } from './constants';
+import { ALGORITHM, IV_LENGTH, DB_NAME, DB_VERSION, STORE_NAME, NOTES_STORE_NAME } from './constants';
 import { uint8ArrayToBase64, base64ToUint8Array, getArrayBuffer } from './utils';
-import { DecryptionError, type NonceState } from './types';
+import { DecryptionError, type NonceState, type UtxoNote } from './types';
 
 // ============ STORAGE SERVICE CLASS ============
 
@@ -33,6 +33,9 @@ export class StorageService {
                 const db = (event.target as IDBOpenDBRequest).result;
                 if (!db.objectStoreNames.contains(STORE_NAME)) {
                     db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+                }
+                if (!db.objectStoreNames.contains(NOTES_STORE_NAME)) {
+                    db.createObjectStore(NOTES_STORE_NAME, { keyPath: 'id' });
                 }
             };
         });
@@ -158,6 +161,56 @@ export class StorageService {
             walletPubkeyHash: walletHash
         };
         await this.saveState(walletHash, state);
+    }
+
+    /**
+     * Read the cached UTXO note tree. Returns an empty list when absent, and
+     * also when the cache cannot be decrypted — a stale cache must degrade to
+     * "rebuild from blobs", never to a hard failure that blocks recovery.
+     */
+    async getNotes(walletHash: string): Promise<UtxoNote[]> {
+        return this.withLock(`notes:${walletHash}`, async () => {
+            if (!this.db) throw new Error('Storage not initialized');
+
+            return new Promise<UtxoNote[]>((resolve, reject) => {
+                const tx = this.db!.transaction(NOTES_STORE_NAME, 'readonly');
+                const store = tx.objectStore(NOTES_STORE_NAME);
+                const request = store.get(walletHash);
+
+                request.onerror = () => reject(new Error('Failed to read notes'));
+                request.onsuccess = async () => {
+                    if (!request.result) {
+                        resolve([]);
+                        return;
+                    }
+                    try {
+                        resolve(JSON.parse(await this.decrypt(request.result.data)));
+                    } catch (e) {
+                        console.warn('[StorageService] notes cache unreadable, rebuilding:', e);
+                        resolve([]);
+                    }
+                };
+
+                tx.onerror = () => reject(new Error('Transaction failed'));
+            });
+        });
+    }
+
+    async saveNotes(walletHash: string, notes: UtxoNote[]): Promise<void> {
+        return this.withLock(`notes:${walletHash}`, async () => {
+            if (!this.db) throw new Error('Storage not initialized');
+
+            const encrypted = await this.encrypt(JSON.stringify(notes));
+
+            return new Promise<void>((resolve, reject) => {
+                const tx = this.db!.transaction(NOTES_STORE_NAME, 'readwrite');
+                const store = tx.objectStore(NOTES_STORE_NAME);
+                const request = store.put({ id: walletHash, data: encrypted });
+
+                request.onerror = () => reject(new Error('Failed to save notes'));
+                request.onsuccess = () => resolve();
+            });
+        });
     }
 
     close(): void {

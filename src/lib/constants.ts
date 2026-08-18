@@ -47,10 +47,13 @@ export const IV_LENGTH = 12;
 export const DB_NAME = "shredr_secure_storage";
 
 /** IndexedDB database version */
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 
 /** IndexedDB object store name */
 export const STORE_NAME = "nonce_state";
+
+/** Encrypted UTXO note tree, keyed by wallet hash. Added in DB_VERSION 2. */
+export const NOTES_STORE_NAME = "utxo_notes";
 
 // ============ NONCE CONSTANTS ============
 

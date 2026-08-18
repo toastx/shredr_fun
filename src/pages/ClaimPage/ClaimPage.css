@@ -248,3 +248,27 @@
         font-size: 1.5rem;
     }
 }
+
+/* ---- Interrupted-cycle recovery notice ---- */
+.claim-recovery {
+    margin: 12px 0;
+    padding: 12px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    text-align: left;
+}
+
+.claim-recovery-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+.claim-recovery-list {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 0.82rem;
+    opacity: 0.8;
+    line-height: 1.5;
+}

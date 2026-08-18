@@ -188,3 +188,50 @@ export class DecryptionError extends Error {
         this.reason = reason;
     }
 }
+
+// ============ UTXO NOTES ============
+
+/**
+ * Which leg of a shred cycle a stealth PDA plays. The program stores no role
+ * marker — both roles are the same `[STEALTH_ADDRESS, burner]` derivation — so
+ * the client is the only place this is recorded.
+ */
+export type UtxoRole = 'deposit' | 'exit';
+
+/**
+ * Where a note sits in its lifecycle. `spent` and `closed` are terminal.
+ *
+ * deposit:  pending_init -> delegated -> spent  (funds moved to an exit PDA)
+ * exit:     pending_init -> delegated -> undelegated -> withdrawn -> closed
+ */
+export type UtxoState =
+    | 'pending_init'
+    | 'delegated'
+    | 'undelegated'
+    | 'withdrawn'
+    | 'closed'
+    | 'spent';
+
+/**
+ * One record per stealth PDA the client creates.
+ *
+ * This is bookkeeping, not a shielded-pool nullifier set: double-spend is
+ * already prevented by the program's account state, and the privacy comes from
+ * the in-rollup hop. The tree exists so a broken flow can be found again.
+ *
+ * Treated as a *hint* during recovery — on-chain state always wins.
+ */
+export interface UtxoNote {
+    /** Nonce chain index; -1 for domain-derived (non-rotating) burners. */
+    nonceIndex: number;
+    role: UtxoRole;
+    burnerAddress: string;
+    stealthPda: string;
+    state: UtxoState;
+    /** Last known `depositedAmount`, in lamports. May be stale. */
+    lamports: number;
+    /** For a deposit note, the nonce index of the exit note it funded. */
+    linkedIndex?: number;
+    createdAt: number;
+    spentAt?: number;
+}
