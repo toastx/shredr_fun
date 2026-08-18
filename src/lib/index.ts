@@ -30,7 +30,9 @@ export {
 } from './ShredrProgram';
 export type { StealthAccountData } from './ShredrProgram';
 
-export type { SigningMode, ShredrState, PendingUtxo, UtxoStatus, ShredResult } from './ShredrClient';
+export type { SigningMode, ShredrState, PendingUtxo, UtxoStatus, ShredResult, PendingAction } from './ShredrClient';
+export { utxoService } from './UtxoService';
+export type { UtxoNote, UtxoRole, UtxoState } from './types';
 
 // Types
 export { DecryptionError } from './types';

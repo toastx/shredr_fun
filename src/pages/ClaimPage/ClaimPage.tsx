@@ -4,8 +4,19 @@ import { useNavigate } from 'react-router-dom';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import { shredrClient } from '../../lib';
+import type { PendingAction } from '../../lib';
 import { MASTER_MESSAGE } from '../../lib/constants';
 import './ClaimPage.css';
+
+/** Human-readable description of each recovery step. */
+const RECOVERY_LABELS: Record<PendingAction['action'], string> = {
+    initialize: 'Sweeping deposit into its stealth account',
+    transfer: 'Moving funds privately to a fresh exit account',
+    undelegate: 'Settling from the rollup to the base layer',
+    withdraw: 'Withdrawing to your wallet',
+    close: 'Reclaiming account rent',
+    forget: 'Clearing a settled record',
+};
 
 interface ClaimPageProps {
     onBack?: () => void;
@@ -30,6 +41,8 @@ function ClaimPage({ onBack }: ClaimPageProps) {
     const [totalBalance, setTotalBalance] = useState<number>(0);
     const [withdrawError, setWithdrawError] = useState<string | null>(null);
     const [withdrawSuccess, setWithdrawSuccess] = useState<string | null>(null);
+    const [recovery, setRecovery] = useState<PendingAction[] | null>(null);
+    const [recoveryBusy, setRecoveryBusy] = useState(false);
     
     // Refs for cleanup and debouncing
     const isMountedRef = useRef<boolean>(true);
@@ -129,6 +142,35 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                 // Set to loadingBalance - the useEffect will handle fetching
                 // This centralizes balance fetching logic in one place
                 setPageState('loadingBalance');
+
+                // Surface any cycle that died mid-flight before acting on it, so
+                // the user sees what is about to be spent on their behalf rather
+                // than watching transactions appear unannounced.
+                try {
+                    const plans = await shredrClient.planPending();
+                    if (!isMountedRef.current || plans.length === 0) return;
+
+                    setRecovery(plans);
+                    setRecoveryBusy(true);
+                    const results = await shredrClient.resumePending(plans);
+                    if (!isMountedRef.current) return;
+
+                    const failed = results.filter((r) => !r.ok);
+                    if (failed.length > 0) {
+                        setWithdrawError(
+                            `Recovered ${results.length - failed.length}/${results.length} pending deposit(s); ` +
+                            `${failed.length} still need attention.`
+                        );
+                    }
+                    await fetchStealthBalance(true);
+                } catch (err) {
+                    console.warn('Pending-deposit recovery failed:', err);
+                } finally {
+                    if (isMountedRef.current) {
+                        setRecoveryBusy(false);
+                        setRecovery(null);
+                    }
+                }
             }
 
         } catch (err) {
@@ -136,7 +178,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             setWithdrawError('Failed to verify: ' + (err instanceof Error ? err.message : String(err)));
             setPageState('error');
         }
-    }, [publicKey, signMessage]);
+    }, [publicKey, signMessage, fetchStealthBalance]);
 
     const handleWithdraw = useCallback(async () => {
         if (!publicKey) {
@@ -286,6 +328,26 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                    <div className="destination-label">Receiving Address</div>
                    <div className="destination-value">{publicKey?.toBase58()}</div>
                 </div>
+
+                {/* Interrupted cycles found at unlock, shown while they finish */}
+                {recovery && recovery.length > 0 && (
+                    <div className="claim-recovery">
+                        <div className="claim-recovery-title">
+                            {recoveryBusy
+                                ? `Resuming ${recovery.length} interrupted deposit(s)…`
+                                : `Found ${recovery.length} interrupted deposit(s)`}
+                        </div>
+                        <ul className="claim-recovery-list">
+                            {recovery.map((plan) => (
+                                <li key={plan.note.stealthPda}>
+                                    {RECOVERY_LABELS[plan.action]}
+                                    {plan.lamports > 0 &&
+                                        ` — ${(plan.lamports / LAMPORTS_PER_SOL).toFixed(4)} SOL`}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
 
                 {/* Error Message */}
                 {withdrawError && (

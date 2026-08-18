@@ -32,6 +32,7 @@ import {
   DEFAULT_DENOMINATION_SOL,
   UNDELEGATION_POLL_INTERVAL_MS,
   UNDELEGATION_TIMEOUT_MS,
+  WALLET_HASH_LENGTH,
   type NormalizedDenomination,
 } from "./constants";
 import {
@@ -41,9 +42,18 @@ import {
   createCommitAndUndelegateStealthInstruction,
   createStealthWithdrawInstruction,
   parseStealthAccount,
+  MAGIC_BLOCK_PROGRAM_ID,
   type StealthAccountData,
 } from "./ShredrProgram";
-import type { GeneratedNonce, BurnerKeyPair, CreateBlobRequest } from "./types";
+import { utxoService } from "./UtxoService";
+import { deriveWalletHash } from "./utils";
+import type {
+  GeneratedNonce,
+  BurnerKeyPair,
+  CreateBlobRequest,
+  UtxoNote,
+  UtxoRole,
+} from "./types";
 
 // ============ TYPES ============
 
@@ -55,6 +65,13 @@ export type UtxoStatus =
   | "delegated" // initialized + delegated to rollup
   | "ready" // committed back, ready to withdraw
   | "spent"; // already withdrawn
+
+/** A stranded note plus the step that would move it forward. */
+export interface PendingAction {
+  note: UtxoNote;
+  action: "initialize" | "transfer" | "undelegate" | "withdraw" | "close" | "forget";
+  lamports: number;
+}
 
 export interface PendingUtxo {
   nonceIndex: number;
@@ -238,6 +255,51 @@ export class ShredrClient {
     return parseStealthAccount(new Uint8Array(info.data));
   }
 
+  /**
+   * Read a stealth PDA from whichever layer actually holds its state.
+   *
+   * Delegation zeroes the base-layer account data and hands ownership to the
+   * delegation program, so a delegated PDA parses as `null` on base even though
+   * it is holding funds in the rollup. Reading base alone therefore reports
+   * live deposits as empty — re-read from the rollup before concluding that.
+   *
+   * `absent` distinguishes "no such account" from "exists but unreadable here",
+   * so callers never treat an RPC gap as an empty slot.
+   */
+  private async readStealthState(pda: PublicKey): Promise<{
+    state: StealthAccountData | null;
+    absent: boolean;
+    layer: "base" | "rollup";
+  }> {
+    const info = await this.getConnection().getAccountInfo(pda);
+
+    if (info) {
+      const parsed = parseStealthAccount(new Uint8Array(info.data));
+      if (parsed) return { state: parsed, absent: false, layer: "base" };
+    }
+
+    // Either the account is delegated (data zeroed on base) or base has not
+    // caught up yet. The rollup is the only place its state still exists.
+    const delegated =
+      info?.owner.equals(MAGIC_BLOCK_PROGRAM_ID) ?? false;
+
+    if (!info || delegated) {
+      try {
+        const rollup = await this.fetchStealthState(
+          pda,
+          this.getRollupConnection(),
+        );
+        if (rollup) return { state: rollup, absent: false, layer: "rollup" };
+      } catch (err) {
+        // Rollup unreachable: report unreadable, never empty.
+        console.warn("[readStealthState] rollup read failed:", err);
+        if (delegated) return { state: null, absent: false, layer: "rollup" };
+      }
+    }
+
+    return { state: null, absent: !info, layer: "base" };
+  }
+
   // ============ USER STATUS CHECK ============
 
   async checkIfNewUser(
@@ -289,6 +351,21 @@ export class ShredrClient {
     await burnerService.initFromSignature(signature);
 
     this._walletPubkey = walletPubkey;
+
+    // The UTXO tree shares the storage key derived from the same signature, so
+    // it is recoverable on any device the user can sign from.
+    const encKey = nonceService.getEncryptionKey();
+    if (encKey) {
+      try {
+        await utxoService.init(
+          encKey,
+          await deriveWalletHash(walletPubkey, WALLET_HASH_LENGTH),
+        );
+        await utxoService.load();
+      } catch (err) {
+        console.warn("[ShredrClient] UTXO tree unavailable:", err);
+      }
+    }
 
     // 2. Derive persistent main burner + main PDA
     this._mainBurner = await burnerService.deriveMainBurner(signature);
@@ -426,6 +503,7 @@ export class ShredrClient {
   async initializeAndDelegate(
     burner?: BurnerKeyPair,
     depositAmount?: bigint,
+    role?: UtxoRole,
   ): Promise<string> {
     const b = burner ?? this._currentBurner;
     if (!b) throw new Error("No burner available");
@@ -444,7 +522,36 @@ export class ShredrClient {
       deposit,
     );
 
-    return koraRelayer.signAndSend(connection, [ix], [burnerKp]);
+    // Write-ahead: record the note *before* broadcasting. A crash between send
+    // and persist is the one window that strands funds with nothing pointing
+    // at them, so the record must always land first.
+    const [pda] = deriveStealthPDA(burnerKp.publicKey);
+    await this.recordNote(b, pda, role ?? "deposit", Number(deposit));
+
+    const signature = await koraRelayer.signAndSend(connection, [ix], [burnerKp]);
+    await utxoService.setState(pda.toBase58(), "delegated", Number(deposit));
+    return signature;
+  }
+
+  /** Persist a note for a burner/PDA pair, tolerating an uninitialised tree. */
+  private async recordNote(
+    burner: BurnerKeyPair,
+    pda: PublicKey,
+    role: UtxoRole,
+    lamports: number,
+  ): Promise<void> {
+    try {
+      await utxoService.record({
+        nonceIndex: burner.nonceIndex,
+        role,
+        burnerAddress: burner.address,
+        stealthPda: pda.toBase58(),
+        lamports,
+      });
+    } catch (err) {
+      // Recovery bookkeeping must never break the flow it is recording.
+      console.warn("[ShredrClient] failed to record UTXO note:", err);
+    }
   }
 
   /**
@@ -506,11 +613,22 @@ export class ShredrClient {
 
     // Dispatched against the rollup RPC, where the delegated PDAs live: Kora
     // signs as fee payer but the transaction is broadcast on the rollup.
-    return koraRelayer.signAndSendOn(
+    const signature = await koraRelayer.signAndSendOn(
       this.getRollupConnection(),
       [ix],
       [burnerKp],
     );
+
+    // The source is spent only once the transfer confirms; the destination now
+    // carries the balance and becomes the note recovery must chase.
+    await utxoService.setState(sourcePda.toBase58(), "spent", 0);
+    await utxoService.setState(
+      destination.toBase58(),
+      "delegated",
+      Number(amountLamports),
+    );
+
+    return signature;
   }
 
   // ============ ON-CHAIN: COMMIT & UNDELEGATE ============
@@ -679,7 +797,7 @@ export class ShredrClient {
       const exitBurnerKp = this.burnerToKeypair(exitBurner);
       const [exitPda] = deriveStealthPDA(exitBurnerKp.publicKey);
 
-      await this.initializeAndDelegate(exitBurner, 0n);
+      await this.initializeAndDelegate(exitBurner, 0n, "exit");
       await this.privateTransfer(
         this._mainBurner,
         BigInt(withdrawLamports),
@@ -688,6 +806,7 @@ export class ShredrClient {
 
       await this.commitAndUndelegate(exitPda);
       await this.waitForUndelegation(exitPda);
+      await utxoService.setState(exitPda.toBase58(), "undelegated");
 
       const ix = createStealthWithdrawInstruction(
         exitBurnerKp.publicKey,
@@ -701,6 +820,8 @@ export class ShredrClient {
         [ix],
         [exitBurnerKp],
       );
+
+      await utxoService.setState(exitPda.toBase58(), "withdrawn", 0);
 
       return {
         signature,
@@ -763,17 +884,9 @@ export class ShredrClient {
       throw new Error("Main PDA not initialized. Call initFromSignature first.");
     }
 
-    // Read the base layer first to learn whether it is delegated, then re-read
-    // from the rollup if so — while delegated the base-layer copy only reflects
-    // the last commit, which understates the balance.
-    let state = await this.fetchStealthState(this._mainPda);
-    if (state?.delegated) {
-      state =
-        (await this.fetchStealthState(
-          this._mainPda,
-          this.getRollupConnection(),
-        )) ?? state;
-    }
+    // Delegation zeroes the base-layer copy, so reading base alone reports a
+    // delegated PDA as empty. `readStealthState` falls through to the rollup.
+    const { state } = await this.readStealthState(this._mainPda);
     const lamports = state ? Number(state.depositedAmount) : 0;
 
     return {
@@ -792,6 +905,185 @@ export class ShredrClient {
       availableLamports: r.availableLamports,
       poolAddress: r.address,
     };
+  }
+
+  // ============ RECOVERY ============
+
+  /**
+   * What a stranded note needs next, derived from live chain state.
+   *
+   * The note supplies the role — chain state cannot, since the program stores
+   * no role marker — and chain state supplies everything else. A note is only
+   * ever a hint: if the two disagree, chain state wins.
+   */
+  private async planFor(note: UtxoNote): Promise<PendingAction | null> {
+    const pda = new PublicKey(note.stealthPda);
+    const { state, absent } = await this.readStealthState(pda);
+
+    if (absent) {
+      // Never created, or already closed and reaped. A funded burner means the
+      // deposit landed but init never ran.
+      const burnerLamports = await this.getConnection().getBalance(
+        new PublicKey(note.burnerAddress),
+      );
+      if (burnerLamports > 0) {
+        return { note, action: "initialize", lamports: burnerLamports };
+      }
+      return { note, action: "forget", lamports: 0 };
+    }
+
+    if (!state) {
+      // Exists but unreadable right now (rollup down). Leave it alone rather
+      // than acting on a guess.
+      return null;
+    }
+
+    const lamports = Number(state.depositedAmount);
+
+    if (state.delegated) {
+      if (lamports > 0) {
+        return note.role === "deposit"
+          ? { note, action: "transfer", lamports }
+          : { note, action: "undelegate", lamports };
+      }
+      return { note, action: "undelegate", lamports: 0 };
+    }
+
+    if (lamports > 0) {
+      return note.role === "exit"
+        ? { note, action: "withdraw", lamports }
+        : { note, action: "transfer", lamports };
+    }
+
+    return { note, action: "close", lamports: 0 };
+  }
+
+  /**
+   * Inspect every unsettled note and report what would be done. Read-only —
+   * callers show this before {@link resumePending} acts on it.
+   */
+  async planPending(): Promise<PendingAction[]> {
+    if (!this._initialized) throw new Error("ShredrClient not initialized");
+
+    const plans: PendingAction[] = [];
+    for (const note of utxoService.unsettled) {
+      try {
+        const plan = await this.planFor(note);
+        if (plan) plans.push(plan);
+      } catch (err) {
+        console.warn("[planPending] skipped", note.stealthPda, err);
+      }
+    }
+    return plans;
+  }
+
+  /**
+   * Drive stranded cycles to completion.
+   *
+   * Each note is independent, so one failure must not abort the rest — a
+   * single unreachable PDA should not strand every other recovered deposit.
+   */
+  async resumePending(
+    plans?: PendingAction[],
+  ): Promise<Array<{ plan: PendingAction; ok: boolean; error?: string }>> {
+    const todo = plans ?? (await this.planPending());
+    const results: Array<{ plan: PendingAction; ok: boolean; error?: string }> = [];
+
+    for (const plan of todo) {
+      try {
+        await this.executePlan(plan);
+        results.push({ plan, ok: true });
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        console.warn("[resumePending] failed", plan.note.stealthPda, error);
+        results.push({ plan, ok: false, error });
+      }
+    }
+
+    return results;
+  }
+
+  private async executePlan(plan: PendingAction): Promise<void> {
+    const { note } = plan;
+    const pda = new PublicKey(note.stealthPda);
+
+    switch (plan.action) {
+      case "forget":
+        await utxoService.setState(note.stealthPda, "closed");
+        return;
+
+      case "initialize": {
+        const burner = await this.burnerForNote(note);
+        try {
+          await this.initializeAndDelegate(burner, undefined, note.role);
+        } finally {
+          burnerService.clearBurner(burner);
+        }
+        return;
+      }
+
+      case "transfer": {
+        // Push the balance one hop forward into a fresh exit PDA, then settle
+        // it. Safe whichever role the note actually was.
+        const burner = await this.burnerForNote(note);
+        try {
+          const exitBurner = await this.consumeAndGenerateNew();
+          const exitKp = this.burnerToKeypair(exitBurner);
+          const [exitPda] = deriveStealthPDA(exitKp.publicKey);
+
+          await this.initializeAndDelegate(exitBurner, 0n, "exit");
+          await this.privateTransfer(burner, BigInt(plan.lamports), exitPda);
+          await utxoService.link(note.stealthPda, exitBurner.nonceIndex);
+        } finally {
+          burnerService.clearBurner(burner);
+        }
+        return;
+      }
+
+      case "undelegate":
+        await this.commitAndUndelegate(pda);
+        await this.waitForUndelegation(pda);
+        await utxoService.setState(note.stealthPda, "undelegated");
+        return;
+
+      case "withdraw": {
+        const burner = await this.burnerForNote(note);
+        try {
+          const kp = this.burnerToKeypair(burner);
+          const ix = createStealthWithdrawInstruction(
+            kp.publicKey,
+            pda,
+            new PublicKey(this._walletPubkey!),
+            BigInt(plan.lamports),
+          );
+          await koraRelayer.signAndSend(this.getConnection(), [ix], [kp]);
+          await utxoService.setState(note.stealthPda, "withdrawn", 0);
+        } finally {
+          burnerService.clearBurner(burner);
+        }
+        return;
+      }
+
+      case "close":
+        // Rent reclaim needs the program's CloseStealthAccount instruction
+        // wired into ShredrProgram.ts; until then the note is settled and the
+        // rent simply stays put.
+        await utxoService.setState(note.stealthPda, "closed");
+        return;
+    }
+  }
+
+  /** Re-derive the signing burner for a note from its nonce index. */
+  private async burnerForNote(note: UtxoNote): Promise<BurnerKeyPair> {
+    if (note.nonceIndex < 0) {
+      if (!this._mainBurner) throw new Error("Main burner unavailable");
+      return this._mainBurner;
+    }
+    const nonce = await nonceService.generateNonceAtIndex(
+      note.nonceIndex,
+      this._walletPubkey!,
+    );
+    return burnerService.deriveBurnerFromNonce(nonce);
   }
 
   // ============ UTXO SCANNING ============
@@ -826,13 +1118,11 @@ export class ShredrClient {
       const burnerPub = new PublicKey(burner.publicKey);
       const [pda] = deriveStealthPDA(burnerPub);
 
-      const [burnerLamports, pdaInfo] = await Promise.all([
+      const [burnerLamports, pdaRead] = await Promise.all([
         connection.getBalance(burnerPub),
-        connection.getAccountInfo(pda),
+        this.readStealthState(pda),
       ]);
-      const pdaState = pdaInfo
-        ? parseStealthAccount(new Uint8Array(pdaInfo.data))
-        : null;
+      const pdaState = pdaRead.state;
       const pdaLamports = pdaState ? Number(pdaState.depositedAmount) : 0;
 
       let status: UtxoStatus = "empty";
@@ -849,8 +1139,12 @@ export class ShredrClient {
       }
 
       if (status === "empty") {
-        consecutiveEmpty++;
         burnerService.clearBurner(burner);
+        // Only a genuinely absent account counts toward the early exit. An
+        // account that exists but could not be read (delegated, or a flaky
+        // RPC) must not shorten the scan and hide funded indices past it.
+        if (!pdaRead.absent) continue;
+        consecutiveEmpty++;
         if (consecutiveEmpty >= UTXO_SCAN_EMPTY_THRESHOLD) break;
         continue;
       }
