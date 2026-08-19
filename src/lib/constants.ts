@@ -126,6 +126,17 @@ export const SWEEP_THRESHOLD_LAMPORTS = 0.1 * 1e9; // 100,000,000 lamports
  */
 export const KORA_RELAYER_URL = env("VITE_KORA_RELAYER_URL");
 
+/** Kora instance whose RPC_URL is the MagicBlock ephemeral rollup.
+ *
+ *  Kora simulates every signTransaction against its own RPC, so a rollup
+ *  transaction (built on a rollup blockhash, touching delegated PDAs) has to be
+ *  signed by a Kora looking at the rollup — the base-layer instance rejects it
+ *  with "Blockhash not found". Same signer, different RPC_URL.
+ *
+ *  env: VITE_KORA_ROLLUP_RELAYER_URL
+ */
+export const KORA_ROLLUP_RELAYER_URL = env("VITE_KORA_ROLLUP_RELAYER_URL");
+
 /** Kora's relayer pubkey (the fee payer account that Kora signs as).
  *  env: VITE_KORA_RELAYER_PUBKEY. If unset, the client falls back to the other
  *  sources in `getEnvironmentRelayerPubkey()` and finally fetches it from the

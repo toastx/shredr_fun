@@ -37,7 +37,11 @@ import {
   type TransactionInstruction,
   type Signer,
 } from "@solana/web3.js";
-import { KORA_RELAYER_URL, KORA_RELAYER_PUBKEY } from "./constants";
+import {
+  KORA_RELAYER_URL,
+  KORA_ROLLUP_RELAYER_URL,
+  KORA_RELAYER_PUBKEY,
+} from "./constants";
 
 // ============ TYPES ============
 
@@ -54,10 +58,15 @@ export interface KoraConfigInfo {
 
 export class KoraRelayer {
   private endpoint: string;
+  private rollupEndpoint: string;
   private cachedRelayerPubkey: PublicKey | null = null;
 
-  constructor(endpoint: string = KORA_RELAYER_URL) {
+  constructor(
+    endpoint: string = KORA_RELAYER_URL,
+    rollupEndpoint: string = KORA_ROLLUP_RELAYER_URL,
+  ) {
     this.endpoint = endpoint;
+    this.rollupEndpoint = rollupEndpoint;
   }
 
   /** Get the relayer pubkey (used as fee payer + program-level relayer). */
@@ -172,15 +181,21 @@ export class KoraRelayer {
       tx.sign(clientSigners);
     }
 
+    // Signed by the rollup-facing Kora: it simulates against the rollup RPC,
+    // where this blockhash and the delegated PDAs actually exist.
     const res = await this.rpc<{
       signed_transaction?: string;
       signedTransaction?: string;
       transaction?: string;
-    }>("signTransaction", {
-      transaction: uint8ArrayToBase64(tx.serialize()),
-      signer_key: relayer.toBase58(),
-      sig_verify: false,
-    });
+    }>(
+      "signTransaction",
+      {
+        transaction: uint8ArrayToBase64(tx.serialize()),
+        signer_key: relayer.toBase58(),
+        sig_verify: false,
+      },
+      this.rollupEndpoint,
+    );
 
     const signed =
       res.signed_transaction ?? res.signedTransaction ?? res.transaction;
@@ -230,8 +245,12 @@ export class KoraRelayer {
     return res.signature;
   }
 
-  /** Generic JSON-RPC POST helper. */
-  private async rpc<T>(method: string, params: unknown): Promise<T> {
+  /** Generic JSON-RPC POST helper. Defaults to the base-layer Kora. */
+  private async rpc<T>(
+    method: string,
+    params: unknown,
+    endpoint: string = this.endpoint,
+  ): Promise<T> {
     const body = {
       jsonrpc: "2.0",
       id: 1,
@@ -239,7 +258,7 @@ export class KoraRelayer {
       params,
     };
 
-    const res = await fetch(this.endpoint, {
+    const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
