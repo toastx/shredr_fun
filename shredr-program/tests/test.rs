@@ -60,6 +60,7 @@ const OFF_DEPOSITED_AMOUNT: usize = 72;
 const OFF_DEPOSIT_TIMESTAMP: usize = 80;
 const OFF_DELEGATED: usize = 88;
 const OFF_BUMP: usize = 89;
+const OFF_ROLE: usize = 90;
 
 /// Full on-chain size: 8-byte discriminator + `StealthAccount` (88 bytes,
 /// including 6 bytes of trailing padding for its 8-byte alignment).
@@ -142,6 +143,7 @@ struct StealthState {
     deposit_timestamp: i64,
     delegated: bool,
     bump: u8,
+    role: u8,
 }
 
 impl StealthState {
@@ -153,6 +155,7 @@ impl StealthState {
             deposit_timestamp: 1_700_000_000,
             delegated: false,
             bump,
+            role: 0,
         }
     }
 
@@ -178,6 +181,7 @@ impl StealthState {
             .copy_from_slice(&self.deposit_timestamp.to_le_bytes());
         data[OFF_DELEGATED] = self.delegated as u8;
         data[OFF_BUMP] = self.bump;
+        data[OFF_ROLE] = self.role;
         data
     }
 
@@ -297,6 +301,7 @@ fn stealth_account_layout_is_stable() {
         deposit_timestamp: 0,
         delegated: false,
         bump: 0,
+        role: 0,
     };
     let base = &state as *const StealthAccount as usize;
     let offset_of = |field: usize| field - base + 8; // +8 for the discriminator
@@ -316,6 +321,9 @@ fn stealth_account_layout_is_stable() {
         OFF_DELEGATED
     );
     assert_eq!(offset_of(&state.bump as *const _ as usize), OFF_BUMP);
+    // `role` must land in what was trailing padding: if the size grows past 88
+    // the rent changes and every already-deployed account breaks.
+    assert_eq!(offset_of(&state.role as *const _ as usize), OFF_ROLE);
 }
 
 // ─────────────────────────────────────────────
@@ -1303,8 +1311,15 @@ fn init_setup(stealth_override: Option<Pubkey>, stealth_lamports: u64) -> InitAc
 }
 
 fn init_ix_data(deposit_amount: u64) -> Vec<u8> {
+    init_ix_data_with_role(deposit_amount, ROLE_DEPOSIT)
+}
+
+const ROLE_DEPOSIT: u8 = 1;
+
+fn init_ix_data_with_role(deposit_amount: u64, role: u8) -> Vec<u8> {
     let mut data = vec![IX_INITIALIZE_AND_DELEGATE];
     data.extend_from_slice(&deposit_amount.to_le_bytes());
+    data.push(role);
     data
 }
 
@@ -1367,6 +1382,22 @@ fn initialize_rejects_wrong_system_program() {
         &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
         &setup.accounts,
         &[Check::err(ProgramError::IncorrectProgramId)],
+    );
+}
+
+#[test]
+fn initialize_rejects_unknown_role() {
+    let mollusk = mollusk();
+    let setup = init_setup(None, 0);
+
+    mollusk.process_and_validate_instruction(
+        &Instruction::new_with_bytes(
+            program_id(),
+            &init_ix_data_with_role(0, 3),
+            setup.metas.clone(),
+        ),
+        &setup.accounts,
+        &[Check::err(ProgramError::InvalidInstructionData)],
     );
 }
 

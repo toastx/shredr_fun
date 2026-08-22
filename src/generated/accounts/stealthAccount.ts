@@ -69,6 +69,13 @@ export type StealthAccount = {
   delegated: boolean;
   /** PDA bump seed. */
   bump: number;
+  /**
+   * Which leg of a cycle this PDA is: 0 unset, 1 deposit, 2 exit.
+   * Carved out of the trailing padding, so the account is still 96 bytes
+   * and accounts written before this field read back as unset.
+   * A recovery hint only — the program never authorizes on it.
+   */
+  role: number;
   /** `#[repr(C)]` trailing padding. */
   padding: ReadonlyUint8Array;
 };
@@ -86,6 +93,13 @@ export type StealthAccountArgs = {
   delegated: boolean;
   /** PDA bump seed. */
   bump: number;
+  /**
+   * Which leg of a cycle this PDA is: 0 unset, 1 deposit, 2 exit.
+   * Carved out of the trailing padding, so the account is still 96 bytes
+   * and accounts written before this field read back as unset.
+   * A recovery hint only — the program never authorizes on it.
+   */
+  role: number;
   /** `#[repr(C)]` trailing padding. */
   padding: ReadonlyUint8Array;
 };
@@ -101,7 +115,8 @@ export function getStealthAccountEncoder(): FixedSizeEncoder<StealthAccountArgs>
       ["depositTimestamp", getI64Encoder()],
       ["delegated", getBooleanEncoder()],
       ["bump", getU8Encoder()],
-      ["padding", fixEncoderSize(getBytesEncoder(), 6)],
+      ["role", getU8Encoder()],
+      ["padding", fixEncoderSize(getBytesEncoder(), 5)],
     ]),
     (value) => ({ ...value, discriminator: STEALTH_ACCOUNT_DISCRIMINATOR }),
   );
@@ -117,7 +132,8 @@ export function getStealthAccountDecoder(): FixedSizeDecoder<StealthAccount> {
     ["depositTimestamp", getI64Decoder()],
     ["delegated", getBooleanDecoder()],
     ["bump", getU8Decoder()],
-    ["padding", fixDecoderSize(getBytesDecoder(), 6)],
+    ["role", getU8Decoder()],
+    ["padding", fixDecoderSize(getBytesDecoder(), 5)],
   ]);
 }
 

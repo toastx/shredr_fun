@@ -126,7 +126,7 @@ const pdas = [
 // ============ ACCOUNTS ============
 // Mirrors `StealthAccount` in `shredr-program/src/state.rs`. The struct is
 // `#[repr(C)]` with 8-byte alignment, so it carries 6 bytes of trailing
-// padding: 8 (discriminator) + 88 = 96 bytes on chain.
+// padding, one byte of which is now `role`: 8 (discriminator) + 88 = 96 bytes.
 
 const accounts = [
   accountNode({
@@ -169,9 +169,19 @@ const accounts = [
         type: numberTypeNode("u8"),
       }),
       structFieldTypeNode({
+        docs: [
+          "Which leg of a cycle this PDA is: 0 unset, 1 deposit, 2 exit.",
+          "Carved out of the trailing padding, so the account is still 96 bytes",
+          "and accounts written before this field read back as unset.",
+          "A recovery hint only — the program never authorizes on it.",
+        ],
+        name: "role",
+        type: numberTypeNode("u8"),
+      }),
+      structFieldTypeNode({
         docs: ["`#[repr(C)]` trailing padding."],
         name: "padding",
-        type: fixedSizeTypeNode(bytesTypeNode(), 6),
+        type: fixedSizeTypeNode(bytesTypeNode(), 5),
       }),
     ]),
     discriminators: [fieldDiscriminatorNode("discriminator")],

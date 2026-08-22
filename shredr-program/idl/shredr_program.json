@@ -82,6 +82,10 @@
         {
           "name": "depositAmount",
           "type": "u64"
+        },
+        {
+          "name": "role",
+          "type": "u8"
         }
       ],
       "discriminant": {
@@ -252,6 +256,40 @@
       }
     },
     {
+      "name": "CloseStealthAccount",
+      "accounts": [
+        {
+          "name": "burner",
+          "isMut": false,
+          "isSigner": true,
+          "docs": [
+            "Burner keypair that owns the stealth account, proves ownership"
+          ]
+        },
+        {
+          "name": "stealthAccount",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Spent stealth PDA to close (deposited_amount must be zero)"
+          ]
+        },
+        {
+          "name": "rentPayee",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Receives the reclaimed rent, normally the relayer"
+          ]
+        }
+      ],
+      "args": [],
+      "discriminant": {
+        "type": "u8",
+        "value": 5
+      }
+    },
+    {
       "name": "UndelegationCallback",
       "accounts": [
         {
@@ -290,7 +328,7 @@
       "args": [],
       "discriminant": {
         "type": "u8",
-        "value": 5
+        "value": 6
       }
     }
   ],

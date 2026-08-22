@@ -1,6 +1,7 @@
 //! Initialize a stealth PDA and delegate it to a MagicBlock TEE validator.
 //!
-//! Instruction data is `[deposit_amount: u64]`; accounts are listed in `idl.rs`.
+//! Instruction data is `[deposit_amount: u64][role: u8]`; accounts are in `idl.rs`.
+//! The role byte is optional — omitted, it is inferred from `deposit_amount`.
 //! `deposit_amount > 0` sweeps the burner's funds in (deposit PDA), `0` creates an
 //! empty PDA to be funded later by a `PrivateTransfer` (exit PDA). The program
 //! stores no role marker — the distinction is the client's.
@@ -11,7 +12,7 @@
 use crate::constants::{seeds, tee_validator, PROGRAM_ADDRESS};
 use crate::errors::ShredrError;
 use crate::helpers::{get_stealth_mut, verify_stealth_pda, write_stealth_discriminator};
-use crate::state::STEALTH_ACCOUNT_SIZE;
+use crate::state::{role, STEALTH_ACCOUNT_SIZE};
 
 use crate::Address;
 use crate::{ProgramError, ProgramResult};
@@ -41,6 +42,7 @@ pub struct InitializeAndDelegate<'a> {
     pub delegation_metadata: &'a AccountView,
     pub system_program: &'a AccountView,
     pub deposit_amount: u64,
+    pub role: u8,
 }
 
 impl<'a> InitializeAndDelegate<'a> {
@@ -56,6 +58,7 @@ impl<'a> InitializeAndDelegate<'a> {
             delegation_metadata,
             system_program,
             deposit_amount,
+            role,
         } = self;
 
         // Owned so its bytes can back the PDA signer seeds through the CPIs below.
@@ -180,6 +183,7 @@ impl<'a> InitializeAndDelegate<'a> {
         }
         stealth_state.delegated = true;
         stealth_state.bump = bump;
+        stealth_state.role = role;
 
         // ── Step 4: Create ACL permission for the burner ──
         // A bare create, so it fails on an existing permission PDA. The member set
@@ -281,6 +285,19 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
                 .map_err(|_| ProgramError::InvalidInstructionData)?,
         );
 
+        // Role is appended, so a client that still sends 8 bytes keeps working.
+        // For those, infer it from the amount the way this instruction's two
+        // modes are already defined: funded is a deposit, empty is an exit.
+        let role = match instruction_data.get(8) {
+            Some(&byte) => byte,
+            None if deposit_amount > 0 => role::DEPOSIT,
+            None => role::EXIT,
+        };
+
+        if !role::is_valid(role) {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+
         Ok(Self {
             relayer,
             burner,
@@ -292,6 +309,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             delegation_metadata,
             system_program,
             deposit_amount,
+            role,
         })
     }
 }
