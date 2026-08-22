@@ -6,6 +6,7 @@
  * @see https://github.com/codama-idl/codama
  */
 
+export * from "./closeStealthAccount";
 export * from "./commitAndUndelegateStealth";
 export * from "./commitStealth";
 export * from "./initializeAndDelegate";

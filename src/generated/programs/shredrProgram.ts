@@ -41,21 +41,25 @@ import {
   type StealthAccountArgs,
 } from "../accounts";
 import {
+  getCloseStealthAccountInstruction,
   getCommitAndUndelegateStealthInstruction,
   getCommitStealthInstruction,
   getInitializeAndDelegateInstructionAsync,
   getPrivateTransferInstructionAsync,
   getUndelegationCallbackInstruction,
   getWithdrawInstructionAsync,
+  parseCloseStealthAccountInstruction,
   parseCommitAndUndelegateStealthInstruction,
   parseCommitStealthInstruction,
   parseInitializeAndDelegateInstruction,
   parsePrivateTransferInstruction,
   parseUndelegationCallbackInstruction,
   parseWithdrawInstruction,
+  type CloseStealthAccountInput,
   type CommitAndUndelegateStealthInput,
   type CommitStealthInput,
   type InitializeAndDelegateAsyncInput,
+  type ParsedCloseStealthAccountInstruction,
   type ParsedCommitAndUndelegateStealthInstruction,
   type ParsedCommitStealthInstruction,
   type ParsedInitializeAndDelegateInstruction,
@@ -108,6 +112,7 @@ export enum ShredrProgramInstruction {
   CommitStealth,
   CommitAndUndelegateStealth,
   Withdraw,
+  CloseStealthAccount,
   UndelegationCallback,
 }
 
@@ -129,6 +134,9 @@ export function identifyShredrProgramInstruction(
   }
   if (containsBytes(data, getU8Encoder().encode(4), 0)) {
     return ShredrProgramInstruction.Withdraw;
+  }
+  if (containsBytes(data, getU8Encoder().encode(5), 0)) {
+    return ShredrProgramInstruction.CloseStealthAccount;
   }
   if (containsBytes(data, getU8Encoder().encode(255), 0)) {
     return ShredrProgramInstruction.UndelegationCallback;
@@ -157,6 +165,9 @@ export type ParsedShredrProgramInstruction<
   | ({
       instructionType: ShredrProgramInstruction.Withdraw;
     } & ParsedWithdrawInstruction<TProgram>)
+  | ({
+      instructionType: ShredrProgramInstruction.CloseStealthAccount;
+    } & ParsedCloseStealthAccountInstruction<TProgram>)
   | ({
       instructionType: ShredrProgramInstruction.UndelegationCallback;
     } & ParsedUndelegationCallbackInstruction<TProgram>);
@@ -199,6 +210,13 @@ export function parseShredrProgramInstruction<TProgram extends string>(
       return {
         instructionType: ShredrProgramInstruction.Withdraw,
         ...parseWithdrawInstruction(instruction),
+      };
+    }
+    case ShredrProgramInstruction.CloseStealthAccount: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: ShredrProgramInstruction.CloseStealthAccount,
+        ...parseCloseStealthAccountInstruction(instruction),
       };
     }
     case ShredrProgramInstruction.UndelegationCallback: {
@@ -253,6 +271,10 @@ export type ShredrProgramPluginInstructions = {
   withdraw: (
     input: WithdrawAsyncInput,
   ) => ReturnType<typeof getWithdrawInstructionAsync> &
+    SelfPlanAndSendFunctions;
+  closeStealthAccount: (
+    input: CloseStealthAccountInput,
+  ) => ReturnType<typeof getCloseStealthAccountInstruction> &
     SelfPlanAndSendFunctions;
   undelegationCallback: (
     input: MakeOptional<UndelegationCallbackInput, "payer">,
@@ -312,6 +334,11 @@ export function shredrProgramProgram() {
             addSelfPlanAndSendFunctions(
               client,
               getWithdrawInstructionAsync(input),
+            ),
+          closeStealthAccount: (input) =>
+            addSelfPlanAndSendFunctions(
+              client,
+              getCloseStealthAccountInstruction(input),
             ),
           undelegationCallback: (input) =>
             addSelfPlanAndSendFunctions(

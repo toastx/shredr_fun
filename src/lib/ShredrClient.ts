@@ -43,6 +43,7 @@ import {
   createStealthWithdrawInstruction,
   parseStealthAccount,
   MAGIC_BLOCK_PROGRAM_ID,
+  STEALTH_ROLE,
   type StealthAccountData,
 } from "./ShredrProgram";
 import { utxoService } from "./UtxoService";
@@ -516,17 +517,19 @@ export class ShredrClient {
     const deposit =
       depositAmount ?? BigInt(await connection.getBalance(burnerKp.publicKey));
 
+    const resolvedRole = role ?? "deposit";
     const ix = createInitializeAndDelegateInstruction(
       relayer,
       burnerKp.publicKey,
       deposit,
+      STEALTH_ROLE[resolvedRole],
     );
 
     // Write-ahead: record the note *before* broadcasting. A crash between send
     // and persist is the one window that strands funds with nothing pointing
     // at them, so the record must always land first.
     const [pda] = deriveStealthPDA(burnerKp.publicKey);
-    await this.recordNote(b, pda, role ?? "deposit", Number(deposit));
+    await this.recordNote(b, pda, resolvedRole, Number(deposit));
 
     const signature = await koraRelayer.signAndSend(connection, [ix], [burnerKp]);
     await utxoService.setState(pda.toBase58(), "delegated", Number(deposit));
@@ -940,9 +943,18 @@ export class ShredrClient {
 
     const lamports = Number(state.depositedAmount);
 
+    // The chain is authoritative when it knows. Accounts written before the
+    // role field existed read back as `unset`, so fall back to the note.
+    const role: UtxoRole =
+      state.role === STEALTH_ROLE.deposit
+        ? "deposit"
+        : state.role === STEALTH_ROLE.exit
+          ? "exit"
+          : note.role;
+
     if (state.delegated) {
       if (lamports > 0) {
-        return note.role === "deposit"
+        return role === "deposit"
           ? { note, action: "transfer", lamports }
           : { note, action: "undelegate", lamports };
       }
@@ -950,7 +962,7 @@ export class ShredrClient {
     }
 
     if (lamports > 0) {
-      return note.role === "exit"
+      return role === "exit"
         ? { note, action: "withdraw", lamports }
         : { note, action: "transfer", lamports };
     }

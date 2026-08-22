@@ -22,4 +22,23 @@ pub struct StealthAccount {
     pub deposit_timestamp: i64,
     pub delegated: bool,
     pub bump: u8,
+    /// Which leg of a cycle this PDA is: 0 unset, 1 deposit, 2 exit. Occupies
+    /// what was trailing padding, so the account size is unchanged and existing
+    /// accounts read back as `unset`.
+    ///
+    /// A **recovery hint only** — never gate authorization on it. Ownership,
+    /// PDA derivation and delegation state already authorize every instruction;
+    /// branching on this would add attack surface for nothing.
+    pub role: u8,
+}
+
+/// `StealthAccount::role` values.
+pub mod role {
+    pub const UNSET: u8 = 0;
+    pub const DEPOSIT: u8 = 1;
+    pub const EXIT: u8 = 2;
+
+    pub fn is_valid(value: u8) -> bool {
+        matches!(value, UNSET | DEPOSIT | EXIT)
+    }
 }
