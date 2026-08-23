@@ -106,10 +106,12 @@ export type InitializeAndDelegateInstruction<
 export type InitializeAndDelegateInstructionData = {
   discriminator: number;
   depositAmount: bigint;
+  role: number;
 };
 
 export type InitializeAndDelegateInstructionDataArgs = {
   depositAmount: number | bigint;
+  role: number;
 };
 
 export function getInitializeAndDelegateInstructionDataEncoder(): FixedSizeEncoder<InitializeAndDelegateInstructionDataArgs> {
@@ -117,6 +119,7 @@ export function getInitializeAndDelegateInstructionDataEncoder(): FixedSizeEncod
     getStructEncoder([
       ["discriminator", getU8Encoder()],
       ["depositAmount", getU64Encoder()],
+      ["role", getU8Encoder()],
     ]),
     (value) => ({
       ...value,
@@ -129,6 +132,7 @@ export function getInitializeAndDelegateInstructionDataDecoder(): FixedSizeDecod
   return getStructDecoder([
     ["discriminator", getU8Decoder()],
     ["depositAmount", getU64Decoder()],
+    ["role", getU8Decoder()],
   ]);
 }
 
@@ -172,6 +176,7 @@ export type InitializeAndDelegateAsyncInput<
   /** System Program */
   systemProgram?: Address<TAccountSystemProgram>;
   depositAmount: InitializeAndDelegateInstructionDataArgs["depositAmount"];
+  role: InitializeAndDelegateInstructionDataArgs["role"];
 };
 
 export async function getInitializeAndDelegateInstructionAsync<
@@ -359,6 +364,7 @@ export type InitializeAndDelegateInput<
   /** System Program */
   systemProgram?: Address<TAccountSystemProgram>;
   depositAmount: InitializeAndDelegateInstructionDataArgs["depositAmount"];
+  role: InitializeAndDelegateInstructionDataArgs["role"];
 };
 
 export function getInitializeAndDelegateInstruction<

@@ -78,6 +78,17 @@ export const StealthInstruction = {
 /** On-chain size of a stealth account: 8-byte discriminator + StealthAccount. */
 export const STEALTH_ACCOUNT_LEN = 96;
 
+/**
+ * `StealthAccount.role` — which leg of a cycle a PDA is.
+ *
+ * Recorded so recovery can tell a stranded deposit from a stranded exit; the
+ * program never authorizes on it. Accounts written before the field existed
+ * read back as `unset`.
+ */
+export const STEALTH_ROLE = { unset: 0, deposit: 1, exit: 2 } as const;
+
+export type StealthRole = (typeof STEALTH_ROLE)[keyof typeof STEALTH_ROLE];
+
 // ============ MagicBlock Constants ============
 
 /** MagicBlock Delegation Program ID (base layer — owns delegated accounts). */
@@ -213,6 +224,7 @@ export function createInitializeAndDelegateInstruction(
   relayer: PublicKey,
   burner: PublicKey,
   depositAmount: bigint,
+  role: StealthRole = depositAmount > 0n ? STEALTH_ROLE.deposit : STEALTH_ROLE.exit,
 ): TransactionInstruction {
   const [stealthAccount] = deriveStealthPDA(burner);
   const delegationPDAs = deriveDelegationPDAs(stealthAccount);
@@ -227,6 +239,7 @@ export function createInitializeAndDelegateInstruction(
       delegationRecord: toAddress(delegationPDAs.delegationRecord),
       delegationMetadata: toAddress(delegationPDAs.delegationMetadata),
       depositAmount,
+      role,
     }),
   );
 
@@ -350,6 +363,8 @@ export interface StealthAccountData {
   depositTimestamp: bigint;
   delegated: boolean;
   bump: number;
+  /** 0 unset, 1 deposit, 2 exit — see {@link STEALTH_ROLE}. */
+  role: number;
 }
 
 /**
@@ -377,6 +392,7 @@ export function parseStealthAccount(
     depositTimestamp: decoded.depositTimestamp,
     delegated: decoded.delegated,
     bump: decoded.bump,
+    role: decoded.role,
   };
 }
 

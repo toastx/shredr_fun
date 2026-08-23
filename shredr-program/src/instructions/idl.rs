@@ -49,7 +49,7 @@ pub enum StealthInstruction {
         desc = "MagicBlock delegation metadata"
     )]
     #[account(8, name = "system_program", desc = "System Program")]
-    InitializeAndDelegate { deposit_amount: u64 },
+    InitializeAndDelegate { deposit_amount: u64, role: u8 },
 
     /// Private transfer between two stealth PDAs inside the MagicBlock rollup
     #[account(
