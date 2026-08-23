@@ -183,9 +183,6 @@ function GeneratorPage() {
                 // Subscribe to account updates on the burner
                 webSocketClient.subscribeToAccount(address);
 
-                // Fetch initial balance of the burner
-                const initialLamports = await refreshBalance(address);
-
                 // Listen for account updates
                 // Store handler ref for cleanup
                 const messageHandler = async (data: WebSocketMessage) => {
@@ -222,9 +219,16 @@ function GeneratorPage() {
                     }
                 };
 
-                // Store ref for cleanup and register handler
+                // Register before any await — a slow or hanging RPC call must not
+                // hold back live updates, and re-signing must not stack handlers.
+                if (wsMessageHandlerRef.current) {
+                    webSocketClient.offMessage(wsMessageHandlerRef.current);
+                }
                 wsMessageHandlerRef.current = messageHandler;
                 webSocketClient.onMessage(messageHandler);
+
+                // Fetch initial balance of the burner
+                const initialLamports = await refreshBalance(address);
 
                 // A deposit may have landed while the app was closed.
                 if (initialLamports > 0) {
@@ -314,7 +318,7 @@ function GeneratorPage() {
                         <div className="balance-display">
                             <span className="balance-label">pda balance</span>
                             <span className="balance-amount">
-                                {pdaBalance.toFixed(2)} SOL
+                                {pdaBalance.toFixed(4)} SOL
                             </span>
                         </div>
 
