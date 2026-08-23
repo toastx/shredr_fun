@@ -43,6 +43,9 @@ function GeneratorCard() {
   const copiedTimeout = useRef<NodeJS.Timeout | null>(null);
   const receiveAddressRef = useRef<string | null>(null);
   const shreddingRef = useRef(false);
+  const wsMessageHandlerRef = useRef<((data: WebSocketMessage) => void) | null>(
+    null,
+  );
 
   useEffect(() => {
     receiveAddressRef.current = receiveAddress;
@@ -150,12 +153,11 @@ function GeneratorCard() {
       setReceiveAddress(address);
       setCardState("ready");
 
-      // Subscribe + initial balance
       webSocketClient.subscribeToAccount(address);
-      const initialLamports = await refreshBalance(address);
 
-      // Live updates
-      webSocketClient.onMessage(async (data: WebSocketMessage) => {
+      // Live updates — registered before any await so a slow RPC call cannot
+      // delay them, and offMessage'd first so re-signing does not stack handlers.
+      const messageHandler = async (data: WebSocketMessage) => {
         if (data.type !== "accountUpdate") return;
         const lamports = (data as { lamports?: unknown }).lamports;
         if (
@@ -169,7 +171,15 @@ function GeneratorCard() {
           // A deposit landed on the burner — shred it on-chain.
           void handleDeposit();
         }
-      });
+      };
+
+      if (wsMessageHandlerRef.current) {
+        webSocketClient.offMessage(wsMessageHandlerRef.current);
+      }
+      wsMessageHandlerRef.current = messageHandler;
+      webSocketClient.onMessage(messageHandler);
+
+      const initialLamports = await refreshBalance(address);
 
       // A deposit may have landed while the app was closed.
       if (initialLamports > 0) {

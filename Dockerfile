@@ -22,6 +22,13 @@ COPY eslint.config.js ./
 COPY public ./public
 COPY src ./src
 
+# Vite inlines VITE_* at BUILD time, so .env has to be present here or every
+# constant resolves to "" and the app fails at runtime (new Connection("")
+# throws, and the empty WSS URL falls back to the page origin).
+# .dockerignore deliberately does not exclude .env. Values in it are public by
+# construction — they ship inside the client bundle either way.
+COPY .env ./
+
 # Build the application
 RUN npm run build
 
