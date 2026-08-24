@@ -28,6 +28,7 @@ import {
     createCommitStealthInstruction,
     createCommitAndUndelegateStealthInstruction,
     createStealthWithdrawInstruction,
+    createCloseStealthAccountInstruction,
     parseStealthAccount,
     getShredrErrorMessage,
 } from '../src/lib/ShredrProgram';
@@ -235,6 +236,30 @@ describe('ShredrProgram', () => {
             expect(ix.keys[0]).to.include({ isSigner: true, isWritable: true });
             expect(ix.keys[1]).to.include({ isSigner: false, isWritable: true });
             expect(ix.keys[2]).to.include({ isSigner: false, isWritable: true });
+        });
+    });
+
+    describe('createCloseStealthAccountInstruction', () => {
+        const rentPayee = Keypair.generate().publicKey;
+        const [stealthPda] = deriveStealthPDA(burner);
+        const ix = createCloseStealthAccountInstruction(burner, stealthPda, rentPayee);
+
+        it('encodes the discriminator and no arguments', () => {
+            expect(ix.data).to.have.lengthOf(1);
+            expect(ix.data[0]).to.equal(StealthInstruction.CloseStealthAccount);
+        });
+
+        it('is signed by the burner and writes to the PDA and payee', () => {
+            expect(ix.keys.map((k) => k.pubkey.toBase58())).to.deep.equal([
+                burner.toBase58(),
+                stealthPda.toBase58(),
+                rentPayee.toBase58(),
+            ]);
+            expect(ix.keys[0].isSigner).to.equal(true);
+            // The burner only proves ownership; it is not debited.
+            expect(ix.keys[0].isWritable).to.equal(false);
+            expect(ix.keys[1].isWritable).to.equal(true);
+            expect(ix.keys[2].isWritable).to.equal(true);
         });
     });
 

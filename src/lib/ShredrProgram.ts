@@ -16,6 +16,7 @@
  *   2    - CommitStealth: flush rollup state, keep delegated
  *   3    - CommitAndUndelegateStealth: flush state + release to the base layer
  *   4    - Withdraw: withdraw from a stealth PDA after undelegation
+ *   5    - CloseStealthAccount: reclaim a spent PDA's rent
  *   0xFF - UndelegationCallback: called by the delegation program (not user-invoked)
  */
 
@@ -34,6 +35,7 @@ import {
 import { Buffer } from "buffer";
 
 import {
+  getCloseStealthAccountInstruction,
   getCommitAndUndelegateStealthInstruction,
   getCommitStealthInstruction,
   getInitializeAndDelegateInstruction,
@@ -72,6 +74,7 @@ export const StealthInstruction = {
   CommitStealth: 2,
   CommitAndUndelegateStealth: 3,
   Withdraw: 4,
+  CloseStealthAccount: 5,
   UndelegationCallback: 0xff,
 } as const;
 
@@ -337,6 +340,31 @@ export function createCommitAndUndelegateStealthInstruction(
  * @param destination - Any destination address to receive funds
  * @param amount      - Amount in lamports (u64)
  */
+/**
+ * Build a CloseStealthAccount instruction.
+ *
+ * Reclaims a spent PDA's rent to `rentPayee` and hands the account back to the
+ * System Program. The program requires `depositedAmount == 0`, so this can only
+ * ever move the rent-exempt minimum — it is not a path to user funds.
+ *
+ * `rentPayee` should be the relayer that paid the rent. It is also the better
+ * privacy choice: a counterparty shared by every user is an anonymity set,
+ * whereas closing to a user-specific address re-links the PDAs.
+ */
+export function createCloseStealthAccountInstruction(
+  burner: PublicKey,
+  stealthPda: PublicKey,
+  rentPayee: PublicKey,
+): TransactionInstruction {
+  return toTransactionInstruction(
+    getCloseStealthAccountInstruction({
+      burner: toSigner(burner),
+      stealthAccount: toAddress(stealthPda),
+      rentPayee: toAddress(rentPayee),
+    }),
+  );
+}
+
 export function createStealthWithdrawInstruction(
   burner: PublicKey,
   stealthPda: PublicKey,
