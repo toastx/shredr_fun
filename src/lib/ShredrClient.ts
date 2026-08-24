@@ -41,6 +41,7 @@ import {
   createPrivateTransferInstruction,
   createCommitAndUndelegateStealthInstruction,
   createStealthWithdrawInstruction,
+  createCloseStealthAccountInstruction,
   parseStealthAccount,
   MAGIC_BLOCK_PROGRAM_ID,
   STEALTH_ROLE,
@@ -826,6 +827,15 @@ export class ShredrClient {
 
       await utxoService.setState(exitPda.toBase58(), "withdrawn", 0);
 
+      // Best-effort: the money has already arrived, so a failed rent reclaim
+      // must not surface as a failed withdrawal. Recovery picks up any PDA
+      // left in `withdrawn` on the next login.
+      try {
+        await this.closeStealthAccount(exitBurner, exitPda);
+      } catch (err) {
+        console.warn("[ShredrClient] exit PDA rent reclaim failed:", err);
+      }
+
       return {
         signature,
         amount: withdrawLamports / LAMPORTS_PER_SOL,
@@ -833,6 +843,35 @@ export class ShredrClient {
     } finally {
       burnerService.clearBurner(exitBurner);
     }
+  }
+
+  /**
+   * Reclaim a spent stealth PDA's rent and return the account to the System
+   * Program. Requires the PDA to be undelegated with `depositedAmount == 0`.
+   *
+   * Rent goes to the relayer, which paid it. That is also the better privacy
+   * choice — every user's closes share one counterparty, so the payee reveals
+   * nothing about which PDAs belong together.
+   */
+  async closeStealthAccount(
+    burner: BurnerKeyPair,
+    stealthPda: PublicKey,
+  ): Promise<string> {
+    const burnerKp = this.burnerToKeypair(burner);
+    const ix = createCloseStealthAccountInstruction(
+      burnerKp.publicKey,
+      stealthPda,
+      koraRelayer.getRelayerPubkey(),
+    );
+
+    const signature = await koraRelayer.signAndSend(
+      this.getConnection(),
+      [ix],
+      [burnerKp],
+    );
+
+    await utxoService.setState(stealthPda.toBase58(), "closed");
+    return signature;
   }
 
   /**
@@ -1076,12 +1115,15 @@ export class ShredrClient {
         return;
       }
 
-      case "close":
-        // Rent reclaim needs the program's CloseStealthAccount instruction
-        // wired into ShredrProgram.ts; until then the note is settled and the
-        // rent simply stays put.
-        await utxoService.setState(note.stealthPda, "closed");
+      case "close": {
+        const burner = await this.burnerForNote(note);
+        try {
+          await this.closeStealthAccount(burner, pda);
+        } finally {
+          burnerService.clearBurner(burner);
+        }
         return;
+      }
     }
   }
 
