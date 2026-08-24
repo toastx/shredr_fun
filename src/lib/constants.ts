@@ -170,6 +170,13 @@ export const BLOB_PAGE_SIZE = 100;
  */
 export const BLOB_MAX_PAGES = 200;
 
+/**
+ * Backend's `MAX_BLOB_SIZE`, in bytes, measured on the base64 payload
+ * (`docs/backend/database.md`). A larger blob is rejected with 400, so the
+ * UTXO tree has to stay under it or it silently stops publishing.
+ */
+export const MAX_BLOB_BYTES = 2048;
+
 // ============ DOCUMENTATION ============
 
 /**
