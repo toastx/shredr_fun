@@ -4,17 +4,18 @@
 
 // ============ ENVIRONMENT ============
 
-/**
- * Reads a deployment-configured value from the environment.
- *
- * Vite inlines `import.meta.env.VITE_*` at build time; the `process.env`
- * fallback covers non-Vite consumers (node scripts, tests). Missing values
- * come back as `""` so callers fail loudly at the point of use rather than
- * silently talking to a stale hardcoded default.
- *
- * See `.env.example` for the full list.
- */
-function env(key: string): string {
+/** True inside a Vite dev server build (`import.meta.env.DEV`). */
+function isViteDevBuild(): boolean {
+  return (
+    typeof import.meta !== "undefined" &&
+    Boolean(
+      (import.meta as ImportMeta & { env?: Record<string, unknown> }).env?.DEV,
+    )
+  );
+}
+
+/** Raw lookup across Vite and node environments, in that order. */
+function rawEnv(key: string): string | undefined {
   const viteEnv =
     typeof import.meta !== "undefined"
       ? (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
@@ -24,9 +25,62 @@ function env(key: string): string {
     process?: { env?: Record<string, string | undefined> };
   }).process?.env;
 
-  const value = viteEnv?.[key] ?? nodeEnv?.[key] ?? "";
+  return viteEnv?.[key] || nodeEnv?.[key] || undefined;
+}
 
-  if (!value && viteEnv?.DEV) {
+/**
+ * Which set of secrets to read. `VITE_ENVIRONMENT=dev` selects the `VITE_DEV_*`
+ * variables; anything else (or unset) uses the plain `VITE_*` ones.
+ *
+ * Deliberately defaults to production. A missing or misspelled value must not
+ * silently hand a deployed build a developer's endpoints — the safe default is
+ * the one you have to opt out of.
+ */
+export const ENVIRONMENT: "dev" | "prod" =
+  (rawEnv("VITE_ENVIRONMENT") ?? rawEnv("ENVIRONMENT"))?.toLowerCase() === "dev"
+    ? "dev"
+    : "prod";
+
+export const IS_DEV_ENVIRONMENT = ENVIRONMENT === "dev";
+
+/**
+ * Reads a deployment-configured value from the environment.
+ *
+ * In dev, `VITE_FOO` is looked up as `VITE_DEV_FOO` first. The plain variable
+ * is still used as a fallback so a partial dev config works, but that path
+ * warns loudly: falling through means a dev build is talking to whatever the
+ * production variable points at, which for a system moving funds is worth
+ * seeing rather than discovering later.
+ *
+ * Vite inlines `import.meta.env.VITE_*` at build time; the `process.env`
+ * fallback covers non-Vite consumers (node scripts, tests). Missing values
+ * come back as `""` so callers fail loudly at the point of use rather than
+ * silently talking to a stale hardcoded default.
+ *
+ * See `.env.example` for the full list.
+ */
+function env(key: string): string {
+  if (IS_DEV_ENVIRONMENT) {
+    const devKey = key.startsWith("VITE_")
+      ? `VITE_DEV_${key.slice("VITE_".length)}`
+      : `DEV_${key}`;
+
+    const devValue = rawEnv(devKey);
+    if (devValue) return devValue;
+
+    if (rawEnv(key)) {
+      console.warn(
+        `[shredr] ${devKey} is unset — falling back to ${key}. ` +
+          `This dev build is using the production value.`,
+      );
+    }
+  }
+
+  const value = rawEnv(key) ?? "";
+
+  // Dev builds only, as before: a production console should not narrate its
+  // own configuration on every missing value.
+  if (!value && isViteDevBuild()) {
     console.warn(`[shredr] missing environment variable ${key} — see .env.example`);
   }
 
