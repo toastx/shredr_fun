@@ -5,6 +5,7 @@ import { useWallet } from '@solana/wallet-adapter-react';
 import { LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import { shredrClient } from '../../lib';
 import type { PendingAction } from '../../lib';
+import { usePendingRecovery } from '../../hooks';
 import { MASTER_MESSAGE } from '../../lib/constants';
 import './ClaimPage.css';
 
@@ -41,8 +42,12 @@ function ClaimPage({ onBack }: ClaimPageProps) {
     const [totalBalance, setTotalBalance] = useState<number>(0);
     const [withdrawError, setWithdrawError] = useState<string | null>(null);
     const [withdrawSuccess, setWithdrawSuccess] = useState<string | null>(null);
-    const [recovery, setRecovery] = useState<PendingAction[] | null>(null);
-    const [recoveryBusy, setRecoveryBusy] = useState(false);
+    const {
+        plans: recovery,
+        busy: recoveryBusy,
+        error: recoveryError,
+        run: runRecovery,
+    } = usePendingRecovery();
     
     // Refs for cleanup and debouncing
     const isMountedRef = useRef<boolean>(true);
@@ -143,34 +148,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                 // This centralizes balance fetching logic in one place
                 setPageState('loadingBalance');
 
-                // Surface any cycle that died mid-flight before acting on it, so
-                // the user sees what is about to be spent on their behalf rather
-                // than watching transactions appear unannounced.
-                try {
-                    const plans = await shredrClient.planPending();
-                    if (!isMountedRef.current || plans.length === 0) return;
-
-                    setRecovery(plans);
-                    setRecoveryBusy(true);
-                    const results = await shredrClient.resumePending(plans);
-                    if (!isMountedRef.current) return;
-
-                    const failed = results.filter((r) => !r.ok);
-                    if (failed.length > 0) {
-                        setWithdrawError(
-                            `Recovered ${results.length - failed.length}/${results.length} pending deposit(s); ` +
-                            `${failed.length} still need attention.`
-                        );
-                    }
-                    await fetchStealthBalance(true);
-                } catch (err) {
-                    console.warn('Pending-deposit recovery failed:', err);
-                } finally {
-                    if (isMountedRef.current) {
-                        setRecoveryBusy(false);
-                        setRecovery(null);
-                    }
-                }
+                await runRecovery(() => fetchStealthBalance(true));
             }
 
         } catch (err) {
@@ -178,7 +156,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             setWithdrawError('Failed to verify: ' + (err instanceof Error ? err.message : String(err)));
             setPageState('error');
         }
-    }, [publicKey, signMessage, fetchStealthBalance]);
+    }, [publicKey, signMessage, runRecovery, fetchStealthBalance]);
 
     const handleWithdraw = useCallback(async () => {
         if (!publicKey) {
@@ -350,8 +328,8 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                 )}
 
                 {/* Error Message */}
-                {withdrawError && (
-                    <div className="claim-error">{withdrawError}</div>
+                {(withdrawError || recoveryError) && (
+                    <div className="claim-error">{withdrawError ?? recoveryError}</div>
                 )}
 
                 {/* Success Message */}

@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { usePendingRecovery } from "../../hooks";
 import { shredrClient, webSocketClient } from "../../lib";
 import { MASTER_MESSAGE, HELIUS_RPC_URL } from "../../lib/constants";
 import type { WebSocketMessage } from "../../lib/types";
@@ -30,6 +31,7 @@ function GeneratorPage() {
     // with senders. Deposits land there and are swept into the burner's stealth
     // PDA by InitializeAndDelegate, which requires the PDA to still be empty.
     const [pageState, setPageState] = useState<PageState>("disconnected");
+    const { run: runRecovery } = usePendingRecovery();
     const [receiveAddress, setReceiveAddress] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [pdaBalance, setPdaBalance] = useState<number>(0);
@@ -173,6 +175,11 @@ function GeneratorPage() {
             const walletPubkeyBytes = publicKey.toBytes();
             await shredrClient.initFromSignature(signature, walletPubkeyBytes);
 
+            // A cycle can die between transactions, leaving funds on-chain with
+            // nothing pointing at them. Every sign-in checks, not just the claim
+            // page — otherwise it only helps users who go looking.
+            void runRecovery();
+
             // The burner pubkey is what the user shares with senders: the
             // program sweeps that balance into the stealth PDA when shredding.
             const address = shredrClient.receiveAddress;
@@ -246,7 +253,7 @@ function GeneratorPage() {
                 setPageState("error");
             }
         }
-    }, [publicKey, signMessage, refreshBalance, handleDeposit]);
+    }, [publicKey, signMessage, refreshBalance, handleDeposit, runRecovery]);
 
     const handleCopy = useCallback(async () => {
         if (!receiveAddress) return;

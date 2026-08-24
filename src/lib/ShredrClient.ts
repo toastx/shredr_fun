@@ -125,6 +125,9 @@ export class ShredrClient {
   // Main burner (persistent, controls main PDA)
   private _mainBurner: BurnerKeyPair | null = null;
   private _mainPda: PublicKey | null = null;
+  private _resuming: Promise<
+    Array<{ plan: PendingAction; ok: boolean; error?: string }>
+  > | null = null;
 
   // Current stealth PDA (derived from currentBurner + fixed salt)
   private _stealthPda: PublicKey | null = null;
@@ -1035,6 +1038,21 @@ export class ShredrClient {
    * single unreachable PDA should not strand every other recovered deposit.
    */
   async resumePending(
+    plans?: PendingAction[],
+  ): Promise<Array<{ plan: PendingAction; ok: boolean; error?: string }>> {
+    // Several entry points call this on sign-in, and a user can move between
+    // them. Two concurrent runs would plan from the same notes and submit the
+    // same transfers twice — the second fails once the source is drained, but
+    // not before creating a redundant exit PDA and burning its rent.
+    if (this._resuming) return this._resuming;
+
+    this._resuming = this.resumePendingInner(plans).finally(() => {
+      this._resuming = null;
+    });
+    return this._resuming;
+  }
+
+  private async resumePendingInner(
     plans?: PendingAction[],
   ): Promise<Array<{ plan: PendingAction; ok: boolean; error?: string }>> {
     const todo = plans ?? (await this.planPending());
