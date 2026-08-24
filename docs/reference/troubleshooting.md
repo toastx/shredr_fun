@@ -42,7 +42,7 @@ State resolution failed at both layers.
 2. **Same message?** It must be exactly `SHREDR_V1:<wallet address>`. A changed `MASTER_MESSAGE` breaks everything.
 3. **IndexedDB cleared?** Then it depends on the blob.
 4. **Backend reachable?** `fetchAllBlobs()` silently returns `[]` on error, with no user-visible warning. Check the network tab.
-5. **Too many blobs?** The client requests a flat `limit=100`. Past that scale your blob may not be in the response. See [Limitations](limitations.md).
+5. **Too many blobs?** The client pages through the whole set, so scale alone should not hide your blob. If a page fails mid-walk it keeps what it already fetched, so a partial result can still look like a fresh account — check the network tab for a failed `/api/blobs` request.
 
 **Your funds are not lost.** Run the claim page's scan — `scanPendingUtxos()` starts at index 1 regardless of current position, and the main PDA is derived directly from the signature.
 </details>

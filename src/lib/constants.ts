@@ -100,6 +100,22 @@ export const HELIUS_WSS_URL = env("VITE_HELIUS_WSS_URL");
 /** API Base URL (env: VITE_API_BASE_URL) */
 export const API_BASE_URL = env("VITE_API_BASE_URL");
 
+/**
+ * Blobs requested per page. The backend clamps `limit` to 1–100
+ * (`docs/backend/api-reference.md`), so 100 is the largest useful value.
+ */
+export const BLOB_PAGE_SIZE = 100;
+
+/**
+ * Hard ceiling on pages walked in one fetch.
+ *
+ * Blobs carry no user identifier, so recovery downloads the whole set and
+ * trial-decrypts it — the walk is bounded only by total blobs across all users.
+ * This caps worst-case login time, and stops a backend that ignores `cursor`
+ * from spinning forever.
+ */
+export const BLOB_MAX_PAGES = 200;
+
 // ============ DOCUMENTATION ============
 
 /**

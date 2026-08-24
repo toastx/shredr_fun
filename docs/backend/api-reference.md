@@ -91,12 +91,13 @@ Pass the `createdAt` of the last item you received as the next `cursor`.
 curl "http://localhost:8000/api/blobs?limit=50"
 ```
 
+{% hint style="info" %}
+`ApiClient.fetchAllBlobs()` walks every page, passing the oldest `createdAt` of each page as the next `cursor` and stopping on a short page.
+
+{% endhint %}
+
 {% hint style="warning" %}
-**The frontend does not paginate.** `ApiClient.fetchAllBlobs()` requests a flat `limit=100` with no cursor.
-
-Since blobs carry no user identifier, recovery means downloading and trying to decrypt each one. With enough total users, a returning user's blob falls outside the newest 100 and **recovery silently fails** — the user is treated as new.
-
-→ [Limitations](../reference/limitations.md)
+**Timestamp ties can skip blobs.** The keyset predicate is a strict `created_at < cursor` on milliseconds alone. If a page boundary falls inside a group of blobs sharing one millisecond, the rest of that group is never returned by any later page. A composite key — `(created_at, id) < (cursor_ts, cursor_id)` — would close this; clients cannot work around a row the server never sends.
 {% endhint %}
 
 ### Get one blob
@@ -247,7 +248,7 @@ Exceeding a limit returns `429 Too Many Requests`.
 
 | Method | Call | Failure behaviour |
 |---|---|---|
-| `fetchAllBlobs()` | `GET /api/blobs?limit=100` | Returns `[]` — app continues offline |
+| `fetchAllBlobs()` | `GET /api/blobs?limit=100&cursor=…`, paged | Returns whatever pages it collected — app continues offline |
 | `createBlob(data)` | `POST /api/blobs` | Throws |
 | `deleteBlob(id)` | `DELETE /api/blobs/{id}` | Returns `false` |
 

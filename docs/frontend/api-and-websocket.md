@@ -25,7 +25,8 @@ await apiClient.deleteBlob(id);           // boolean
 
 | Method | Request | Notes |
 |---|---|---|
-| `fetchAllBlobs` | `GET /api/blobs?limit=100` | **Returns `[]` on any error** so the app keeps working offline |
+| `fetchAllBlobs` | `GET /api/blobs?limit=100&cursor=…`, paged | **Never throws** — returns whatever pages it collected |
+| `fetchBlobPages` | same, as an async generator | Lets callers stop early instead of walking every page |
 | `createBlob` | `POST /api/blobs` with JSON `{ encryptedBlob }` | Throws on failure |
 | `deleteBlob` | `DELETE /api/blobs/{id}` | Returns `false` on error; the backend soft-deletes |
 
@@ -44,15 +45,17 @@ catch (error) {
 The trade-off: if IndexedDB is *also* empty and the backend is down, you are silently treated as a new user and advanced to a fresh chain position. Funds on earlier burners are not lost — `scanPendingUtxos()` scans from index 1 regardless — but the app gives no indication that sync failed.
 {% endhint %}
 
-### The limit=100 problem
+### Pagination
 
-`fetchAllBlobs` requests a flat `limit=100` with no cursor.
+Blobs carry no user identifier, so recovery means downloading blobs and trying to decrypt each one. `limit` therefore caps the *global* set, not a per-user one — a flat single-page request meant that past ~100 total blobs a returning user's blob was simply absent from the response and they were treated as new.
 
-Blobs carry no user identifier, so recovery means downloading blobs and trying to decrypt each one. With enough total users, your blob falls outside the newest 100 and **recovery silently fails**.
+`fetchAllBlobs` now walks the keyset pages: each page's oldest `createdAt` becomes the next `cursor`, and the walk ends on a short page. Three guards keep it bounded — ids are deduped across pages, the cursor must strictly decrease (a server ignoring `cursor` would otherwise return the newest page forever), and `BLOB_MAX_PAGES` caps the walk regardless.
 
-The backend supports keyset pagination via a `cursor` parameter (`created_at` based), but the client does not use it.
+`fetchBlobPages` exposes the same walk as an async generator. `UtxoService.loadRemote` uses it to stop at the first tree blob it can decrypt: pages are newest-first and the service always writes a new blob before deleting the old one, so the first readable tree is the current one. `NonceService.tryDecryptBlobs` must still see everything — it selects the highest nonce index, which is not guaranteed to track `createdAt` order.
 
-→ [Limitations](../reference/limitations.md)
+{% hint style="warning" %}
+Pagination fixes correctness, not scale. Trial decryption is still O(total blobs across all users), so login cost grows with adoption instead of being silently truncated. Bucketing by an opaque, wallet-unlinkable tag is the real fix.
+{% endhint %}
 
 ### Configuration
 
