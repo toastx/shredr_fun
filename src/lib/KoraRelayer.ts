@@ -280,13 +280,10 @@ export class KoraRelayer {
 }
 
 function getEnvironmentRelayerPubkey(): string | undefined {
-  const env =
-    typeof import.meta !== "undefined"
-      ? (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
-      : undefined;
-
-  const fromImportMeta = env?.VITE_KORA_RELAYER_PUBKEY ?? env?.KORA_RELAYER_PUBKEY;
-  if (fromImportMeta) return fromImportMeta;
+  // Goes through constants' `env()` so the dev/prod switch applies here too;
+  // reading `import.meta.env` directly would quietly ignore VITE_DEV_* and let
+  // a dev build sign against the production relayer.
+  if (KORA_RELAYER_PUBKEY) return KORA_RELAYER_PUBKEY;
 
   const globalWithEnv = globalThis as typeof globalThis & {
     __KORA_RELAYER_PUBKEY__?: string;
