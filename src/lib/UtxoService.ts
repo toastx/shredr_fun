@@ -82,36 +82,38 @@ export class UtxoService {
     }
 
     private async loadRemote(): Promise<void> {
-        let blobs;
-        try {
-            blobs = await apiClient.fetchAllBlobs();
-        } catch (e) {
-            console.warn('[UtxoService] fetchAllBlobs failed:', e);
-            return;
-        }
-
         // Trial-decrypt: the server cannot tell our blobs from anyone else's,
         // and our own key opens both nonce blobs and tree blobs, so the
         // envelope `kind` is what identifies a tree.
-        let best: { blobId: string; notes: UtxoNote[] } | null = null;
+        //
+        // Pages arrive newest-first and `persist` always writes a new blob then
+        // deletes the old one, so the first tree we can open is the current one
+        // — stop there rather than walking every blob on the server.
+        let found: { blobId: string; notes: UtxoNote[] } | null = null;
 
-        for (const blob of blobs) {
-            try {
-                const decoded = await this.decrypt(blob.encryptedBlob);
-                const env = JSON.parse(decoded) as TreeEnvelope;
-                if (env?.kind !== TREE_KIND || !Array.isArray(env.notes)) continue;
-                if (!best || env.notes.length > best.notes.length) {
-                    best = { blobId: blob.id, notes: env.notes };
+        try {
+            outer: for await (const page of apiClient.fetchBlobPages()) {
+                for (const blob of page) {
+                    try {
+                        const env = JSON.parse(
+                            await this.decrypt(blob.encryptedBlob),
+                        ) as TreeEnvelope;
+                        if (env?.kind !== TREE_KIND || !Array.isArray(env.notes)) continue;
+                        found = { blobId: blob.id, notes: env.notes };
+                        break outer;
+                    } catch {
+                        continue; // not ours, or not a tree
+                    }
                 }
-            } catch {
-                continue; // not ours, or not a tree
             }
+        } catch (e) {
+            console.warn('[UtxoService] blob walk failed:', e);
         }
 
-        if (!best) return;
+        if (!found) return;
 
-        this._notes = this.merge(this._notes, best.notes);
-        this._blobId = best.blobId;
+        this._notes = this.merge(this._notes, found.notes);
+        this._blobId = found.blobId;
         await this.storage.saveNotes(this._walletHash!, this._notes);
     }
 

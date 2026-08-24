@@ -15,6 +15,7 @@ import { address } from '@solana/kit';
 import {
     SHREDR_PROGRAM_ID,
     STEALTH_ACCOUNT_LEN,
+    STEALTH_ROLE,
     StealthInstruction,
     MAGIC_PROGRAM_ID,
     MAGIC_BLOCK_PROGRAM_ID,
@@ -85,10 +86,27 @@ describe('ShredrProgram', () => {
             depositAmount,
         );
 
-        it('encodes [discriminator, deposit_amount] and nothing else', () => {
-            expect(ix.data).to.have.lengthOf(9);
+        it('encodes [discriminator, deposit_amount, role] and nothing else', () => {
+            expect(ix.data).to.have.lengthOf(10);
             expect(ix.data[0]).to.equal(StealthInstruction.InitializeAndDelegate);
             expect(ix.data.readBigUInt64LE(1)).to.equal(depositAmount);
+            // Role defaults from the amount: funded is a deposit PDA.
+            expect(ix.data[9]).to.equal(STEALTH_ROLE.deposit);
+        });
+
+        it('defaults an empty init to the exit role', () => {
+            const exitIx = createInitializeAndDelegateInstruction(relayer, burner, 0n);
+            expect(exitIx.data[9]).to.equal(STEALTH_ROLE.exit);
+        });
+
+        it('takes an explicit role over the amount-derived default', () => {
+            const explicit = createInitializeAndDelegateInstruction(
+                relayer,
+                burner,
+                depositAmount,
+                STEALTH_ROLE.exit,
+            );
+            expect(explicit.data[9]).to.equal(STEALTH_ROLE.exit);
         });
 
         it('passes the nine accounts the program expects, in order', () => {

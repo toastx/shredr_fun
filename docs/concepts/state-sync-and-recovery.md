@@ -116,7 +116,7 @@ Because blobs are unlabelled, finding yours means trying them all:
 {% step %}
 ### Download every blob
 
-`GET /api/blobs?limit=100` returns unconsumed blobs, newest first.
+`GET /api/blobs?limit=100&cursor=…` returns unconsumed blobs, newest first. `fetchAllBlobs()` walks every page, threading each page's oldest `createdAt` into the next `cursor`.
 {% endstep %}
 
 {% step %}
@@ -139,7 +139,7 @@ Your storage key succeeds only on yours. AES-GCM's authentication tag makes a wr
 {% endstepper %}
 
 {% hint style="warning" %}
-This scales linearly with total blobs across all users. With `limit=100` and a busy server, your blob could fall outside the first page and recovery would silently fail — falling through to new-user state. The backend supports keyset pagination via a `cursor` parameter, but the client does not currently use it.
+This scales linearly with total blobs across all users. The client now pages through the whole set, so a busy server no longer pushes your blob out of reach — but the cost of the walk still grows with adoption, since every blob must be trial-decrypted to find yours.
 
 → [Limitations](../reference/limitations.md)
 {% endhint %}

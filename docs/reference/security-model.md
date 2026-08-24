@@ -117,7 +117,7 @@ Summarized here; detailed in [Limitations](limitations.md).
 | Weakness | Severity | Status |
 |---|---|---|
 | Timing correlation | **High** | Delay constants defined, **not implemented** |
-| Blob recovery does not paginate | Medium | Client requests a flat `limit=100` |
+| Blob trial-decryption is O(total blobs) | Medium | Client pages the full set; cost grows with adoption |
 | Main PDA cannot be re-delegated | Medium | Detected and reported, not solved |
 | Committed Helius API key | Low | In the client bundle |
 | WebSocket subscriptions never released | Low | Compensated by on-chain re-checks |

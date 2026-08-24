@@ -214,7 +214,7 @@ The service holds no session state, so you can run as many instances as you like
 <details>
 <summary><strong>The real bottleneck</strong></summary>
 
-Not the database — it is the recovery model. Clients download and trial-decrypt blobs to find their own, which grows with total user count. The frontend requests a flat `limit=100` with no cursor, so past a certain scale recovery silently fails.
+Not the database — it is the recovery model. Clients download and trial-decrypt blobs to find their own, which grows with total user count. The frontend pages through the full set, so recovery is correct, but the work per login still scales with adoption.
 
 Fixing it well is a design question, not a capacity one: any lookup key would let the operator group blobs by user.
 
