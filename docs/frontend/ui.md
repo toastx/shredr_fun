@@ -169,9 +169,6 @@ All in `src/components/`, barrel-exported from `src/components/index.ts`.
 | `Navbar` | `brandName?` | Top bar with the wallet button |
 | `Footer` | `author` | Footer |
 | `AddressDisplay` | `label`, `value`, `placeholder?`, `isCopied`, `hasValue`, `onCopy` | Click-to-copy address with copied state |
-| `HashDisplay` | `hash`, `isCopied`, `onCopy` | Click-to-copy hash |
-| `SeedDisplay` | `words`, `isCopied`, `onCopy` | Word-grid display |
-| `GeneratorCard` | — | Card wrapper for the generator UI |
 | `TransactionMonitor` | `burnerAddress` | Live feed of transactions for an address |
 | `TransactionApprovalModal` | `transaction`, `burnerAddress`, `onApprove`, `onReject`, `isProcessing?` | Confirmation modal for manual signing mode |
 | `WalletButton` | — | Styled wallet connect button |
@@ -179,7 +176,10 @@ All in `src/components/`, barrel-exported from `src/components/index.ts`.
 Each lives in its own directory with a `.tsx`, a `.css`, and an `index.ts`.
 
 {% hint style="info" %}
-`SeedDisplay` and `HashDisplay` carry labels from an earlier design ("Nullifier Seed", "rescue prime hash") that do not match the current architecture — shredr has no seed phrase and no rescue-prime hashing. They are leftovers, not features.
+`TransactionApprovalModal` is the only component here that nothing renders. It is
+the UI half of manual signing: `ShredrClient.setSigningMode("manual")` and the
+`PendingTransaction` type exist, but no page wires them to the modal yet. Kept
+deliberately — it is an unfinished feature, not a leftover.
 {% endhint %}
 
 ### TransactionApprovalModal
