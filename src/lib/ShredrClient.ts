@@ -94,9 +94,6 @@ export interface ShredResult {
   lamports: number;
   signatures: {
     initializeAndDelegate: string;
-    initializeMainPda: string | null;
-    privateTransfer: string;
-    commitAndUndelegate: string;
   };
 }
 
@@ -173,11 +170,13 @@ export class ShredrClient {
   }
 
   /** Persistent main burner pubkey (controls the main PDA). */
+  /** @deprecated Legacy consolidation account; kept so old balances drain. */
   get mainBurnerAddress(): string | null {
     return this._mainBurner?.address ?? null;
   }
 
   /** Persistent main PDA — where funds consolidate after the rollup commit. */
+  /** @deprecated Legacy consolidation account; kept so old balances drain. */
   get mainPdaAddress(): string | null {
     return this._mainPda?.toBase58() ?? null;
   }
@@ -564,29 +563,6 @@ export class ShredrClient {
     }
   }
 
-  /**
-   * Make sure the main PDA exists and is delegated, so it can receive a
-   * private transfer inside the rollup. Creates it empty when missing.
-   *
-   * Note: the program creates the PDA as part of delegation and rejects a
-   * non-empty account, so a main PDA that has already been undelegated cannot
-   * be re-delegated — that case throws instead of silently failing later.
-   *
-   * @returns The `InitializeAndDelegate` signature, or null if already delegated.
-   */
-  async ensureMainPdaDelegated(): Promise<string | null> {
-    if (!this._mainBurner || !this._mainPda) {
-      throw new Error("Main burner / main PDA not initialized");
-    }
-
-    const state = await this.fetchStealthState(this._mainPda);
-    if (state?.delegated) return null;
-
-    // Covers both the first run and re-delegation after a withdraw cycle: the
-    // program reuses an existing undelegated PDA instead of rejecting it.
-    return this.initializeAndDelegate(this._mainBurner, 0n);
-  }
-
   // ============ ON-CHAIN: PRIVATE TRANSFER (inside rollup) ============
 
   /**
@@ -599,18 +575,15 @@ export class ShredrClient {
    *
    * @param sourceBurner   Burner that owns the source stealth PDA
    * @param amountLamports Amount to transfer (typically the full deposit)
-   * @param destinationPda Defaults to the main PDA (deposits consolidating in).
-   *                       `withdrawToWallet` passes an exit PDA to send funds
-   *                       back out without the main PDA appearing on base layer.
+   * @param destination    The exit PDA receiving the funds. Required: this used
+   *                       to default to a shared consolidation account, which
+   *                       is the design being removed.
    */
   async privateTransfer(
     sourceBurner: BurnerKeyPair,
     amountLamports: bigint,
-    destinationPda?: PublicKey,
+    destination: PublicKey,
   ): Promise<string> {
-    const destination = destinationPda ?? this._mainPda;
-    if (!destination) throw new Error("Main PDA not initialized");
-
     const burnerKp = this.burnerToKeypair(sourceBurner);
     const [sourcePda] = deriveStealthPDA(burnerKp.publicKey);
 
@@ -705,7 +678,6 @@ export class ShredrClient {
   async shredBurner(burner?: BurnerKeyPair): Promise<ShredResult> {
     const b = burner ?? this._currentBurner;
     if (!b) throw new Error("No burner available");
-    if (!this._mainPda) throw new Error("Main PDA not initialized");
 
     const burnerKp = this.burnerToKeypair(b);
     const [stealthPda] = deriveStealthPDA(burnerKp.publicKey);
@@ -715,23 +687,26 @@ export class ShredrClient {
     if (lamports <= 0) {
       throw new Error(`Burner ${b.address} has no funds to shred`);
     }
-    const deposit = BigInt(lamports);
 
-    const initializeAndDelegate = await this.initializeAndDelegate(b, deposit);
-    const initializeMainPda = await this.ensureMainPdaDelegated();
-    const privateTransfer = await this.privateTransfer(b, deposit);
-    const commitAndUndelegate = await this.commitAndUndelegate(stealthPda);
+    // Sweep into the deposit PDA and leave it delegated. There is no longer a
+    // consolidation account to forward to: the hop that breaks the link now
+    // happens at withdrawal time, deposit PDA -> exit PDA, inside the rollup.
+    //
+    // Consolidating on deposit meant every user's funds passed through one
+    // long-lived address, so a single forced undelegation exposed the whole
+    // set at once. Holding them in per-deposit PDAs keeps that blast radius
+    // to one deposit.
+    const initializeAndDelegate = await this.initializeAndDelegate(
+      b,
+      BigInt(lamports),
+      "deposit",
+    );
 
     return {
       burnerAddress: b.address,
       stealthPda: stealthPda.toBase58(),
       lamports,
-      signatures: {
-        initializeAndDelegate,
-        initializeMainPda,
-        privateTransfer,
-        commitAndUndelegate,
-      },
+      signatures: { initializeAndDelegate },
     };
   }
 
@@ -755,29 +730,18 @@ export class ShredrClient {
     destinationAddress: string,
     amountInSol: number | "all",
   ): Promise<{ signature: string; amount: number }> {
-    if (!this._mainBurner || !this._mainPda) {
-      throw new Error("Main burner / main PDA not initialized");
-    }
+    if (!this._initialized) throw new Error("ShredrClient not initialized");
 
     const connection = this.getConnection();
     const destination = new PublicKey(destinationAddress);
 
-    // The main PDA stays delegated throughout, so its live balance is in the
-    // rollup — the base-layer copy is only as fresh as the last commit.
-    const state = await this.fetchStealthState(
-      this._mainPda,
-      this.getRollupConnection(),
-    );
-    if (!state) throw new Error("Main PDA has not been initialized on-chain");
+    const sources = await this.fundedSources();
+    const availableLamports = sources.reduce((sum, s) => sum + s.lamports, 0);
 
-    const availableLamports = Number(state.depositedAmount);
-
-    let withdrawLamports: number;
-    if (amountInSol === "all") {
-      withdrawLamports = availableLamports;
-    } else {
-      withdrawLamports = Math.floor(amountInSol * LAMPORTS_PER_SOL);
-    }
+    const withdrawLamports =
+      amountInSol === "all"
+        ? availableLamports
+        : Math.floor(amountInSol * LAMPORTS_PER_SOL);
 
     if (withdrawLamports <= 0) {
       throw new Error("Insufficient balance for withdrawal");
@@ -788,15 +752,14 @@ export class ShredrClient {
       );
     }
 
-    // Route the exit through a throwaway PDA so the main PDA never appears as
-    // the source of a base-layer transfer. The hop to it happens inside the
-    // rollup and is invisible on Solana, so consecutive withdrawals have
-    // unrelated sources instead of a shared, linkable parent.
+    // Route the exit through a throwaway PDA so no deposit PDA is ever the
+    // source of a base-layer transfer. The hops happen inside the rollup and
+    // are invisible on Solana, so consecutive withdrawals have unrelated
+    // sources rather than a shared, linkable parent.
     //
     // The exit burner comes off the deposit nonce chain rather than being
-    // random: if this flow dies between the transfer and the withdraw, the
-    // funds must stay derivable. `scanPendingUtxos` walks the same indices and
-    // reports the stranded PDA as `ready`.
+    // random: if this flow dies partway, the funds must stay derivable. The
+    // chain walk finds it and recovery reports it as ready.
     const exitBurner = await this.consumeAndGenerateNew();
     // Advance again so the exit burner is not left as the displayed deposit
     // address: its withdrawal is public on base layer, so a later deposit to it
@@ -808,11 +771,35 @@ export class ShredrClient {
       const [exitPda] = deriveStealthPDA(exitBurnerKp.publicKey);
 
       await this.initializeAndDelegate(exitBurner, 0n, "exit");
-      await this.privateTransfer(
-        this._mainBurner,
-        BigInt(withdrawLamports),
-        exitPda,
-      );
+
+      // Drain deposit PDAs newest-first until the amount is covered. Newest
+      // first because the oldest deposits are the ones most worth leaving in
+      // the rollup: their timing is furthest from this withdrawal, so they
+      // correlate least with it.
+      let remaining = withdrawLamports;
+      for (const source of sources) {
+        if (remaining <= 0) break;
+
+        const take = Math.min(remaining, source.lamports);
+        const burner = await this.burnerForNote(source.note);
+        try {
+          await this.privateTransfer(burner, BigInt(take), exitPda);
+        } finally {
+          if (burner !== this._mainBurner) burnerService.clearBurner(burner);
+        }
+        await utxoService.link(source.note.stealthPda, exitBurner.nonceIndex);
+        remaining -= take;
+      }
+
+      if (remaining > 0) {
+        // Balance moved between reading and spending. The transferred amount is
+        // safe in the exit PDA and recovery will finish it, so fail loudly
+        // rather than withdrawing an amount that no longer matches.
+        throw new Error(
+          `Could not gather the full amount; ${remaining} lamports short. ` +
+            `Funds are in the exit PDA and will be recovered on next sign-in.`,
+        );
+      }
 
       await this.commitAndUndelegate(exitPda);
       await this.waitForUndelegation(exitPda);
@@ -903,6 +890,39 @@ export class ShredrClient {
     return this.resumePending();
   }
 
+  /**
+   * Every delegated PDA currently holding funds, newest first.
+   *
+   * Replaces reading a single consolidation account: without a hub the balance
+   * is spread across one PDA per deposit, so both the balance display and a
+   * withdrawal have to gather them.
+   *
+   * Reads live state rather than the note's recorded `lamports`, which is only
+   * as fresh as the last write.
+   */
+  private async fundedSources(): Promise<
+    Array<{ note: UtxoNote; pda: PublicKey; lamports: number }>
+  > {
+    await this.adoptUnrecordedUtxos();
+
+    const sources: Array<{ note: UtxoNote; pda: PublicKey; lamports: number }> = [];
+
+    for (const note of utxoService.unsettled) {
+      if (note.role !== "deposit") continue;
+
+      try {
+        const pda = new PublicKey(note.stealthPda);
+        const { state } = await this.readStealthState(pda);
+        const lamports = state ? Number(state.depositedAmount) : 0;
+        if (lamports > 0) sources.push({ note, pda, lamports });
+      } catch (err) {
+        console.warn("[fundedSources] skipped", note.stealthPda, err);
+      }
+    }
+
+    return sources.sort((a, b) => b.note.createdAt - a.note.createdAt);
+  }
+
   // ============ BALANCE ============
 
   /**
@@ -917,23 +937,28 @@ export class ShredrClient {
   async getStealthBalance(): Promise<{
     available: number;
     availableLamports: number;
-    address: string;
+    /** The single source's PDA, or null when the balance spans several. */
+    address: string | null;
+    /** How many PDAs the balance is spread across. */
+    sources: number;
     delegated: boolean;
   }> {
-    if (!this._mainPda) {
-      throw new Error("Main PDA not initialized. Call initFromSignature first.");
+    if (!this._initialized) {
+      throw new Error("ShredrClient not initialized. Call initFromSignature first.");
     }
 
-    // Delegation zeroes the base-layer copy, so reading base alone reports a
-    // delegated PDA as empty. `readStealthState` falls through to the rollup.
-    const { state } = await this.readStealthState(this._mainPda);
-    const lamports = state ? Number(state.depositedAmount) : 0;
+    // Delegation zeroes the base-layer copy, so a delegated PDA reads as empty
+    // on base; `readStealthState` inside `fundedSources` falls through to the
+    // rollup.
+    const sources = await this.fundedSources();
+    const lamports = sources.reduce((sum, s) => sum + s.lamports, 0);
 
     return {
       available: lamports / LAMPORTS_PER_SOL,
       availableLamports: lamports,
-      address: this._mainPda.toBase58(),
-      delegated: state?.delegated ?? false,
+      address: sources.length === 1 ? sources[0].pda.toBase58() : null,
+      sources: sources.length,
+      delegated: sources.length > 0,
     };
   }
 
@@ -1051,6 +1076,31 @@ export class ShredrClient {
     }
 
     const known = new Set(utxoService.notes.map((n) => n.stealthPda));
+
+    // Legacy: deposits used to consolidate into a single main PDA derived from
+    // its own domain, not from the nonce chain — so the walk above cannot see
+    // it. Anyone who shredded under that scheme still has funds there. Adopt it
+    // as a deposit note so the normal path drains it, then never write to it
+    // again.
+    if (this._mainPda && this._mainBurner && !known.has(this._mainPda.toBase58())) {
+      try {
+        const { state } = await this.readStealthState(this._mainPda);
+        const lamports = state ? Number(state.depositedAmount) : 0;
+        if (lamports > 0) {
+          await utxoService.record({
+            nonceIndex: this._mainBurner.nonceIndex,
+            role: "deposit",
+            burnerAddress: this._mainBurner.address,
+            stealthPda: this._mainPda.toBase58(),
+            state: state?.delegated ? "delegated" : "undelegated",
+            lamports,
+          });
+          known.add(this._mainPda.toBase58());
+        }
+      } catch (err) {
+        console.warn("[adoptUnrecordedUtxos] legacy main PDA probe failed:", err);
+      }
+    }
 
     for (const utxo of found) {
       if (known.has(utxo.stealthPda)) continue;
