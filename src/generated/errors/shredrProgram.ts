@@ -26,19 +26,25 @@ export const SHREDR_PROGRAM_ERROR__CLOCK_UNAVAILABLE = 0x1778; // 6008
 export const SHREDR_PROGRAM_ERROR__BALANCE_INVARIANT_VIOLATION = 0x1779; // 6009
 export const SHREDR_PROGRAM_ERROR__ACCOUNT_ALREADY_INITIALIZED = 0x177a; // 6010
 export const SHREDR_PROGRAM_ERROR__SELF_TRANSFER_NOT_ALLOWED = 0x177b; // 6011
+export const SHREDR_PROGRAM_ERROR__INVALID_BUFFER_ACCOUNT = 0x177c; // 6012
+export const SHREDR_PROGRAM_ERROR__ACCOUNT_NOT_EMPTY = 0x177d; // 6013
+export const SHREDR_PROGRAM_ERROR__RENT_UNAVAILABLE = 0x177e; // 6014
 
 export type ShredrProgramError =
   | typeof SHREDR_PROGRAM_ERROR__ACCOUNT_ALREADY_INITIALIZED
   | typeof SHREDR_PROGRAM_ERROR__ACCOUNT_DATA_TOO_SMALL
+  | typeof SHREDR_PROGRAM_ERROR__ACCOUNT_NOT_EMPTY
   | typeof SHREDR_PROGRAM_ERROR__ALREADY_DELEGATED
   | typeof SHREDR_PROGRAM_ERROR__BALANCE_INVARIANT_VIOLATION
   | typeof SHREDR_PROGRAM_ERROR__CLOCK_UNAVAILABLE
+  | typeof SHREDR_PROGRAM_ERROR__INVALID_BUFFER_ACCOUNT
   | typeof SHREDR_PROGRAM_ERROR__INVALID_DESTINATION_OWNER
   | typeof SHREDR_PROGRAM_ERROR__INVALID_DISCRIMINATOR
   | typeof SHREDR_PROGRAM_ERROR__INVALID_PROGRAM_OWNER
   | typeof SHREDR_PROGRAM_ERROR__INVALID_STEALTH_PDA
   | typeof SHREDR_PROGRAM_ERROR__MISSING_SIGNER
   | typeof SHREDR_PROGRAM_ERROR__NOT_DELEGATED
+  | typeof SHREDR_PROGRAM_ERROR__RENT_UNAVAILABLE
   | typeof SHREDR_PROGRAM_ERROR__SELF_TRANSFER_NOT_ALLOWED;
 
 let shredrProgramErrorMessages: Record<ShredrProgramError, string> | undefined;
@@ -46,15 +52,18 @@ if (process.env["NODE_ENV"] !== "production") {
   shredrProgramErrorMessages = {
     [SHREDR_PROGRAM_ERROR__ACCOUNT_ALREADY_INITIALIZED]: `Attempted to initialize an account that already exists.`,
     [SHREDR_PROGRAM_ERROR__ACCOUNT_DATA_TOO_SMALL]: `The account data is too small to contain a StealthAccount.`,
+    [SHREDR_PROGRAM_ERROR__ACCOUNT_NOT_EMPTY]: `The stealth account still holds a deposit and cannot be closed.`,
     [SHREDR_PROGRAM_ERROR__ALREADY_DELEGATED]: `The stealth account is already delegated.`,
     [SHREDR_PROGRAM_ERROR__BALANCE_INVARIANT_VIOLATION]: `Deposited amount would desync from actual lamports.`,
     [SHREDR_PROGRAM_ERROR__CLOCK_UNAVAILABLE]: `Clock sysvar is unavailable.`,
+    [SHREDR_PROGRAM_ERROR__INVALID_BUFFER_ACCOUNT]: `The undelegation buffer is not the delegation program's buffer for this account.`,
     [SHREDR_PROGRAM_ERROR__INVALID_DESTINATION_OWNER]: `The destination account is not owned by the SHREDR program.`,
     [SHREDR_PROGRAM_ERROR__INVALID_DISCRIMINATOR]: `The account discriminator does not match the expected value.`,
     [SHREDR_PROGRAM_ERROR__INVALID_PROGRAM_OWNER]: `The account is not owned by the SHREDR program.`,
     [SHREDR_PROGRAM_ERROR__INVALID_STEALTH_PDA]: `The stealth account PDA does not match the expected derivation.`,
     [SHREDR_PROGRAM_ERROR__MISSING_SIGNER]: `Signer is required but was not provided.`,
     [SHREDR_PROGRAM_ERROR__NOT_DELEGATED]: `The stealth account is not delegated when it should be.`,
+    [SHREDR_PROGRAM_ERROR__RENT_UNAVAILABLE]: `Rent sysvar is unavailable.`,
     [SHREDR_PROGRAM_ERROR__SELF_TRANSFER_NOT_ALLOWED]: `Source and destination stealth accounts are the same account.`,
   };
 }

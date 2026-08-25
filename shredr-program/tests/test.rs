@@ -1386,6 +1386,31 @@ fn initialize_rejects_wrong_system_program() {
 }
 
 #[test]
+fn initialize_credits_prefunded_lamports() {
+    let mollusk = mollusk();
+
+    // Someone sent to the derivable PDA address before it was initialized.
+    // Those lamports used to be left uncredited, which quietly broke
+    // `lamports == rent_minimum + deposited_amount` — the balance was still
+    // reachable via CloseStealthAccount, just invisible to the accounting.
+    let setup = init_setup(None, 3 * LAMPORTS_PER_SOL);
+
+    let result = mollusk.process_instruction(
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
+        &setup.accounts,
+    );
+
+    assert!(
+        !matches!(
+            result.raw_result,
+            Err(InstructionError::Custom(6000..=6014))
+        ),
+        "a pre-funded PDA must still initialize; got {:?}",
+        result.raw_result
+    );
+}
+
+#[test]
 fn initialize_rejects_unknown_role() {
     let mollusk = mollusk();
     let setup = init_setup(None, 0);
@@ -1565,7 +1590,7 @@ fn initialize_clears_program_validation_before_cpi() {
     assert!(
         !matches!(
             result.raw_result,
-            Err(InstructionError::Custom(6000..=6013))
+            Err(InstructionError::Custom(6000..=6014))
         ),
         "expected failure to come from the missing MagicBlock/ACL programs, \
          not from SHREDR validation; got {:?}",
@@ -1596,7 +1621,7 @@ fn initialize_survives_prefunded_stealth_pda() {
     assert!(
         !matches!(
             result.raw_result,
-            Err(InstructionError::Custom(6000..=6013))
+            Err(InstructionError::Custom(6000..=6014))
         ),
         "a pre-funded stealth PDA must still initialize (failure should come from \
          the missing MagicBlock/ACL programs); got {:?}",

@@ -36,6 +36,8 @@ pub enum ShredrError {
     InvalidBufferAccount = 6012,
     /// The stealth account still holds a deposit and cannot be closed.
     AccountNotEmpty = 6013,
+    /// Rent sysvar is unavailable.
+    RentUnavailable = 6014,
 }
 
 impl From<ShredrError> for ProgramError {

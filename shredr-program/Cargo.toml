@@ -7,7 +7,6 @@ edition = "2021"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-bytemuck = { version = "1.14", features = ["derive"] }
 ephemeral-rollups-pinocchio = "0.11.2"
 pinocchio = "0.10.2"
 pinocchio-log = "0.5.1"
@@ -27,6 +26,14 @@ mainnet = []
 name = "compute_units"
 harness = false
 
+
+# NOTE: lint with `cargo clippy --lib`, not `--all-targets`.
+#
+# The dev-dependencies below pull `solana-address` in with `std`/`alloc` via
+# mollusk -> solana-pubkey. Under those features `Address` implements `Copy`, so
+# `--all-targets` reports `clone_on_copy` on the `burner_key` clones in
+# initialize_delegate.rs. The SBF build has no dev-dependencies, `Address` is not
+# `Copy` there, and removing those clones fails to compile.
 
 [dev-dependencies]
 mollusk-svm = "0.14.0"
