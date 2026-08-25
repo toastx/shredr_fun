@@ -40,6 +40,8 @@ function ClaimPage({ onBack }: ClaimPageProps) {
     // State machine approach - single source of truth for page state
     const [pageState, setPageState] = useState<PageState>('idle');
     const [totalBalance, setTotalBalance] = useState<number>(0);
+    const [balanceSources, setBalanceSources] = useState<number>(0);
+    const [balanceSource, setBalanceSource] = useState<string | null>(null);
     const [withdrawError, setWithdrawError] = useState<string | null>(null);
     const [withdrawSuccess, setWithdrawSuccess] = useState<string | null>(null);
     const {
@@ -80,10 +82,11 @@ function ClaimPage({ onBack }: ClaimPageProps) {
 
         console.log('fetchStealthBalance: Starting...');
         console.log('fetchStealthBalance: initialized =', shredrClient.initialized);
-        console.log('fetchStealthBalance: mainPda =', shredrClient.mainPdaAddress);
 
-        if (!shredrClient.initialized || !shredrClient.mainPdaAddress) {
-            console.log('fetchStealthBalance: Skipping - not initialized or no main PDA');
+        // The balance is spread across one PDA per deposit, so there is no
+        // single account to gate on any more — being initialized is enough.
+        if (!shredrClient.initialized) {
+            console.log('fetchStealthBalance: Skipping - not initialized');
             return;
         }
         
@@ -103,6 +106,8 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                 address: balance.address
             });
             setTotalBalance(balance.availableLamports);
+            setBalanceSources(balance.sources);
+            setBalanceSource(balance.address);
             setPageState('ready');
         } catch (err) {
             console.error('fetchStealthBalance: Failed to fetch balance:', err);
@@ -164,7 +169,7 @@ function ClaimPage({ onBack }: ClaimPageProps) {
             return;
         }
         
-        if (pageState !== 'ready' || !shredrClient.mainBurnerAddress) {
+        if (pageState !== 'ready' || !shredrClient.initialized) {
             setWithdrawError('Stealth address not initialized');
             return;
         }
@@ -297,10 +302,16 @@ function ClaimPage({ onBack }: ClaimPageProps) {
                     </span>
                 </div>
                 
-                {/* Main PDA address (where consolidated funds live) */}
-                {isInitialized && shredrClient.mainPdaAddress && (
+                {/* Where the balance is coming from. Without a consolidation
+                    account this is one PDA per deposit, so show a count once
+                    there is more than one. */}
+                {isInitialized && balanceSources > 0 && (
                     <div className="burner-address-display">
-                        <small>From: {shredrClient.mainPdaAddress.slice(0, 6)}...{shredrClient.mainPdaAddress.slice(-6)}</small>
+                        <small>
+                            {balanceSource
+                                ? `From: ${balanceSource.slice(0, 6)}...${balanceSource.slice(-6)}`
+                                : `From: ${balanceSources} stealth accounts`}
+                        </small>
                     </div>
                 )}
                 
