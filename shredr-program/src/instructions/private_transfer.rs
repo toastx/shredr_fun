@@ -58,7 +58,7 @@ impl<'a> PrivateTransfer<'a> {
         // runtime reaps the account, stranding the residue. Same floor `Withdraw`
         // enforces.
         let rent =
-            Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
+            Rent::get().map_err(|_| -> ProgramError { ShredrError::RentUnavailable.into() })?;
         let rent_minimum = rent.try_minimum_balance(source_pda.data_len())?;
         if new_source_lamports < rent_minimum {
             return Err(ShredrError::BalanceInvariantViolation.into());

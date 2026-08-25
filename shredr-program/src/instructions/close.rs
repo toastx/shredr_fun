@@ -5,6 +5,13 @@
 //! Without it every cycle strands the relayer's rent and leaves an enumerable
 //! program-owned account behind.
 //!
+//! Sweeps the account's whole remaining balance, not a computed rent figure.
+//! With `deposited_amount == 0` enforced, that is the rent plus anything sent
+//! directly to the PDA address after initialization — uncredited by definition,
+//! since nothing observed it arrive. Only the recorded owner can ever close, so
+//! this is the burner recovering their own residue, not a path to anyone else's
+//! funds.
+//!
 //! Closing both PDAs are *base-layer* events; issued together they re-associate
 //! the two accounts and undo what the in-rollup hop bought, so the client must
 //! space them apart in time. `rent_payee` should be the shared relayer — a
@@ -34,23 +41,28 @@ impl<'a> CloseStealthAccount<'a> {
             rent_payee,
         } = self;
 
-        let stealth_data = get_stealth_mut(stealth_account)?;
+        // Scoped so the borrow provably ends before `resize(0)` below, which is
+        // what invalidates it. Left open, a later read of `stealth_data` after
+        // the resize would be undefined behaviour that still compiles.
+        {
+            let stealth_data = get_stealth_mut(stealth_account)?;
 
-        if &stealth_data.owner != owner.address() {
-            return Err(ProgramError::IllegalOwner);
-        }
+            if &stealth_data.owner != owner.address() {
+                return Err(ProgramError::IllegalOwner);
+            }
 
-        verify_stealth_pda(stealth_account, owner.address())?;
+            verify_stealth_pda(stealth_account, owner.address())?;
 
-        // Catches a `delegated` flag that outlived the ownership change.
-        if stealth_data.delegated {
-            return Err(ShredrError::AlreadyDelegated.into());
-        }
+            // Catches a `delegated` flag that outlived the ownership change.
+            if stealth_data.delegated {
+                return Err(ShredrError::AlreadyDelegated.into());
+            }
 
-        // The interlock that keeps this from becoming a theft primitive: only a
-        // spent PDA closes, so the lamports moved are only ever the rent.
-        if stealth_data.deposited_amount != 0 {
-            return Err(ShredrError::AccountNotEmpty.into());
+            // The interlock that keeps this from becoming a theft primitive: a
+            // funded PDA never closes, so this can only ever move residue.
+            if stealth_data.deposited_amount != 0 {
+                return Err(ShredrError::AccountNotEmpty.into());
+            }
         }
 
         let remaining = stealth_account.lamports();
@@ -66,9 +78,9 @@ impl<'a> CloseStealthAccount<'a> {
             .resize(0)
             .map_err(|_| -> ProgramError { ShredrError::AccountDataTooSmall.into() })?;
 
-        // SAFETY: verified program-owned stealth PDA, now at zero lamports and zero
-        // data. The `&mut StealthAccount` is dead — `resize(0)` invalidated it and
-        // nothing reads it after this point.
+        // SAFETY: verified program-owned stealth PDA, now at zero lamports and
+        // zero data. The `&mut StealthAccount` ended with the block above, so
+        // nothing holds a reference into the buffer `resize(0)` just shrank.
         unsafe { stealth_account.assign(&pinocchio_system::ID) };
 
         Ok(())

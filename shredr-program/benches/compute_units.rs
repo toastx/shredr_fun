@@ -23,6 +23,7 @@ use shredr_program::{
 
 const IX_PRIVATE_TRANSFER: u8 = 1;
 const IX_WITHDRAW: u8 = 4;
+const IX_CLOSE: u8 = 5;
 
 const ACCOUNT_LEN: usize = 8 + STEALTH_ACCOUNT_SIZE;
 const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
@@ -83,9 +84,12 @@ fn stealth_account(owner: &Pubkey, salt: [u8; 32], bump: u8, deposited: u64, ren
     }
 }
 
-fn derive(burner: &Pubkey, salt: &[u8; 32]) -> (Pubkey, u8) {
+/// Must match `helpers::derive_stealth_account_from_pubkey`: the burner alone,
+/// no salt. `salt` is a stored field, not a seed — including it here derived
+/// addresses the program rejects with `InvalidStealthPDA`.
+fn derive(burner: &Pubkey, _salt: &[u8; 32]) -> (Pubkey, u8) {
     Pubkey::find_program_address(
-        &[seeds::STEALTH_ADDRESS, burner.as_ref(), salt],
+        &[seeds::STEALTH_ADDRESS, burner.as_ref()],
         &program_id(),
     )
 }
@@ -230,6 +234,32 @@ fn main() {
         (wd_destination, system_account(0)),
     ];
 
+    // ── close ──
+    // Every cycle now ends in two of these, and it re-derives the PDA to verify
+    // it, so the bump grind lands on the hot path.
+    let cl_burner = Pubkey::new_unique();
+    let (cl_stealth_key, cl_stealth_bump) = derive(&cl_burner, &[9u8; 32]);
+    let cl_payee = Pubkey::new_unique();
+
+    let close_ix = Instruction::new_with_bytes(
+        program_id(),
+        &[IX_CLOSE],
+        vec![
+            AccountMeta::new_readonly(cl_burner, true),
+            AccountMeta::new(cl_stealth_key, false),
+            AccountMeta::new(cl_payee, false),
+        ],
+    );
+    let close_accounts = vec![
+        (cl_burner, system_account(LAMPORTS_PER_SOL)),
+        // Spent: deposited_amount zero, holding only rent.
+        (
+            cl_stealth_key,
+            stealth_account(&cl_burner, [9u8; 32], cl_stealth_bump, 0, rent),
+        ),
+        (cl_payee, system_account(0)),
+    ];
+
     MolluskComputeUnitBencher::new(mollusk)
         .bench(("private_transfer", &transfer_ix, &transfer_accounts))
         .bench((
@@ -243,6 +273,7 @@ fn main() {
             &withdraw_full_ix,
             &withdraw_full_accounts,
         ))
+        .bench(("close", &close_ix, &close_accounts))
         .must_pass(true)
         .out_dir("target/benches")
         .execute();

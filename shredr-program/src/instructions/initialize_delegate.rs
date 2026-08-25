@@ -104,11 +104,15 @@ impl<'a> InitializeAndDelegate<'a> {
             Seed::from(&bump_slice),
         ];
 
+        // Lamports found on the address at creation, above what rent needs.
+        let mut prefunded_credit: u64 = 0;
+
         if is_new {
             let rent = Rent::get()
-                .map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
+                .map_err(|_| -> ProgramError { ShredrError::RentUnavailable.into() })?;
             let rent_lamports = rent.try_minimum_balance(account_space as usize)?;
             let existing_lamports = stealth_account.lamports();
+            prefunded_credit = existing_lamports.saturating_sub(rent_lamports);
 
             if existing_lamports == 0 {
                 CreateAccount {
@@ -121,9 +125,15 @@ impl<'a> InitializeAndDelegate<'a> {
                 .invoke_signed(&[Signer::from(&create_seeds)])?;
             } else {
                 // Pre-funded address: CreateAccount refuses a non-empty account, so
-                // do the three steps it fuses. The lamports already here are not
-                // credited to `deposited_amount` — their sender is unknown, so they
-                // must not become a balance the burner can claim.
+                // do the three steps it fuses.
+                //
+                // Anything already here above the rent is credited to
+                // `deposited_amount` below. Leaving it uncredited looked safer,
+                // but it silently broke `lamports == rent_minimum + deposited`:
+                // the balance stayed claimable — `CloseStealthAccount` sweeps
+                // whatever remains — just invisible to the accounting. Only the
+                // recorded owner can ever reach it either way, so crediting it
+                // keeps the invariant honest instead of carving out an exception.
                 let shortfall = rent_lamports.saturating_sub(existing_lamports);
                 if shortfall > 0 {
                     Transfer {
@@ -176,6 +186,7 @@ impl<'a> InitializeAndDelegate<'a> {
         stealth_state.owner = burner_key.clone();
         stealth_state.deposited_amount = previous_deposited
             .checked_add(deposit_amount)
+            .and_then(|total| total.checked_add(prefunded_credit))
             .ok_or(ProgramError::ArithmeticOverflow)?;
         // Preserve the original deposit time across a top-up.
         if previous_deposited == 0 {

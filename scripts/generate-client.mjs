@@ -206,6 +206,9 @@ const errors = [
   ["balanceInvariantViolation", 6009, "Deposited amount would desync from actual lamports."],
   ["accountAlreadyInitialized", 6010, "Attempted to initialize an account that already exists."],
   ["selfTransferNotAllowed", 6011, "Source and destination stealth accounts are the same account."],
+  ["invalidBufferAccount", 6012, "The undelegation buffer is not the delegation program's buffer for this account."],
+  ["accountNotEmpty", 6013, "The stealth account still holds a deposit and cannot be closed."],
+  ["rentUnavailable", 6014, "Rent sysvar is unavailable."],
 ].map(([name, code, message]) => errorNode({ code, message, name }));
 
 // ============ BUILD ============

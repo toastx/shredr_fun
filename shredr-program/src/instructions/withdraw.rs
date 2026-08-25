@@ -60,7 +60,7 @@ impl<'a> Withdraw<'a> {
         // Safety net against a lamports/deposited_amount desync: below rent the
         // runtime reaps the account, stranding the residue.
         let rent =
-            Rent::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
+            Rent::get().map_err(|_| -> ProgramError { ShredrError::RentUnavailable.into() })?;
         let rent_minimum = rent.try_minimum_balance(stealth_account.data_len())?;
         if new_stealth_lamports < rent_minimum {
             return Err(ShredrError::BalanceInvariantViolation.into());
