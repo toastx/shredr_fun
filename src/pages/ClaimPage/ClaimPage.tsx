@@ -186,12 +186,15 @@ function ClaimPage({ onBack }: ClaimPageProps) {
 
             console.log('ClaimPage: Starting withdrawal from main PDA to', destinationAddress);
 
-            // Consolidate first: any deposit still sitting on a burner (received
-            // while the app was closed, or left there by manual signing mode) is
-            // swept into its stealth PDA and privately transferred to the main PDA.
-            const shredded = await shredrClient.shredPendingDeposits();
-            if (shredded.length > 0) {
-                console.log(`ClaimPage: Shredded ${shredded.length} pending deposit(s)`);
+            // Finish anything still outstanding first — deposits that landed
+            // while the app was closed, or a cycle interrupted partway. Same
+            // note-driven path the unlock runs, so the two cannot disagree.
+            const resumed = await shredrClient.resumePending();
+            if (resumed.length > 0) {
+                const failed = resumed.filter((r) => !r.ok).length;
+                console.log(
+                    `ClaimPage: resumed ${resumed.length - failed}/${resumed.length} pending item(s)`,
+                );
             }
 
             // Calls the SHREDR program's `Withdraw` instruction:

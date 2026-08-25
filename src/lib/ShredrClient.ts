@@ -55,6 +55,7 @@ import type {
   CreateBlobRequest,
   UtxoNote,
   UtxoRole,
+  UtxoState,
 } from "./types";
 
 // ============ TYPES ============
@@ -81,6 +82,8 @@ export interface PendingUtxo {
   stealthPda: string;
   lamports: number;
   status: UtxoStatus;
+  /** From the PDA's on-chain role byte; absent when it reads `unset`. */
+  role?: UtxoRole;
 }
 
 /** Signatures produced by a full shred (receive → rollup → base layer). */
@@ -883,29 +886,21 @@ export class ShredrClient {
    * Covers deposits that arrived while the app was closed, and manual-signing
    * mode, where the generator page does not shred on its own.
    */
-  async shredPendingDeposits(): Promise<ShredResult[]> {
+  /**
+   * @deprecated Use {@link resumePending}, which this now delegates to.
+   *
+   * This used to run its own nonce-chain scan and act only on unswept burners,
+   * in parallel with the recovery path's note-driven plan. Two discovery paths
+   * over the same funds could disagree about what was outstanding; there is
+   * now one.
+   */
+  async shredPendingDeposits(): Promise<
+    Array<{ plan: PendingAction; ok: boolean; error?: string }>
+  > {
     if (!this._initialized || !this._walletPubkey) {
       throw new Error("ShredrClient not initialized");
     }
-
-    const pending = (await this.scanPendingUtxos()).filter(
-      (utxo) => utxo.status === "received",
-    );
-
-    const results: ShredResult[] = [];
-    for (const utxo of pending) {
-      const nonce = await nonceService.generateNonceAtIndex(
-        utxo.nonceIndex,
-        this._walletPubkey,
-      );
-      const burner = await burnerService.deriveBurnerFromNonce(nonce);
-      try {
-        results.push(await this.shredBurner(burner));
-      } finally {
-        burnerService.clearBurner(burner);
-      }
-    }
-    return results;
+    return this.resumePending();
   }
 
   // ============ BALANCE ============
@@ -1019,6 +1014,8 @@ export class ShredrClient {
   async planPending(): Promise<PendingAction[]> {
     if (!this._initialized) throw new Error("ShredrClient not initialized");
 
+    await this.adoptUnrecordedUtxos();
+
     const plans: PendingAction[] = [];
     for (const note of utxoService.unsettled) {
       try {
@@ -1029,6 +1026,60 @@ export class ShredrClient {
       }
     }
     return plans;
+  }
+
+  /**
+   * Fold anything the chain walk finds into the note tree.
+   *
+   * The tree is the source of truth for role, but it can miss a PDA: a crash
+   * between broadcasting and persisting, a failed blob publish, or a note
+   * trimmed to fit the blob cap. The nonce-chain walk is derived purely from
+   * the signature, so it still finds those.
+   *
+   * Running it here means there is one discovery path, not two that can
+   * disagree — `planPending` sees the union and everything downstream works
+   * off the tree alone.
+   */
+  private async adoptUnrecordedUtxos(): Promise<void> {
+    let found: PendingUtxo[];
+    try {
+      found = await this.scanPendingUtxos();
+    } catch (err) {
+      // The tree alone is still a usable plan; a failed walk should not block it.
+      console.warn("[adoptUnrecordedUtxos] chain walk failed:", err);
+      return;
+    }
+
+    const known = new Set(utxoService.notes.map((n) => n.stealthPda));
+
+    for (const utxo of found) {
+      if (known.has(utxo.stealthPda)) continue;
+
+      // A funded burner with no PDA is by definition a deposit that never got
+      // swept; anything else takes the role the chain reported.
+      const role: UtxoRole =
+        utxo.status === "received" ? "deposit" : (utxo.role ?? "deposit");
+
+      const state: UtxoState =
+        utxo.status === "received"
+          ? "pending_init"
+          : utxo.status === "delegated"
+            ? "delegated"
+            : "undelegated";
+
+      try {
+        await utxoService.record({
+          nonceIndex: utxo.nonceIndex,
+          role,
+          burnerAddress: utxo.burnerAddress,
+          stealthPda: utxo.stealthPda,
+          state,
+          lamports: utxo.lamports,
+        });
+      } catch (err) {
+        console.warn("[adoptUnrecordedUtxos] could not record", utxo.stealthPda, err);
+      }
+    }
   }
 
   /**
@@ -1228,6 +1279,12 @@ export class ShredrClient {
         stealthPda: pda.toBase58(),
         lamports,
         status,
+        role:
+          pdaState?.role === STEALTH_ROLE.exit
+            ? "exit"
+            : pdaState?.role === STEALTH_ROLE.deposit
+              ? "deposit"
+              : undefined,
       });
 
       // Wipe the burner private key when we don't keep it
