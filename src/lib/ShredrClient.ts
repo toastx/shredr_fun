@@ -72,7 +72,7 @@ export type UtxoStatus =
 /** A stranded note plus the step that would move it forward. */
 export interface PendingAction {
   note: UtxoNote;
-  action: "initialize" | "transfer" | "undelegate" | "withdraw" | "close" | "forget";
+  action: "initialize" | "undelegate" | "withdraw" | "close" | "forget";
   lamports: number;
 }
 
@@ -1014,22 +1014,38 @@ export class ShredrClient {
           ? "exit"
           : note.role;
 
-    if (state.delegated) {
-      if (lamports > 0) {
-        return role === "deposit"
-          ? { note, action: "transfer", lamports }
-          : { note, action: "undelegate", lamports };
+    // A funded, delegated deposit PDA is the resting state of a shielded
+    // balance, not an interrupted cycle — `getStealthBalance` sums exactly this
+    // set. Recovery must leave it alone. Treating it as pending would push it
+    // to an exit PDA and, a pass later, withdraw it to the connected wallet:
+    // the user's whole balance swept out unprompted on sign-in.
+    //
+    // Only two things are genuinely stranded: an exit PDA, which exists solely
+    // inside a withdrawal the user already asked for, and a deposit that cannot
+    // currently be spent.
+    if (role === "deposit") {
+      if (state.delegated) {
+        // Spendable and at rest, or drained and awaiting cleanup.
+        return lamports > 0
+          ? null
+          : { note, action: "undelegate", lamports: 0 };
       }
-      return { note, action: "undelegate", lamports: 0 };
+
+      // Undelegated: it counts toward the balance but `PrivateTransfer` cannot
+      // move it, so it has to be re-delegated before it is spendable again.
+      // `InitializeAndDelegate` reuses an existing undelegated PDA.
+      return lamports > 0
+        ? { note, action: "initialize", lamports }
+        : { note, action: "close", lamports: 0 };
     }
 
-    if (lamports > 0) {
-      return role === "exit"
-        ? { note, action: "withdraw", lamports }
-        : { note, action: "transfer", lamports };
+    // Exit PDA: always mid-withdrawal, so always finish it.
+    if (state.delegated) {
+      return { note, action: "undelegate", lamports };
     }
-
-    return { note, action: "close", lamports: 0 };
+    return lamports > 0
+      ? { note, action: "withdraw", lamports }
+      : { note, action: "close", lamports: 0 };
   }
 
   /**
@@ -1186,24 +1202,6 @@ export class ShredrClient {
         const burner = await this.burnerForNote(note);
         try {
           await this.initializeAndDelegate(burner, undefined, note.role);
-        } finally {
-          burnerService.clearBurner(burner);
-        }
-        return;
-      }
-
-      case "transfer": {
-        // Push the balance one hop forward into a fresh exit PDA, then settle
-        // it. Safe whichever role the note actually was.
-        const burner = await this.burnerForNote(note);
-        try {
-          const exitBurner = await this.consumeAndGenerateNew();
-          const exitKp = this.burnerToKeypair(exitBurner);
-          const [exitPda] = deriveStealthPDA(exitKp.publicKey);
-
-          await this.initializeAndDelegate(exitBurner, 0n, "exit");
-          await this.privateTransfer(burner, BigInt(plan.lamports), exitPda);
-          await utxoService.link(note.stealthPda, exitBurner.nonceIndex);
         } finally {
           burnerService.clearBurner(burner);
         }

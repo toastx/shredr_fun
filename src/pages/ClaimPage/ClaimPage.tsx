@@ -12,7 +12,6 @@ import './ClaimPage.css';
 /** Human-readable description of each recovery step. */
 const RECOVERY_LABELS: Record<PendingAction['action'], string> = {
     initialize: 'Sweeping deposit into its stealth account',
-    transfer: 'Moving funds privately to a fresh exit account',
     undelegate: 'Settling from the rollup to the base layer',
     withdraw: 'Withdrawing to your wallet',
     close: 'Reclaiming account rent',
