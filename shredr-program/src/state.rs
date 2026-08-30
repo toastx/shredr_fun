@@ -15,8 +15,14 @@ pub const STEALTH_ACCOUNT_SIZE: usize = core::mem::size_of::<StealthAccount>();
 pub struct StealthAccount {
     /// The burner pubkey that owns this account.
     pub owner: Address,
-    /// Unused: the PDA derives from the burner alone. Kept for layout stability.
-    pub salt: [u8; 32],
+    /// Opaque 32-byte receipt commitment, supplied by the client and never read
+    /// by the program. Occupies what used to be the unused `salt` slot, so the
+    /// layout, size and rent are unchanged.
+    ///
+    /// Every account carries one — a field only some clients populate would
+    /// itself identify those clients. The program does not care what the bytes
+    /// mean and must never branch on them.
+    pub receipt_commitment: [u8; 32],
     /// Tracked separately from `lamports`, which also holds the rent.
     pub deposited_amount: u64,
     pub deposit_timestamp: i64,
