@@ -81,22 +81,32 @@ describe('ShredrProgram', () => {
 
     describe('createInitializeAndDelegateInstruction', () => {
         const depositAmount = 2_500_000_000n;
+        const commitment = new Uint8Array(32).fill(0x5a);
         const ix = createInitializeAndDelegateInstruction(
             relayer,
             burner,
             depositAmount,
+            commitment,
         );
 
-        it('encodes [discriminator, deposit_amount, role] and nothing else', () => {
-            expect(ix.data).to.have.lengthOf(10);
+        it('encodes [discriminator, deposit_amount, role, commitment] and nothing else', () => {
+            // 41 payload bytes is the only form the program accepts a commitment
+            // in; see `initialize_rejects_partial_commitment`.
+            expect(ix.data).to.have.lengthOf(42);
             expect(ix.data[0]).to.equal(StealthInstruction.InitializeAndDelegate);
             expect(ix.data.readBigUInt64LE(1)).to.equal(depositAmount);
             // Role defaults from the amount: funded is a deposit PDA.
             expect(ix.data[9]).to.equal(STEALTH_ROLE.deposit);
+            expect([...ix.data.subarray(10)]).to.deep.equal([...commitment]);
         });
 
         it('defaults an empty init to the exit role', () => {
-            const exitIx = createInitializeAndDelegateInstruction(relayer, burner, 0n);
+            const exitIx = createInitializeAndDelegateInstruction(
+                relayer,
+                burner,
+                0n,
+                commitment,
+            );
             expect(exitIx.data[9]).to.equal(STEALTH_ROLE.exit);
         });
 
@@ -105,9 +115,25 @@ describe('ShredrProgram', () => {
                 relayer,
                 burner,
                 depositAmount,
+                commitment,
                 STEALTH_ROLE.exit,
             );
             expect(explicit.data[9]).to.equal(STEALTH_ROLE.exit);
+        });
+
+        it('refuses a commitment that is not 32 bytes', () => {
+            // The program rejects any payload length but 8, 9 and 41, so a
+            // mis-sized commitment must fail here rather than on-chain.
+            for (const size of [0, 31, 33]) {
+                expect(() =>
+                    createInitializeAndDelegateInstruction(
+                        relayer,
+                        burner,
+                        depositAmount,
+                        new Uint8Array(size),
+                    ),
+                ).to.throw(/32 bytes/);
+            }
         });
 
         it('passes the nine accounts the program expects, in order', () => {
@@ -264,9 +290,10 @@ describe('ShredrProgram', () => {
     });
 
     describe('parseStealthAccount', () => {
+        const commitment = new Uint8Array(32).fill(0x3c);
         const encoded = getStealthAccountEncoder().encode({
             owner: address(burner.toBase58()),
-            salt: new Uint8Array(32),
+            receiptCommitment: commitment,
             depositedAmount: 4_200_000_000n,
             depositTimestamp: 1_753_000_000n,
             delegated: true,
@@ -288,6 +315,9 @@ describe('ShredrProgram', () => {
             expect(state!.depositTimestamp).to.equal(1_753_000_000n);
             expect(state!.delegated).to.equal(true);
             expect(state!.bump).to.equal(254);
+            // Read back verbatim: the program stores these bytes and never
+            // interprets them, so `anchor.ts` must get exactly what was written.
+            expect([...state!.receiptCommitment]).to.deep.equal([...commitment]);
         });
 
         it('rejects accounts owned by another program', () => {

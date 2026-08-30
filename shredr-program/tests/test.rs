@@ -1685,8 +1685,11 @@ fn initialize_rejects_delegated_account() {
     );
 }
 
-/// The post-full-withdraw shape: `Withdraw` zeroes `owner` once drained, and that
-/// account must still be reusable by the burner it derives from.
+/// A zeroed `owner` must still be reusable by the burner the PDA derives from.
+///
+/// `Withdraw` preserves `owner` on a full drain now, so this is the legacy shape
+/// rather than one the current program produces — accounts drained by the older
+/// build are still out there and must keep working.
 #[test]
 fn initialize_reuses_fully_drained_account() {
     let mollusk = mollusk();

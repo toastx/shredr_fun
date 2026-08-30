@@ -28,7 +28,14 @@ The most involved instruction. It creates the account, moves the money, writes t
 ```
 [0]      discriminator = 0
 [1..9]   deposit_amount: u64 little-endian
+[9]      role: u8              (optional)
+[10..42] receipt_commitment: 32 bytes  (optional, requires the role byte)
 ```
+
+Only three total lengths are accepted — 8, 9 and 41 payload bytes. Anything else is
+`InvalidInstructionData`: a trailing fragment is a client bug, not a shape worth guessing at.
+The current client always sends 41; the shorter forms stay valid so already-deployed clients and
+in-flight transactions keep working.
 
 `deposit_amount` is the lamports to sweep from the burner into the PDA.
 
@@ -38,7 +45,7 @@ The most involved instruction. It creates the account, moves the money, writes t
 The handler parses its own u64 (checking `len() >= 8`) rather than using `parse_amount()`, which would reject zero.
 {% endhint %}
 
-The burner's identity comes from account 1, not from the data. No pubkey and no salt are passed — the one-time burner alone makes the PDA unique.
+The burner's identity comes from account 1, not from the data. No pubkey is passed — the one-time burner alone makes the PDA unique.
 
 ## What it does
 

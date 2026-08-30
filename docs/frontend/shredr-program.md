@@ -144,7 +144,7 @@ const state = parseStealthAccount(new Uint8Array(accountInfo.data));
 ```typescript
 interface StealthAccountData {
   owner: PublicKey;
-  salt: Uint8Array;         // reserved, always zero
+  receiptCommitment: Uint8Array;   // opaque receipt commitment
   depositedAmount: bigint;
   depositTimestamp: bigint;
   delegated: boolean;

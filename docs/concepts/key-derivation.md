@@ -25,16 +25,17 @@ The wallet returns a 64-byte ed25519 signature. That signature is the root secre
 
 ## Domain separation
 
-The signature is used four separate ways. Feeding it directly into all four would mean a leak in one context compromises the others, so each derivation appends a distinct **domain tag** before hashing:
+The signature is used five separate ways. Feeding it directly into all five would mean a leak in one context compromises the others, so each derivation appends a distinct **domain tag** before hashing:
 
 ```
 masterSeed(nonce)   = SHA256( signature ‖ "SHREDR_NONCE_MASTER" )
 storageKey          = SHA256( signature ‖ "SHREDR_STORAGE_KEY"  )
 burnerSeed          = SHA256( signature ‖ "SHREDR_BURNER_MASTER")
 mainBurnerSeed      = SHA256( signature ‖ "SHREDR_MAIN_BURNER"  )
+auditSeed           = SHA256( signature ‖ "SHREDR_AUDIT_MASTER" )
 ```
 
-Four different tags, four unrelated 32-byte outputs. Because SHA-256 is one-way, recovering any one of them tells an attacker nothing about the other three or about the signature itself.
+Five different tags, five unrelated 32-byte outputs. Because SHA-256 is one-way, recovering any one of them tells an attacker nothing about the other four or about the signature itself.
 
 The tags are the `DOMAIN_*` constants in `src/lib/constants.ts`.
 
@@ -43,12 +44,19 @@ The tags are the `DOMAIN_*` constants in `src/lib/constants.ts`.
 ```
                     Wallet signature (64 bytes)
                               │
-        ┌─────────────┬───────┴───────┬─────────────────┐
-        │             │               │                 │
- "NONCE_MASTER" "STORAGE_KEY"  "BURNER_MASTER"   "MAIN_BURNER"
-        │             │               │                 │
-        ▼             ▼               ▼                 ▼
-   masterSeed    storageKey      burnerSeed      mainBurnerSeed
+        ┌─────────────┬───────┴───────┬─────────────────┬──────────────┐
+        │             │               │                 │              │
+ "NONCE_MASTER" "STORAGE_KEY"  "BURNER_MASTER"   "MAIN_BURNER"  "AUDIT_MASTER"
+        │             │               │                 │              │
+        ▼             ▼               ▼                 ▼              ▼
+   masterSeed    storageKey      burnerSeed      mainBurnerSeed    auditSeed
+        │             │               │                 │              │
+        │             │               │                 │              ▼
+        │             │               │                 │   HKDF(salt=depositPda,
+        │             │               │                 │        info=index)
+        │             │               │                 │              │
+        │             │               │                 │              ▼
+        │             │               │                 │        vk per invoice
         │             │               │                 │
         │             │               │                 ▼
         │             ▼               │          Keypair.fromSeed
@@ -220,9 +228,11 @@ There is no seed phrase to lose, because there is nothing to store. Reproducing 
 | Nonce chain | `NonceService.generateBaseNonce()`, `incrementNonce()`, `generateNonceAtIndex()` |
 | Burner seed and keypairs | `BurnerService.initFromSignature()`, `deriveBurnerFromNonce()` |
 | Main burner | `BurnerService.deriveMainBurner()` |
+| Audit seed and per-invoice viewing keys | `AuditService.initFromSignature()`, `deriveViewingKey()` |
 | Memory zeroing | `src/lib/utils.ts` (`zeroMemory`) |
 
 ## Next
 
+* [Viewing keys](viewing-keys.md) — the fifth branch: proving one payment without exposing the rest
 * [Burners and stealth PDAs](burners-and-stealth-pdas.md) — what the keys are actually used for
 * [State sync and recovery](state-sync-and-recovery.md) — how the derived state persists
