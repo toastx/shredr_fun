@@ -49,6 +49,7 @@ import {
   type ShredrProgramError,
 } from "../generated";
 import {
+  COMMITMENT_BYTES,
   MAGIC_BLOCK_PROGRAM_ID as MAGIC_BLOCK_PROGRAM_ID_STR,
   MAGIC_CONTEXT as MAGIC_CONTEXT_STR,
   MAGIC_PROGRAM_ID as MAGIC_PROGRAM_ID_STR,
@@ -63,8 +64,6 @@ export const SHREDR_PROGRAM_ID = new PublicKey(SHREDR_PROGRAM_PROGRAM_ADDRESS);
 /** PDA seed prefixes (must match on-chain constants.rs) */
 export const SEEDS = {
   STEALTH_ADDRESS: Buffer.from("shredr_stealth_address"),
-  PROGRAM_CONFIG: Buffer.from("shredr_program_config"),
-  USER_ADDRESS: Buffer.from("shredr_user_address"),
 } as const;
 
 /** Instruction discriminators (matching the program's dispatch in lib.rs) */
@@ -222,13 +221,24 @@ export function deriveDelegationPDAs(stealthPda: PublicKey) {
  * @param relayer       - Kora relayer paying for the transaction (signer)
  * @param burner        - One-time burner keypair (signer)
  * @param depositAmount - Lamports to sweep from the burner into the PDA (u64)
+ * @param commitment    - 32-byte receipt commitment, written to the account and
+ *                        preserved in ledger history. Required: every PDA is
+ *                        anchored, so that an anchored one is not distinguishable
+ *                        from an unanchored one.
  */
 export function createInitializeAndDelegateInstruction(
   relayer: PublicKey,
   burner: PublicKey,
   depositAmount: bigint,
+  commitment: Uint8Array,
   role: StealthRole = depositAmount > 0n ? STEALTH_ROLE.deposit : STEALTH_ROLE.exit,
 ): TransactionInstruction {
+  if (commitment.length !== COMMITMENT_BYTES) {
+    throw new Error(
+      `Receipt commitment must be ${COMMITMENT_BYTES} bytes, got ${commitment.length}`,
+    );
+  }
+
   const [stealthAccount] = deriveStealthPDA(burner);
   const delegationPDAs = deriveDelegationPDAs(stealthAccount);
 
@@ -245,6 +255,11 @@ export function createInitializeAndDelegateInstruction(
       role,
     }),
   );
+
+  // Appended rather than threaded through the generated builder: the commitment
+  // is a trailing extension the program parses by data length, so regenerating
+  // the Codama client for it would buy nothing.
+  instruction.data = Buffer.concat([instruction.data, Buffer.from(commitment)]);
 
   // The program CPIs into the ACL permission program and the MagicBlock
   // delegation program. Solana resolves a CPI's callee from the transaction's
@@ -386,7 +401,8 @@ export function createStealthWithdrawInstruction(
 /** Parsed stealth account data */
 export interface StealthAccountData {
   owner: PublicKey;
-  salt: Uint8Array;
+  /** Opaque receipt commitment. See `anchor.ts`; nothing on-chain reads it. */
+  receiptCommitment: Uint8Array;
   depositedAmount: bigint;
   depositTimestamp: bigint;
   delegated: boolean;
@@ -415,7 +431,7 @@ export function parseStealthAccount(
 
   return {
     owner: new PublicKey(decoded.owner),
-    salt: new Uint8Array(decoded.salt),
+    receiptCommitment: new Uint8Array(decoded.receiptCommitment),
     depositedAmount: decoded.depositedAmount,
     depositTimestamp: decoded.depositTimestamp,
     delegated: decoded.delegated,

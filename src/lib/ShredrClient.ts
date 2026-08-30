@@ -16,6 +16,14 @@
 
 import { nonceService } from "./NonceService";
 import { burnerService } from "./BurnerService";
+import {
+  ATTESTATION_VERSION,
+  AuditService,
+  auditService,
+  packAttestation,
+  UNKNOWN_SIGNATURE,
+  type Attestation,
+} from "./AuditService";
 import { apiClient } from "./ApiClient";
 import { koraRelayer } from "./KoraRelayer";
 import {
@@ -356,6 +364,7 @@ export class ShredrClient {
     // 1. Init crypto services
     await nonceService.initFromSignature(signature);
     await burnerService.initFromSignature(signature);
+    await auditService.initFromSignature(signature);
 
     this._walletPubkey = walletPubkey;
 
@@ -511,6 +520,7 @@ export class ShredrClient {
     burner?: BurnerKeyPair,
     depositAmount?: bigint,
     role?: UtxoRole,
+    commitment?: Uint8Array,
   ): Promise<string> {
     const b = burner ?? this._currentBurner;
     if (!b) throw new Error("No burner available");
@@ -523,18 +533,32 @@ export class ShredrClient {
     const deposit =
       depositAmount ?? BigInt(await connection.getBalance(burnerKp.publicKey));
 
+    const [pda] = deriveStealthPDA(burnerKp.publicKey);
     const resolvedRole = role ?? "deposit";
+
+    // Every account is anchored. A caller with nothing to commit still writes a
+    // real commitment over the deposit leg rather than a placeholder — a field
+    // only some accounts populate would identify those accounts.
+    const anchor =
+      commitment ??
+      (await AuditService.depositCommitment(
+        await auditService.deriveViewingKey(pda.toBytes(), b.nonceIndex),
+        b.nonceIndex,
+        pda.toBytes(),
+        deposit,
+      ));
+
     const ix = createInitializeAndDelegateInstruction(
       relayer,
       burnerKp.publicKey,
       deposit,
+      anchor,
       STEALTH_ROLE[resolvedRole],
     );
 
     // Write-ahead: record the note *before* broadcasting. A crash between send
     // and persist is the one window that strands funds with nothing pointing
     // at them, so the record must always land first.
-    const [pda] = deriveStealthPDA(burnerKp.publicKey);
     await this.recordNote(b, pda, resolvedRole, Number(deposit));
 
     const signature = await koraRelayer.signAndSend(connection, [ix], [burnerKp]);
@@ -770,17 +794,36 @@ export class ShredrClient {
       const exitBurnerKp = this.burnerToKeypair(exitBurner);
       const [exitPda] = deriveStealthPDA(exitBurnerKp.publicKey);
 
-      await this.initializeAndDelegate(exitBurner, 0n, "exit");
-
-      // Drain deposit PDAs newest-first until the amount is covered. Newest
-      // first because the oldest deposits are the ones most worth leaving in
-      // the rollup: their timing is furthest from this withdrawal, so they
-      // correlate least with it.
-      let remaining = withdrawLamports;
+      // Plan the draw before touching anything. The exit PDA's commitment covers
+      // the whole batch and has to be written when that PDA is initialised —
+      // which is before any transfer runs — so the allocation must be known now.
+      // Drawing newest-first because the oldest deposits are the ones most worth
+      // leaving in the rollup: their timing is furthest from this withdrawal, so
+      // they correlate least with it.
+      const plan: Array<{ source: (typeof sources)[number]; take: number }> = [];
+      let unplanned = withdrawLamports;
       for (const source of sources) {
-        if (remaining <= 0) break;
+        if (unplanned <= 0) break;
+        const take = Math.min(unplanned, source.lamports);
+        plan.push({ source, take });
+        unplanned -= take;
+      }
+      if (unplanned > 0) {
+        // Balance moved between reading and planning. Nothing has been spent
+        // yet, so this is a clean failure.
+        throw new Error(
+          `Could not gather the full amount; ${unplanned} lamports short.`,
+        );
+      }
 
-        const take = Math.min(remaining, source.lamports);
+      const exitTs = BigInt(Math.floor(Date.now() / 1000));
+      const invoices = await this.buildInvoices(plan, exitBurner, exitPda, destination, exitTs);
+      const root = await AuditService.root(invoices.map((inv) => inv.leaf));
+
+      await this.initializeAndDelegate(exitBurner, 0n, "exit", root);
+
+      let remaining = withdrawLamports;
+      for (const { source, take } of plan) {
         const burner = await this.burnerForNote(source.note);
         try {
           await this.privateTransfer(burner, BigInt(take), exitPda);
@@ -792,7 +835,7 @@ export class ShredrClient {
       }
 
       if (remaining > 0) {
-        // Balance moved between reading and spending. The transferred amount is
+        // A transfer silently moved less than planned. The transferred amount is
         // safe in the exit PDA and recovery will finish it, so fail loudly
         // rather than withdrawing an amount that no longer matches.
         throw new Error(
@@ -820,6 +863,15 @@ export class ShredrClient {
 
       await utxoService.setState(exitPda.toBase58(), "withdrawn", 0);
 
+      // Best-effort, same reasoning as the rent reclaim below: the receipt is a
+      // record of a payment that has already completed, so failing to store it
+      // must not surface as a failed withdrawal.
+      try {
+        await this.sealReceipts(invoices, exitBurner, signature);
+      } catch (err) {
+        console.warn("[ShredrClient] receipt sealing failed:", err);
+      }
+
       // Best-effort: the money has already arrived, so a failed rent reclaim
       // must not surface as a failed withdrawal. Recovery picks up any PDA
       // left in `withdrawn` on the next login.
@@ -835,6 +887,168 @@ export class ShredrClient {
       };
     } finally {
       burnerService.clearBurner(exitBurner);
+    }
+  }
+
+  // ============ RECEIPTS ============
+
+  /**
+   * Build one invoice per drawn deposit, plus its commitment leaf.
+   *
+   * Runs before the exit PDA is initialised, because the root over these leaves
+   * is what that PDA commits to. The transaction signatures are left empty here
+   * — the withdrawal has not happened yet — and are filled in by
+   * {@link sealReceipts}. They are outside the committed prefix for exactly that
+   * reason; see `INVOICE_LEN`.
+   */
+  private async buildInvoices(
+    plan: Array<{ source: { note: UtxoNote; pda: PublicKey; depositTs: bigint }; take: number }>,
+    exitBurner: BurnerKeyPair,
+    exitPda: PublicKey,
+    destination: PublicKey,
+    exitTs: bigint,
+  ): Promise<Array<{ attestation: Attestation; leaf: Uint8Array; index: number }>> {
+    const out: Array<{ attestation: Attestation; leaf: Uint8Array; index: number }> = [];
+
+    for (const { source, take } of plan) {
+      const index = source.note.nonceIndex;
+      const attestation: Attestation = {
+        version: ATTESTATION_VERSION,
+        depositIndex: index,
+        exitIndex: exitBurner.nonceIndex,
+        depositPda: source.note.stealthPda,
+        exitPda: exitPda.toBase58(),
+        depositBurner: source.note.burnerAddress,
+        exitBurner: exitBurner.address,
+        sender: await this.resolveSender(source.note.burnerAddress),
+        destination: destination.toBase58(),
+        amount: BigInt(take),
+        depositTs: source.depositTs,
+        exitTs,
+        depositTxSig: UNKNOWN_SIGNATURE,
+        exitTxSig: UNKNOWN_SIGNATURE,
+      };
+
+      const vk = await auditService.deriveViewingKey(source.pda.toBytes(), index);
+      out.push({
+        attestation,
+        leaf: await AuditService.leaf(vk, packAttestation(attestation)),
+        index,
+      });
+    }
+
+    return out;
+  }
+
+  /**
+   * Sign, encrypt and store the receipts for a completed withdrawal.
+   *
+   * Signing re-derives the deposit burners: the transfer loop clears them as it
+   * goes, and re-deriving is a hash and a keypair construction. Cheaper than
+   * holding secret keys alive across the undelegation wait, which can be two
+   * minutes.
+   */
+  private async sealReceipts(
+    invoices: Array<{ attestation: Attestation; leaf: Uint8Array; index: number }>,
+    exitBurner: BurnerKeyPair,
+    exitTxSig: string,
+  ): Promise<void> {
+    const exitKp = this.burnerToKeypair(exitBurner);
+    const leaves = invoices.map((inv) => inv.leaf);
+
+    for (const invoice of invoices) {
+      const depositBurner = await burnerService.deriveBurnerFromNonce(
+        await nonceService.generateNonceAtIndex(invoice.index, this._walletPubkey!),
+      );
+
+      try {
+        const depositKp = this.burnerToKeypair(depositBurner);
+        const attestation: Attestation = {
+          ...invoice.attestation,
+          exitTxSig,
+          depositTxSig: await this.resolveDepositTxSig(invoice.attestation.depositBurner),
+        };
+
+        const pda = new PublicKey(invoice.attestation.depositPda);
+        const vk = await auditService.deriveViewingKey(pda.toBytes(), invoice.index);
+        const signed = auditService.signAttestation(
+          attestation,
+          depositKp.secretKey,
+          exitKp.secretKey,
+        );
+
+        // Siblings are the other leaves of this batch, handed over as opaque
+        // hashes: they are needed to recompute the root and reveal nothing,
+        // being hashes under keys the auditor does not hold.
+        const siblings = leaves.filter((leaf) => leaf !== invoice.leaf);
+        await utxoService.recordReceipt({
+          depositIndex: invoice.index,
+          exitIndex: exitBurner.nonceIndex,
+          disclosure: await AuditService.makeDisclosure(vk, signed, siblings),
+        });
+      } finally {
+        burnerService.clearBurner(depositBurner);
+      }
+    }
+  }
+
+  /**
+   * The address that funded a burner — the invoice's payer.
+   *
+   * Read from the burner's oldest transaction rather than stored, so it survives
+   * a device wipe. Returns the system program address when history is
+   * unavailable, which is a visible "unknown" rather than a wrong answer: the
+   * auditor cross-checks the sender against the ledger regardless.
+   */
+  private async resolveSender(burnerAddress: string): Promise<string> {
+    try {
+      const connection = this.getConnection();
+      const pubkey = new PublicKey(burnerAddress);
+      const sigs = await connection.getSignaturesForAddress(pubkey, { limit: 20 });
+      if (sigs.length === 0) return PublicKey.default.toBase58();
+
+      const oldest = sigs[sigs.length - 1];
+      const tx = await connection.getTransaction(oldest.signature, {
+        maxSupportedTransactionVersion: 0,
+      });
+      if (!tx?.meta) return PublicKey.default.toBase58();
+
+      const keys = tx.transaction.message.staticAccountKeys;
+      const target = keys.findIndex((k) => k.equals(pubkey));
+      if (target < 0) return PublicKey.default.toBase58();
+      if (tx.meta.postBalances[target] <= tx.meta.preBalances[target]) {
+        return PublicKey.default.toBase58();
+      }
+
+      // The funder is whoever lost lamports and is not the fee payer's own
+      // rent-exempt shuffle; the largest debit is the deposit.
+      let best = -1;
+      let bestDelta = 0;
+      for (let i = 0; i < keys.length; i++) {
+        if (i === target) continue;
+        const delta = tx.meta.preBalances[i] - tx.meta.postBalances[i];
+        if (delta > bestDelta) {
+          bestDelta = delta;
+          best = i;
+        }
+      }
+      return best >= 0 ? keys[best].toBase58() : PublicKey.default.toBase58();
+    } catch (err) {
+      console.warn("[resolveSender] failed for", burnerAddress, err);
+      return PublicKey.default.toBase58();
+    }
+  }
+
+  /** The signature of the transaction that funded a burner. A ledger pointer. */
+  private async resolveDepositTxSig(burnerAddress: string): Promise<string> {
+    try {
+      const sigs = await this.getConnection().getSignaturesForAddress(
+        new PublicKey(burnerAddress),
+        { limit: 20 },
+      );
+      return sigs.length > 0 ? sigs[sigs.length - 1].signature : UNKNOWN_SIGNATURE;
+    } catch {
+      return UNKNOWN_SIGNATURE;
     }
   }
 
@@ -901,11 +1115,16 @@ export class ShredrClient {
    * as fresh as the last write.
    */
   private async fundedSources(): Promise<
-    Array<{ note: UtxoNote; pda: PublicKey; lamports: number }>
+    Array<{ note: UtxoNote; pda: PublicKey; lamports: number; depositTs: bigint }>
   > {
     await this.adoptUnrecordedUtxos();
 
-    const sources: Array<{ note: UtxoNote; pda: PublicKey; lamports: number }> = [];
+    const sources: Array<{
+      note: UtxoNote;
+      pda: PublicKey;
+      lamports: number;
+      depositTs: bigint;
+    }> = [];
 
     for (const note of utxoService.unsettled) {
       if (note.role !== "deposit") continue;
@@ -914,7 +1133,10 @@ export class ShredrClient {
         const pda = new PublicKey(note.stealthPda);
         const { state } = await this.readStealthState(pda);
         const lamports = state ? Number(state.depositedAmount) : 0;
-        if (lamports > 0) sources.push({ note, pda, lamports });
+        // Carried through so receipt building does not re-read the account: the
+        // program's Clock value is authoritative and already in hand here.
+        const depositTs = state ? state.depositTimestamp : 0n;
+        if (lamports > 0) sources.push({ note, pda, lamports, depositTs });
       } catch (err) {
         console.warn("[fundedSources] skipped", note.stealthPda, err);
       }
@@ -1370,3 +1592,4 @@ export class ShredrClient {
 
 // ============ SINGLETON EXPORT ============
 export const shredrClient = new ShredrClient();
+
