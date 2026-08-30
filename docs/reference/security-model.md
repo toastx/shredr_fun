@@ -32,11 +32,13 @@ masterSeed     = SHA256( signature ‖ "SHREDR_NONCE_MASTER" )
 storageKey     = SHA256( signature ‖ "SHREDR_STORAGE_KEY"  )
 burnerSeed     = SHA256( signature ‖ "SHREDR_BURNER_MASTER")
 mainBurnerSeed = SHA256( signature ‖ "SHREDR_MAIN_BURNER"  )
+auditSeed      = SHA256( signature ‖ "SHREDR_AUDIT_MASTER" )
 ```
 
 | Property | Implementation |
 |---|---|
-| Domain separation | Four distinct tags; a leak in one context does not compromise the others |
+| Domain separation | Five distinct tags; a leak in one context does not compromise the others |
+| Selective disclosure | One viewing key per invoice, derived via HKDF; opens that payment and provably nothing else — see [Viewing keys](../concepts/viewing-keys.md) |
 | Forward secrecy of receive addresses | `nonce[N] = SHA256(nonce[N-1])` — a leaked nonce reveals future addresses, never past ones |
 | Main burner isolation | Derived from the signature directly, so no nonce leak can reach it |
 | No transmission | Signature, seeds, and keypairs stay in browser memory |

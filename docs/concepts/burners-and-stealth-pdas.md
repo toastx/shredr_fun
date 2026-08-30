@@ -88,7 +88,7 @@ program = H9pUQeNA2RwBHRwx52V8nqWpCAKReSA3gGUuRFHbEjG6
 The burner pubkey is the only variable, and since each burner is one-time, the PDA is unique without any extra salt.
 
 {% hint style="info" %}
-The `StealthAccount` struct still carries a 32-byte `salt` field. It is **reserved and unused** — always written as zero. It was retained for layout stability after the derivation was simplified to be salt-free. Do not rely on it.
+The `StealthAccount` struct carries a 32-byte field at that offset, once a reserved `salt` and now `receipt_commitment`: an opaque receipt commitment the client writes and the program never reads. Reusing the slot kept the layout, size and rent unchanged. See [Viewing keys](viewing-keys.md).
 {% endhint %}
 
 Client side (`src/lib/ShredrProgram.ts`):

@@ -487,8 +487,9 @@ fn main() {
 
     // ── withdraw, full drain ──
     // Withdraws the entire deposit, exercising the extra work the partial path
-    // skips: the rent-exemption floor check and the state-clearing branch that
-    // zeroes owner/delegated/bump.
+    // skips: the rent-exemption floor check on the way to a zero balance.
+    // `owner` is deliberately preserved so `CloseStealthAccount` can still
+    // authorize against it.
     let wd_burner = Pubkey::new_unique();
     let (wd_stealth_key, wd_stealth_bump) = derive(&wd_burner);
     let wd_destination = Pubkey::new_unique();

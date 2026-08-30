@@ -13,7 +13,7 @@ The program manages exactly one account type: the **stealth account**, stored in
 #[repr(C)]
 pub struct StealthAccount {
     pub owner: Address,             // 32 bytes
-    pub salt: [u8; 32],             // 32 bytes — reserved, always zero
+    pub receipt_commitment: [u8; 32], // 32 bytes — opaque, never read by the program
     pub deposited_amount: u64,      //  8 bytes
     pub deposit_timestamp: i64,     //  8 bytes
     pub delegated: bool,            //  1 byte
@@ -28,7 +28,7 @@ On-chain layout:
 │ 0..8    discriminator "SHREDRSA"           │
 ├────────────────────────────────────────────┤
 │ 8..40   owner (burner pubkey)              │
-│ 40..72  salt (reserved, zero)              │
+│ 40..72  receipt_commitment                 │
 │ 72..80  deposited_amount (u64 LE)          │
 │ 80..88  deposit_timestamp (i64 LE)         │
 │ 88      delegated (bool)                   │
@@ -69,14 +69,14 @@ A PDA can never sign a transaction, so this field is how a keyless account is au
 
 Zeroed to `Address::default()` when the account is fully drained.
 
-### `salt`
+### `receipt_commitment`
 
 {% hint style="info" %}
-**Reserved and unused.** Always written as zero.
+**Opaque to the program.** Written verbatim from the instruction data and never read, so no handler can branch on it and it adds no authorization surface.
 
-PDA derivation was simplified to `["shredr_stealth_address", burner_pubkey]` — since every burner is one-time, no extra salt is needed for uniqueness. The field was kept so the layout stayed stable. Do not rely on it.
+This slot was once a `salt` for PDA derivation. That was simplified to `["shredr_stealth_address", burner_pubkey]` — a one-time burner is unique on its own — leaving 32 rent-paid bytes doing nothing. They now hold the receipt commitment, which is why the layout, size and rent are all unchanged.
 
-`SHREDR_FIXED_SALT` in `constants.rs` is the corresponding all-zero constant.
+Every account carries one: a field only some clients populate would identify those clients. See [Viewing keys](../concepts/viewing-keys.md).
 {% endhint %}
 
 ### `deposited_amount`
@@ -205,7 +205,7 @@ const state = parseStealthAccount(new Uint8Array(accountInfo.data));
 ```typescript
 interface StealthAccountData {
   owner: PublicKey;
-  salt: Uint8Array;
+  receiptCommitment: Uint8Array;
   depositedAmount: bigint;
   depositTimestamp: bigint;
   delegated: boolean;

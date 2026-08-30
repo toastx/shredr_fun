@@ -15,6 +15,7 @@
 * [Introduction](concepts/README.md)
 * [The privacy model](concepts/privacy-model.md)
 * [Key derivation](concepts/key-derivation.md)
+* [Viewing keys](concepts/viewing-keys.md)
 * [Burners and stealth PDAs](concepts/burners-and-stealth-pdas.md)
 * [The shred lifecycle](concepts/shred-lifecycle.md)
 * [Ephemeral rollups](concepts/ephemeral-rollups.md)
