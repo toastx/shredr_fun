@@ -36,6 +36,29 @@ interface TreeEnvelope {
 }
 
 /**
+ * Marks a blob as a receipt. Deliberately a *separate blob per receipt* rather
+ * than another list inside the tree envelope, because the tree is the wrong
+ * shape for an audit trail in two ways: `persist` replaces and deletes the
+ * previous blob, and `encodeWithinLimit` silently drops the oldest entries when
+ * the tree outgrows the blob cap. Receipts must survive both. One blob each is
+ * also append-only for free — nothing ever rewrites them.
+ */
+const RECEIPT_KIND = 'receipt';
+const RECEIPT_VERSION = 1;
+
+export interface ReceiptEntry {
+    depositIndex: number;
+    exitIndex: number;
+    /** Ciphertext plus sibling hashes; only the viewing key opens it. */
+    disclosure: unknown;
+}
+
+interface ReceiptEnvelope extends ReceiptEntry {
+    kind: typeof RECEIPT_KIND;
+    version: number;
+}
+
+/**
  * Notes on the wire, with one-character keys.
  *
  * The backend caps a blob at `MAX_BLOB_BYTES`, and a note is mostly two
@@ -242,6 +265,66 @@ export class UtxoService {
     async prune(): Promise<void> {
         this._notes = this.unsettled;
         await this.persist();
+    }
+
+    // ============ RECEIPTS ============
+
+    /**
+     * Publish one receipt as its own blob.
+     *
+     * Never deleted and never rewritten, unlike the note tree. The blob carries
+     * no identifier: like every other blob in the store, it is anonymous, and
+     * recovery works by trying to decrypt everything.
+     */
+    async recordReceipt(entry: ReceiptEntry): Promise<void> {
+        this.assertReady();
+
+        const envelope: ReceiptEnvelope = {
+            kind: RECEIPT_KIND,
+            version: RECEIPT_VERSION,
+            ...entry,
+        };
+        const encryptedBlob = await this.encrypt(JSON.stringify(envelope));
+
+        if (encryptedBlob.length > MAX_BLOB_BYTES) {
+            // Would mean an implausibly large batch. Loud, because a silently
+            // dropped receipt is a payment that can never be proven again.
+            throw new Error(
+                `Receipt is ${encryptedBlob.length} bytes, over the ${MAX_BLOB_BYTES} cap`,
+            );
+        }
+
+        await apiClient.createBlob({ encryptedBlob });
+    }
+
+    /**
+     * Every receipt this wallet can decrypt.
+     *
+     * Trial decryption over the whole blob store, the same way nonce recovery
+     * works: a wrong key is simply "not mine, next".
+     */
+    async loadReceipts(
+        fetchBlobs: () => Promise<Array<{ encryptedBlob: string }>> = () =>
+            apiClient.fetchAllBlobs(),
+    ): Promise<ReceiptEntry[]> {
+        this.assertReady();
+
+        const out: ReceiptEntry[] = [];
+        for (const blob of await fetchBlobs()) {
+            try {
+                const parsed = JSON.parse(await this.decrypt(blob.encryptedBlob));
+                if (parsed?.kind === RECEIPT_KIND) {
+                    out.push({
+                        depositIndex: parsed.depositIndex,
+                        exitIndex: parsed.exitIndex,
+                        disclosure: parsed.disclosure,
+                    });
+                }
+            } catch {
+                // Someone else's blob, or one of ours of another kind.
+            }
+        }
+        return out.sort((a, b) => a.depositIndex - b.depositIndex);
     }
 
     /**

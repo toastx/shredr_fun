@@ -132,6 +132,36 @@ export const DOMAIN_BURNER_MASTER = "SHREDR_BURNER_MASTER"; // Master seed for b
 /** Domain separation for main burner derivation (persistent, controls main PDA) */
 export const DOMAIN_MAIN_BURNER = "SHREDR_MAIN_BURNER";
 
+// ============ AUDIT / VIEWING KEY CONSTANTS ============
+
+/**
+ * Domain separation for the audit master seed.
+ *
+ * A *sibling* of the burner branch, never a child: a viewing key must never be
+ * derivable from burner material, and the audit tree has to survive being
+ * re-rooted (shielded pool) without invalidating keys already disclosed.
+ */
+export const DOMAIN_AUDIT_MASTER = "SHREDR_AUDIT_MASTER";
+
+/** HKDF `info` label for per-invoice viewing keys. */
+export const LABEL_VIEWING_KEY = "SHREDR_VK_V1";
+
+/** Prefix for the bytes a burner signs when attesting to an invoice. */
+export const LABEL_ATTEST = "SHREDR_ATTEST_V1";
+
+/** Commitment labels. Deposit and exit legs MUST use different ones — an equal
+ *  commitment in two accounts is a public equality test that rebuilds the link
+ *  the in-rollup hop exists to hide. */
+export const LABEL_DEPOSIT_COMMITMENT = "SHREDR_DEP_V1";
+export const LABEL_LEAF = "SHREDR_LEAF_V1";
+export const LABEL_ROOT = "SHREDR_ROOT_V1";
+
+/** Bytes of key material a single HKDF expansion yields: 32 key + 12 GCM IV. */
+export const VIEWING_KEY_MATERIAL_BYTES = 44;
+
+/** Width of an on-chain receipt commitment, and of the `salt` slot it occupies. */
+export const COMMITMENT_BYTES = 32;
+
 /** Number of consecutive empty addresses before stopping recovery scan */
 export const CONSECUTIVE_EMPTY_THRESHOLD = 10;
 

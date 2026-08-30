@@ -144,8 +144,13 @@ const accounts = [
         type: publicKeyTypeNode(),
       }),
       structFieldTypeNode({
-        docs: ["Reserved, always zero. The PDA is derived from the burner alone."],
-        name: "salt",
+        docs: [
+          "Opaque 32-byte receipt commitment, written by the client and never",
+          "read by the program. Occupies the former `salt` slot, so the layout,",
+          "size and rent are unchanged. Every account carries one — a field only",
+          "some clients populate would itself identify those clients.",
+        ],
+        name: "receiptCommitment",
         type: fixedSizeTypeNode(bytesTypeNode(), 32),
       }),
       structFieldTypeNode({

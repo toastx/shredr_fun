@@ -59,8 +59,13 @@ export type StealthAccount = {
   discriminator: ReadonlyUint8Array;
   /** The burner pubkey that owns this stealth account. */
   owner: Address;
-  /** Reserved, always zero. The PDA is derived from the burner alone. */
-  salt: ReadonlyUint8Array;
+  /**
+   * Opaque 32-byte receipt commitment, written by the client and never
+   * read by the program. Occupies the former `salt` slot, so the layout,
+   * size and rent are unchanged. Every account carries one — a field only
+   * some clients populate would itself identify those clients.
+   */
+  receiptCommitment: ReadonlyUint8Array;
   /** Lamports deposited, excluding the rent-exempt minimum. */
   depositedAmount: bigint;
   /** Unix timestamp of the initial deposit. */
@@ -83,8 +88,13 @@ export type StealthAccount = {
 export type StealthAccountArgs = {
   /** The burner pubkey that owns this stealth account. */
   owner: Address;
-  /** Reserved, always zero. The PDA is derived from the burner alone. */
-  salt: ReadonlyUint8Array;
+  /**
+   * Opaque 32-byte receipt commitment, written by the client and never
+   * read by the program. Occupies the former `salt` slot, so the layout,
+   * size and rent are unchanged. Every account carries one — a field only
+   * some clients populate would itself identify those clients.
+   */
+  receiptCommitment: ReadonlyUint8Array;
   /** Lamports deposited, excluding the rent-exempt minimum. */
   depositedAmount: number | bigint;
   /** Unix timestamp of the initial deposit. */
@@ -110,7 +120,7 @@ export function getStealthAccountEncoder(): FixedSizeEncoder<StealthAccountArgs>
     getStructEncoder([
       ["discriminator", fixEncoderSize(getBytesEncoder(), 8)],
       ["owner", getAddressEncoder()],
-      ["salt", fixEncoderSize(getBytesEncoder(), 32)],
+      ["receiptCommitment", fixEncoderSize(getBytesEncoder(), 32)],
       ["depositedAmount", getU64Encoder()],
       ["depositTimestamp", getI64Encoder()],
       ["delegated", getBooleanEncoder()],
@@ -127,7 +137,7 @@ export function getStealthAccountDecoder(): FixedSizeDecoder<StealthAccount> {
   return getStructDecoder([
     ["discriminator", fixDecoderSize(getBytesDecoder(), 8)],
     ["owner", getAddressDecoder()],
-    ["salt", fixDecoderSize(getBytesDecoder(), 32)],
+    ["receiptCommitment", fixDecoderSize(getBytesDecoder(), 32)],
     ["depositedAmount", getU64Decoder()],
     ["depositTimestamp", getI64Decoder()],
     ["delegated", getBooleanDecoder()],
