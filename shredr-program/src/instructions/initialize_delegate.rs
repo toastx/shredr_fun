@@ -43,6 +43,9 @@ pub struct InitializeAndDelegate<'a> {
     pub system_program: &'a AccountView,
     pub deposit_amount: u64,
     pub role: u8,
+    /// Opaque bytes stored verbatim. `None` from a client that predates the
+    /// field, which leaves whatever the account already held.
+    pub receipt_commitment: Option<[u8; 32]>,
 }
 
 impl<'a> InitializeAndDelegate<'a> {
@@ -59,6 +62,7 @@ impl<'a> InitializeAndDelegate<'a> {
             system_program,
             deposit_amount,
             role,
+            receipt_commitment,
         } = self;
 
         // Owned so its bytes can back the PDA signer seeds through the CPIs below.
@@ -195,6 +199,11 @@ impl<'a> InitializeAndDelegate<'a> {
         stealth_state.delegated = true;
         stealth_state.bump = bump;
         stealth_state.role = role;
+        // Stored verbatim, never interpreted. On a top-up the newer commitment
+        // wins: it covers the accumulated balance, the earlier one does not.
+        if let Some(commitment) = receipt_commitment {
+            stealth_state.receipt_commitment = commitment;
+        }
 
         // ── Step 4: Create ACL permission for the burner ──
         // A bare create, so it fails on an existing permission PDA. The member set
@@ -309,6 +318,18 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             return Err(ProgramError::InvalidInstructionData);
         }
 
+        // The commitment is appended after the role, so the two shorter forms
+        // stay valid for already-deployed clients and in-flight transactions.
+        // Any other trailing length is a client bug, not a shape to guess at.
+        let receipt_commitment = match instruction_data.len() {
+            8 | 9 => None,
+            41 => Some(
+                <[u8; 32]>::try_from(&instruction_data[9..41])
+                    .map_err(|_| ProgramError::InvalidInstructionData)?,
+            ),
+            _ => return Err(ProgramError::InvalidInstructionData),
+        };
+
         Ok(Self {
             relayer,
             burner,
@@ -321,6 +342,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             system_program,
             deposit_amount,
             role,
+            receipt_commitment,
         })
     }
 }

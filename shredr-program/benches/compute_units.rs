@@ -127,11 +127,11 @@ fn system_account(lamports: u64) -> Account {
 
 /// Serialize the `[discriminator][StealthAccount]` image, mirroring the offsets
 /// asserted by `stealth_account_layout_is_stable` in `tests/test.rs`.
-fn stealth_bytes(owner: &Pubkey, salt: [u8; 32], bump: u8, deposited: u64, role: u8) -> Vec<u8> {
+fn stealth_bytes(owner: &Pubkey, receipt_commitment: [u8; 32], bump: u8, deposited: u64, role: u8) -> Vec<u8> {
     let mut data = vec![0u8; ACCOUNT_LEN];
     data[0..8].copy_from_slice(&STEALTH_ACCOUNT_DISCRIMINATOR);
     data[8..40].copy_from_slice(owner.as_ref());
-    data[40..72].copy_from_slice(&salt);
+    data[40..72].copy_from_slice(&receipt_commitment);
     data[72..80].copy_from_slice(&deposited.to_le_bytes());
     data[80..88].copy_from_slice(&1_700_000_000i64.to_le_bytes());
     data[88] = 0; // delegated
@@ -144,7 +144,7 @@ fn stealth_bytes(owner: &Pubkey, salt: [u8; 32], bump: u8, deposited: u64, role:
 /// funds on top of rent.
 fn stealth_account(
     owner: &Pubkey,
-    salt: [u8; 32],
+    receipt_commitment: [u8; 32],
     bump: u8,
     deposited: u64,
     rent: u64,
@@ -152,7 +152,7 @@ fn stealth_account(
 ) -> Account {
     Account {
         lamports: rent + deposited,
-        data: stealth_bytes(owner, salt, bump, deposited, role),
+        data: stealth_bytes(owner, receipt_commitment, bump, deposited, role),
         owner: program_id(),
         executable: false,
         rent_epoch: 0,
@@ -160,7 +160,7 @@ fn stealth_account(
 }
 
 /// Must match `helpers::derive_stealth_account_from_pubkey`: the burner alone,
-/// no salt. `salt` is a stored field, not a seed — including it here derived
+/// no receipt_commitment. `receipt_commitment` is a stored field, not a seed — including it here derived
 /// addresses the program rejects with `InvalidStealthPDA`.
 fn derive(burner: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[seeds::STEALTH_ADDRESS, burner.as_ref()], &program_id())

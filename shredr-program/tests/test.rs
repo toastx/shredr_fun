@@ -20,7 +20,11 @@
 //! the validation performed *before* the CPI is asserted here. Their happy paths
 //! need a validator with the MagicBlock programs deployed.
 
-use mollusk_svm::{program::loader_keys::LOADER_V3, result::Check, Mollusk};
+use mollusk_svm::{
+    program::{create_program_account_loader_v3, loader_keys::LOADER_V3},
+    result::Check,
+    Mollusk,
+};
 use solana_account::Account;
 use solana_instruction::{error::InstructionError, AccountMeta, Instruction};
 use solana_program_error::ProgramError;
@@ -55,7 +59,7 @@ const IX_UNDELEGATION_CALLBACK: u8 = 0xFF;
 // ─────────────────────────────────────────────
 
 const OFF_OWNER: usize = 8;
-const OFF_SALT: usize = 40;
+const OFF_RECEIPT_COMMITMENT: usize = 40;
 const OFF_DEPOSITED_AMOUNT: usize = 72;
 const OFF_DEPOSIT_TIMESTAMP: usize = 80;
 const OFF_DELEGATED: usize = 88;
@@ -138,7 +142,7 @@ fn derive_stealth_pda(burner: &Pubkey) -> (Pubkey, u8) {
 #[derive(Clone)]
 struct StealthState {
     owner: Pubkey,
-    salt: [u8; 32],
+    receipt_commitment: [u8; 32],
     deposited_amount: u64,
     deposit_timestamp: i64,
     delegated: bool,
@@ -147,10 +151,10 @@ struct StealthState {
 }
 
 impl StealthState {
-    fn new(owner: Pubkey, salt: [u8; 32], bump: u8) -> Self {
+    fn new(owner: Pubkey, receipt_commitment: [u8; 32], bump: u8) -> Self {
         Self {
             owner,
-            salt,
+            receipt_commitment,
             deposited_amount: 0,
             deposit_timestamp: 1_700_000_000,
             delegated: false,
@@ -174,7 +178,7 @@ impl StealthState {
         let mut data = vec![0u8; ACCOUNT_LEN];
         data[0..8].copy_from_slice(&STEALTH_ACCOUNT_DISCRIMINATOR);
         data[OFF_OWNER..OFF_OWNER + 32].copy_from_slice(self.owner.as_ref());
-        data[OFF_SALT..OFF_SALT + 32].copy_from_slice(&self.salt);
+        data[OFF_RECEIPT_COMMITMENT..OFF_RECEIPT_COMMITMENT + 32].copy_from_slice(&self.receipt_commitment);
         data[OFF_DEPOSITED_AMOUNT..OFF_DEPOSITED_AMOUNT + 8]
             .copy_from_slice(&self.deposited_amount.to_le_bytes());
         data[OFF_DEPOSIT_TIMESTAMP..OFF_DEPOSIT_TIMESTAMP + 8]
@@ -215,9 +219,9 @@ struct Stealth {
 
 /// Build a funded, undelegated stealth account holding `deposited` lamports of
 /// user funds on top of the rent-exempt minimum.
-fn funded_stealth(mollusk: &Mollusk, burner: &Pubkey, salt: [u8; 32], deposited: u64) -> Stealth {
+fn funded_stealth(mollusk: &Mollusk, burner: &Pubkey, receipt_commitment: [u8; 32], deposited: u64) -> Stealth {
     let (key, bump) = derive_stealth_pda(burner);
-    let state = StealthState::new(*burner, salt, bump).deposited(deposited);
+    let state = StealthState::new(*burner, receipt_commitment, bump).deposited(deposited);
     let account = state.to_account(stealth_rent(mollusk) + deposited);
     Stealth {
         key,
@@ -296,7 +300,7 @@ fn stealth_account_layout_is_stable() {
 
     let state = StealthAccount {
         owner: Default::default(),
-        salt: [0u8; 32],
+        receipt_commitment: [0u8; 32],
         deposited_amount: 0,
         deposit_timestamp: 0,
         delegated: false,
@@ -307,7 +311,7 @@ fn stealth_account_layout_is_stable() {
     let offset_of = |field: usize| field - base + 8; // +8 for the discriminator
 
     assert_eq!(offset_of(&state.owner as *const _ as usize), OFF_OWNER);
-    assert_eq!(offset_of(&state.salt as *const _ as usize), OFF_SALT);
+    assert_eq!(offset_of(&state.receipt_commitment as *const _ as usize), OFF_RECEIPT_COMMITMENT);
     assert_eq!(
         offset_of(&state.deposited_amount as *const _ as usize),
         OFF_DEPOSITED_AMOUNT
@@ -782,7 +786,7 @@ fn withdraw_of_full_balance_leaves_rent_and_preserves_owner() {
 
     // Only `deposited_amount` moves. `owner` and `bump` must survive the drain:
     // `CloseStealthAccount` authorizes against `owner`, so clearing it here would
-    // make the rent unreclaimable. `salt` and `deposit_timestamp` are likewise
+    // make the rent unreclaimable. `receipt_commitment` and `deposit_timestamp` are likewise
     // left intact.
     let mut expected_state = stealth.state.clone();
     expected_state.deposited_amount = 0;
@@ -1439,6 +1443,164 @@ fn initialize_requires_deposit_amount_bytes() {
         &setup.accounts,
         &[Check::err(ProgramError::InvalidInstructionData)],
     );
+}
+
+/// The commitment is appended after the role byte, so only three data lengths
+/// are meaningful: 8 (legacy), 9 (+role), 41 (+role+commitment). Anything else
+/// is a client bug, and guessing at its shape would be worse than refusing it.
+#[test]
+fn initialize_rejects_partial_commitment() {
+    let mollusk = mollusk();
+
+    for extra in [1usize, 31, 33] {
+        let setup = init_setup(None, 0);
+        let mut data = init_ix_data_with_role(0, ROLE_DEPOSIT);
+        data.extend_from_slice(&vec![0xABu8; extra]);
+
+        mollusk.process_and_validate_instruction(
+            &Instruction::new_with_bytes(program_id(), &data, setup.metas.clone()),
+            &setup.accounts,
+            &[Check::err(ProgramError::InvalidInstructionData)],
+        );
+    }
+}
+
+/// A 41-byte payload stores the commitment verbatim. The program never reads
+/// the field, so "stored unchanged" is the whole contract.
+///
+/// Needs the vendored MagicBlock ELFs, because `InitializeAndDelegate` cannot
+/// run to completion without them — every other test in this file stops at the
+/// unresolvable ACL CPI, and a failed instruction rolls the state write back.
+#[test]
+fn initialize_stores_receipt_commitment() {
+    let mollusk = mollusk_with_magicblock();
+    let setup = init_setup_delegatable();
+
+    let commitment: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(3));
+    let mut data = init_ix_data_with_role(0, ROLE_DEPOSIT);
+    data.extend_from_slice(&commitment);
+
+    let result = mollusk.process_instruction(
+        &Instruction::new_with_bytes(program_id(), &data, setup.metas.clone()),
+        &setup.accounts,
+    );
+    assert!(
+        result.raw_result.is_ok(),
+        "initialize must succeed with the MagicBlock fixtures loaded; got {:?}",
+        result.raw_result
+    );
+
+    let stealth = result
+        .get_account(&setup.metas[3].pubkey)
+        .expect("stealth account");
+    assert_eq!(
+        &stealth.data[OFF_RECEIPT_COMMITMENT..OFF_RECEIPT_COMMITMENT + 32],
+        &commitment,
+        "commitment must be stored byte-for-byte"
+    );
+}
+
+/// A `mollusk()` with the MagicBlock delegation and ACL programs loaded, so
+/// `InitializeAndDelegate` can run all the way through its CPIs. Kept separate
+/// from `mollusk()` because most tests here rely on the CPI being unresolvable
+/// to prove they reached it.
+fn mollusk_with_magicblock() -> Mollusk {
+    let mut mollusk = mollusk();
+    mollusk.add_program_with_loader_and_elf(
+        &DELEGATION_PROGRAM_ID,
+        &LOADER_V3,
+        &fixture_elf("delegation_program.so"),
+    );
+    mollusk.add_program_with_loader_and_elf(
+        &PERMISSION_PROGRAM_ID,
+        &LOADER_V3,
+        &fixture_elf("permission_program.so"),
+    );
+    mollusk
+}
+
+/// The MagicBlock ACL program that guards in-rollup access.
+const PERMISSION_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1");
+
+fn fixture_elf(file_name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(file_name);
+    std::fs::read(&path).unwrap_or_else(|_| {
+        panic!("{path:?} missing. Run `scripts/dump-magicblock-programs.sh`.")
+    })
+}
+
+/// `init_setup` with the real delegation PDAs and both CPI callees appended, so
+/// the instruction can actually delegate.
+fn init_setup_delegatable() -> InitAccounts {
+    let mut setup = init_setup(None, 0);
+    let stealth = setup.metas[3].pubkey;
+
+    let delegation_program = DELEGATION_PROGRAM_ID;
+    let permission_program = PERMISSION_PROGRAM_ID;
+
+    // The SDK derives these; a random pubkey is rejected once the real program
+    // is the one checking.
+    let (permission, _) =
+        Pubkey::find_program_address(&[b"permission:", stealth.as_ref()], &permission_program);
+    let (buffer, _) = Pubkey::find_program_address(&[b"buffer", stealth.as_ref()], &program_id());
+    let (record, _) =
+        Pubkey::find_program_address(&[b"delegation", stealth.as_ref()], &delegation_program);
+    let (metadata, _) = Pubkey::find_program_address(
+        &[b"delegation-metadata", stealth.as_ref()],
+        &delegation_program,
+    );
+
+    for (idx, key) in [(4, permission), (5, buffer), (6, record), (7, metadata)] {
+        setup.metas[idx].pubkey = key;
+        setup.accounts[idx] = (key, system_account(0));
+    }
+
+    // Solana resolves a CPI's callee from the transaction's account keys, so
+    // both programs `process` invokes must appear. `try_from` reads exactly nine
+    // accounts positionally and ignores these.
+    setup
+        .metas
+        .push(AccountMeta::new_readonly(permission_program, false));
+    setup
+        .metas
+        .push(AccountMeta::new_readonly(delegation_program, false));
+    setup.accounts.push((
+        permission_program,
+        create_program_account_loader_v3(&permission_program),
+    ));
+    setup.accounts.push((
+        delegation_program,
+        create_program_account_loader_v3(&delegation_program),
+    ));
+
+    setup
+}
+
+/// Clients that predate the field keep working, and leave whatever the account
+/// already held rather than zeroing it.
+#[test]
+fn initialize_without_commitment_still_works() {
+    let mollusk = mollusk();
+
+    for data in [init_ix_data(0), init_ix_data_with_role(0, ROLE_DEPOSIT)] {
+        let setup = init_setup(None, 0);
+        let result = mollusk.process_instruction(
+            &Instruction::new_with_bytes(program_id(), &data, setup.metas.clone()),
+            &setup.accounts,
+        );
+
+        assert!(
+            !matches!(
+                result.raw_result,
+                Err(InstructionError::Custom(6000..=6014))
+            ),
+            "the shorter forms must stay valid; got {:?}",
+            result.raw_result
+        );
+    }
 }
 
 #[test]
