@@ -477,7 +477,41 @@ describe('handover encoding', () => {
     });
 
     it('rejects a token that is not a disclosure', () => {
-        expect(() => decodeDisclosure(btoa('{"hello":"world"}'))).to.throw(/not a shredr disclosure/i);
+        expect(() => decodeDisclosure(btoa('{"hello":"world"}'))).to.throw(/not a shredr receipt/i);
+    });
+
+    it('survives a key hard-wrapped by a mail client', async () => {
+        const service = await serviceFrom(7);
+        const vk = await service.deriveViewingKey(leg().pda.toBytes(), 3);
+        const encoded = encodeViewingKey(vk);
+        const wrapped = `${encoded.slice(0, 20)}\r\n${encoded.slice(20)}`;
+
+        expect(bytesEqual(decodeViewingKey(wrapped).key, vk.key)).to.equal(true);
+    });
+
+    describe('bad paste', () => {
+        // A person holding a receipt should never see a DOMException. atob
+        // answers everything below with "The string to be decoded is not
+        // correctly encoded", which is useless to them.
+        const goodKey = 'FYpx5Du6HREZe4gPK+tYn67GvoLUsOaUxAomPLGTroWqKJHgg2GWnPM1loY=';
+
+        it('names the empty field', () => {
+            expect(() => decodeDisclosure('   ')).to.throw(/no receipt provided/i);
+            expect(() => decodeViewingKey('')).to.throw(/no viewing key provided/i);
+        });
+
+        it('spots the two fields being swapped', () => {
+            expect(() => decodeDisclosure(goodKey)).to.throw(/viewing key, not the receipt/i);
+            expect(() => decodeViewingKey(encodeDisclosure({
+                version: 1, ciphertext: 'AAAA', siblings: [],
+            }))).to.throw(/probably the receipt/i);
+        });
+
+        it('explains a truncated or non-base64 paste', () => {
+            for (const bad of ['eyJ2ZXJzaW9uIjoxLCJjaXBoZXJ0ZXh', 'hello world!! @@@']) {
+                expect(() => decodeDisclosure(bad)).to.throw(/copied the whole thing/i);
+            }
+        });
     });
 });
 
