@@ -30,7 +30,20 @@ export {
 } from './ShredrProgram';
 export type { StealthAccountData } from './ShredrProgram';
 
-export type { SigningMode, ShredrState, PendingUtxo, UtxoStatus, ShredResult, PendingAction } from './ShredrClient';
+export type { SigningMode, ShredrState, PendingUtxo, UtxoStatus, ShredResult, PendingAction, ReceiptView } from './ShredrClient';
+
+// Audit keys — per-invoice viewing keys and transferable receipts
+export {
+    AuditService,
+    auditService,
+    decodeDisclosure,
+    decodeViewingKey,
+    encodeDisclosure,
+    encodeViewingKey,
+    verifyDisclosure,
+} from './AuditService';
+export type { Attestation, SignedAttestation, Disclosure, ViewingKey, VerificationResult } from './AuditService';
+export { readAnchor, readAnchorFromLedger, resolveAnchor } from './anchor';
 export { utxoService } from './UtxoService';
 export type { UtxoNote, UtxoRole, UtxoState } from './types';
 

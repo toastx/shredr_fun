@@ -1,6 +1,6 @@
 import { Routes, Route } from 'react-router-dom';
 import { Navbar, Footer } from './components';
-import { ClaimPage, GeneratorPage } from './pages';
+import { ClaimPage, GeneratorPage, ReceiptsPage } from './pages';
 import './App.css';
 
 function App() {
@@ -18,6 +18,10 @@ function App() {
                 <Route 
                     path="/claim" 
                     element={<ClaimPage />} 
+                />
+                <Route 
+                    path="/receipts" 
+                    element={<ReceiptsPage />} 
                 />
             </Routes>
 

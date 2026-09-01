@@ -507,6 +507,45 @@ export class AuditService {
     }
 }
 
+/**
+ * Serialize a viewing key for handing to an auditor.
+ *
+ * Carries the IV as well as the key. The IV is derived, not random, but it is
+ * derived from `auditSeed` — which the auditor must never have — so it cannot be
+ * recomputed on their side and has to travel with the key.
+ */
+export function encodeViewingKey(vk: ViewingKey): string {
+    const combined = new Uint8Array(vk.key.length + vk.iv.length);
+    combined.set(vk.key, 0);
+    combined.set(vk.iv, vk.key.length);
+    return uint8ArrayToBase64(combined);
+}
+
+export function decodeViewingKey(encoded: string): ViewingKey {
+    const bytes = base64ToUint8Array(encoded.trim());
+    if (bytes.length !== VIEWING_KEY_MATERIAL_BYTES) {
+        throw new Error(
+            `Viewing key must be ${VIEWING_KEY_MATERIAL_BYTES} bytes, got ${bytes.length}`,
+        );
+    }
+    return { key: bytes.slice(0, 32), iv: bytes.slice(32) };
+}
+
+/** The disclosure as one pasteable string. */
+export function encodeDisclosure(d: Disclosure): string {
+    return uint8ArrayToBase64(enc.encode(JSON.stringify(d)));
+}
+
+export function decodeDisclosure(token: string): Disclosure {
+    const parsed = JSON.parse(
+        new TextDecoder().decode(base64ToUint8Array(token.trim())),
+    );
+    if (typeof parsed?.ciphertext !== 'string' || !Array.isArray(parsed?.siblings)) {
+        throw new Error('Not a shredr disclosure token');
+    }
+    return parsed as Disclosure;
+}
+
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
     for (let i = 0; i < Math.min(a.length, b.length); i++) {
         if (a[i] !== b[i]) return a[i] - b[i];

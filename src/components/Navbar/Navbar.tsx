@@ -34,6 +34,14 @@ function Navbar({ brandName = "ProxyAddress" }: NavbarProps) {
                         </Link>
                     </li>
                     <li>
+                        <Link 
+                            to="/receipts" 
+                            className={location.pathname === '/receipts' ? 'active' : ''}
+                        >
+                            Receipts
+                        </Link>
+                    </li>
+                    <li>
                         <a
                             href={DOCS_URL}
                             target="_blank"

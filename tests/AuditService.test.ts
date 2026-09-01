@@ -17,6 +17,10 @@ import {
     INVOICE_LEN,
     bytesEqual,
     decodeBase58,
+    decodeDisclosure,
+    decodeViewingKey,
+    encodeDisclosure,
+    encodeViewingKey,
     packAttestation,
     unpackAttestation,
     UNKNOWN_SIGNATURE,
@@ -25,6 +29,7 @@ import {
     type ViewingKey,
 } from '../src/lib/AuditService';
 import { deriveStealthPDA } from '../src/lib/ShredrProgram';
+import { base64ToUint8Array } from '../src/lib/utils';
 
 /** A signature is 64 bytes; any fixed value works as a master secret here. */
 function signatureOf(seed: number): Uint8Array {
@@ -425,6 +430,54 @@ describe('verifyDisclosure', () => {
         const result = await verifyDisclosure(await disclose(0), built[0].vk, random, derivePda);
         expect(result.ok).to.equal(false);
         expect(result.failed).to.equal('commitment');
+    });
+});
+
+describe('handover encoding', () => {
+    it('round-trips a viewing key, IV included', async () => {
+        const service = await serviceFrom(7);
+        const vk = await service.deriveViewingKey(leg().pda.toBytes(), 3);
+
+        const restored = decodeViewingKey(encodeViewingKey(vk));
+
+        // The IV must travel with the key: it is derived from auditSeed, which
+        // the auditor must never hold, so they cannot recompute it.
+        expect(bytesEqual(restored.key, vk.key)).to.equal(true);
+        expect(bytesEqual(restored.iv, vk.iv)).to.equal(true);
+    });
+
+    it('rejects a key of the wrong length', () => {
+        expect(() => decodeViewingKey(btoa('too short'))).to.throw(/44 bytes/);
+    });
+
+    it('round-trips a disclosure token and tolerates pasted whitespace', async () => {
+        const service = await serviceFrom(7);
+        const deposit = leg();
+        const exit = leg();
+        const vk = await service.deriveViewingKey(deposit.pda.toBytes(), 0);
+
+        const signed = service.signAttestation(
+            attestationFor(deposit, exit),
+            deposit.kp.secretKey,
+            exit.kp.secretKey,
+        );
+        const disclosure = await AuditService.makeDisclosure(vk, signed, [
+            new Uint8Array(32).fill(1),
+        ]);
+
+        const token = encodeDisclosure(disclosure);
+        const restored = decodeDisclosure(`\n  ${token}  \n`);
+
+        expect(restored.ciphertext).to.equal(disclosure.ciphertext);
+        expect(restored.siblings).to.deep.equal(disclosure.siblings);
+
+        // And it still opens after the round trip.
+        const opened = await AuditService.open(vk, base64ToUint8Array(restored.ciphertext));
+        expect(opened.amount).to.equal(signed.amount);
+    });
+
+    it('rejects a token that is not a disclosure', () => {
+        expect(() => decodeDisclosure(btoa('{"hello":"world"}'))).to.throw(/not a shredr disclosure/i);
     });
 });
 

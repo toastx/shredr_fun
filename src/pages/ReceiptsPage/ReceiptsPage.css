@@ -1,0 +1,356 @@
+/* ========== RECEIPTS PAGE ========== */
+/* Follows ClaimPage: same card, same palette, same lowercase voice. Wider,
+   because a receipt is a list rather than a single action. */
+
+.receipts-page {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: calc(100vh - 100px);
+    padding: 2rem;
+}
+
+.receipts-card {
+    background: #0a0a0a;
+    padding: 2rem;
+    max-width: 640px;
+    width: 100%;
+    border: 1px solid #1a1a1a;
+}
+
+/* ========== HEADER ========== */
+.receipts-header {
+    margin-bottom: 1.5rem;
+}
+
+.receipts-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #ff1a1a;
+    text-transform: lowercase;
+    letter-spacing: 0.02em;
+    margin: 0;
+    text-shadow: 0 0 30px rgba(255, 26, 26, 0.3);
+}
+
+/* ========== TABS ========== */
+.receipts-tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 1.5rem;
+    border-bottom: 1px solid #1a1a1a;
+}
+
+.receipts-tabs button {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #666666;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.8rem;
+    text-transform: lowercase;
+    cursor: pointer;
+    transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.receipts-tabs button:hover {
+    color: #e0e0e0;
+}
+
+.receipts-tabs button.active {
+    color: #ff1a1a;
+    border-bottom-color: #ff1a1a;
+}
+
+/* ========== MESSAGES ========== */
+.receipts-message {
+    color: #666666;
+    font-size: 0.875rem;
+    text-align: center;
+    padding: 2rem 0;
+    line-height: 1.6;
+}
+
+.receipts-message--left {
+    text-align: left;
+    padding: 0 0 1.5rem;
+}
+
+.receipts-error {
+    color: #ff4444;
+    font-size: 0.875rem;
+    padding: 1rem;
+    background: rgba(255, 26, 26, 0.1);
+    border: 1px solid rgba(255, 26, 26, 0.3);
+    margin-bottom: 1rem;
+    text-align: center;
+    word-break: break-word;
+}
+
+/* ========== BUTTONS ========== */
+.primary-btn {
+    width: 100%;
+    padding: 1.25rem 2rem;
+    font-size: 1.125rem;
+    font-weight: 700;
+    font-family: 'Space Mono', monospace;
+    color: #0a0a0a;
+    background-color: #ff1a1a;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    letter-spacing: 0.05em;
+    text-transform: lowercase;
+    box-shadow: 0 0 40px rgba(255, 26, 26, 0.3);
+}
+
+.primary-btn:hover:not(:disabled) {
+    background-color: #ff4444;
+    box-shadow: 0 0 60px rgba(255, 26, 26, 0.5);
+}
+
+.primary-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
+.ghost-btn {
+    padding: 0.6rem 1rem;
+    background: transparent;
+    border: 1px solid #333333;
+    color: #666666;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-transform: lowercase;
+}
+
+.ghost-btn:hover {
+    color: #e0e0e0;
+    border-color: #666666;
+}
+
+/* ========== RECEIPT LIST ========== */
+.receipts-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.receipt {
+    border: 1px solid #1a1a1a;
+    margin-bottom: 0.75rem;
+}
+
+.receipt-summary {
+    width: 100%;
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 1rem;
+    background: rgba(255, 255, 255, 0.02);
+    border: none;
+    color: #e0e0e0;
+    font-family: 'Space Mono', monospace;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+.receipt-summary:hover {
+    background: rgba(255, 26, 26, 0.05);
+}
+
+.receipt-amount {
+    font-weight: 700;
+    font-size: 1rem;
+}
+
+.receipt-meta {
+    flex: 1;
+    color: #666666;
+    font-size: 0.75rem;
+}
+
+.receipt-chevron {
+    color: #666666;
+    font-size: 1rem;
+}
+
+/* ========== RECEIPT DETAIL ========== */
+.receipt-detail {
+    padding: 1rem;
+    border-top: 1px solid #1a1a1a;
+}
+
+.receipt-fields {
+    margin: 0 0 1rem;
+}
+
+.receipt-fields > div {
+    margin-bottom: 0.75rem;
+}
+
+.receipt-fields dt {
+    color: #666666;
+    font-size: 0.7rem;
+    text-transform: lowercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.2rem;
+}
+
+.receipt-fields dd {
+    margin: 0;
+    color: #e0e0e0;
+    font-size: 0.75rem;
+    word-break: break-all;
+}
+
+.receipt-warning {
+    color: #666666;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    padding: 0.75rem;
+    border-left: 2px solid #333333;
+    margin-bottom: 1rem;
+}
+
+/* The destination-reuse case: this one costs privacy the user already has. */
+.receipt-warning--strong {
+    color: #ff4444;
+    border-left-color: #ff1a1a;
+    background: rgba(255, 26, 26, 0.05);
+}
+
+.receipt-share {
+    margin-bottom: 1rem;
+}
+
+.receipt-share label {
+    display: block;
+    color: #666666;
+    font-size: 0.7rem;
+    text-transform: lowercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.4rem;
+}
+
+.receipt-share textarea {
+    width: 100%;
+    padding: 0.75rem;
+    background: #0a0a0a;
+    border: 1px solid #333333;
+    color: #e0e0e0;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    resize: vertical;
+    word-break: break-all;
+    margin-bottom: 0.5rem;
+}
+
+.receipt-share textarea:focus {
+    outline: none;
+    border-color: #ff1a1a;
+}
+
+.receipt-note {
+    color: #666666;
+    font-size: 0.7rem;
+    font-style: italic;
+    text-align: center;
+    margin: 0;
+}
+
+/* ========== VERIFY TAB ========== */
+.field-label {
+    display: block;
+    color: #666666;
+    font-size: 0.75rem;
+    text-transform: lowercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.5rem;
+}
+
+.field-input {
+    width: 100%;
+    padding: 1rem;
+    background: #0a0a0a;
+    border: 1px solid #333333;
+    color: #e0e0e0;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.75rem;
+    resize: vertical;
+    word-break: break-all;
+    margin-bottom: 1.25rem;
+    transition: border-color 0.2s ease;
+}
+
+.field-input:focus {
+    outline: none;
+    border-color: #ff1a1a;
+}
+
+.field-input::placeholder {
+    color: #444444;
+}
+
+.verify-result {
+    margin-top: 1.25rem;
+    padding: 1rem;
+    font-size: 0.8rem;
+}
+
+.verify-result strong {
+    display: block;
+    text-transform: lowercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.75rem;
+}
+
+.verify-result p {
+    margin: 0;
+    color: #666666;
+    line-height: 1.6;
+}
+
+.verify-result--ok {
+    background: rgba(26, 255, 26, 0.08);
+    border: 1px solid rgba(26, 255, 26, 0.3);
+}
+
+.verify-result--ok strong {
+    color: #44ff44;
+}
+
+.verify-result--bad {
+    background: rgba(255, 26, 26, 0.1);
+    border: 1px solid rgba(255, 26, 26, 0.3);
+}
+
+.verify-result--bad strong {
+    color: #ff4444;
+}
+
+/* ========== RESPONSIVE ========== */
+@media (max-width: 640px) {
+    .receipts-page {
+        padding: 1rem;
+    }
+
+    .receipts-card {
+        padding: 1.5rem 1rem;
+    }
+
+    .receipt-summary {
+        flex-wrap: wrap;
+        gap: 0.25rem;
+    }
+
+    .receipt-meta {
+        flex-basis: 100%;
+    }
+}

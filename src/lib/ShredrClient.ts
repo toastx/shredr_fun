@@ -20,10 +20,19 @@ import {
   ATTESTATION_VERSION,
   AuditService,
   auditService,
+  decodeDisclosure,
+  decodeViewingKey,
+  encodeDisclosure,
+  encodeViewingKey,
   packAttestation,
   UNKNOWN_SIGNATURE,
+  verifyDisclosure,
   type Attestation,
+  type Disclosure,
+  type SignedAttestation,
+  type VerificationResult,
 } from "./AuditService";
+import { resolveAnchor } from "./anchor";
 import { apiClient } from "./ApiClient";
 import { koraRelayer } from "./KoraRelayer";
 import {
@@ -56,7 +65,7 @@ import {
   type StealthAccountData,
 } from "./ShredrProgram";
 import { utxoService } from "./UtxoService";
-import { deriveWalletHash } from "./utils";
+import { base64ToUint8Array, deriveWalletHash } from "./utils";
 import type {
   GeneratedNonce,
   BurnerKeyPair,
@@ -92,6 +101,22 @@ export interface PendingUtxo {
   status: UtxoStatus;
   /** From the PDA's on-chain role byte; absent when it reads `unset`. */
   role?: UtxoRole;
+}
+
+/** One openable receipt, ready to display or hand over. */
+export interface ReceiptView {
+  depositIndex: number;
+  exitIndex: number;
+  attestation: SignedAttestation;
+  /** The pasteable disclosure. Useless without the key. */
+  token: string;
+  /** The 44 bytes an auditor needs. Handing this over is irreversible. */
+  viewingKey: string;
+  /**
+   * Another receipt withdrew to the same destination, so disclosing this one
+   * lets that auditor link the others by watching the address.
+   */
+  destinationShared: boolean;
 }
 
 /** Signatures produced by a full shred (receive → rollup → base layer). */
@@ -990,6 +1015,98 @@ export class ShredrClient {
         burnerService.clearBurner(depositBurner);
       }
     }
+  }
+
+  /**
+   * Every receipt this wallet can open, newest first.
+   *
+   * The stored blob holds only the indices and the sealed disclosure, so the
+   * viewing key is re-derived here rather than stored — that derivation *is* the
+   * map from invoice to key, and persisting it would rebuild the linkability
+   * graph the nonce chain exists to destroy.
+   */
+  async listReceipts(): Promise<ReceiptView[]> {
+    if (!this._initialized || !this._walletPubkey) {
+      throw new Error("ShredrClient not initialized");
+    }
+
+    const views: ReceiptView[] = [];
+
+    for (const entry of await utxoService.loadReceipts()) {
+      const burner = await burnerService.deriveBurnerFromNonce(
+        await nonceService.generateNonceAtIndex(entry.depositIndex, this._walletPubkey),
+      );
+      try {
+        const [pda] = deriveStealthPDA(new PublicKey(burner.publicKey));
+        const vk = await auditService.deriveViewingKey(pda.toBytes(), entry.depositIndex);
+        const disclosure = entry.disclosure as Disclosure;
+
+        views.push({
+          depositIndex: entry.depositIndex,
+          exitIndex: entry.exitIndex,
+          attestation: await AuditService.open(vk, base64ToUint8Array(disclosure.ciphertext)),
+          token: encodeDisclosure(disclosure),
+          viewingKey: encodeViewingKey(vk),
+          destinationShared: false,
+        });
+      } catch (err) {
+        // A receipt that will not open is a bug worth seeing, not a reason to
+        // hide the rest of someone's history.
+        console.warn("[listReceipts] could not open receipt", entry.depositIndex, err);
+      } finally {
+        burnerService.clearBurner(burner);
+      }
+    }
+
+    // Disclosing a receipt exposes its destination. Every other receipt sharing
+    // that address becomes linkable to the same auditor from then on, including
+    // ones already disclosed, so flag the whole group rather than the later ones.
+    const seen = new Map<string, number>();
+    for (const v of views) {
+      seen.set(v.attestation.destination, (seen.get(v.attestation.destination) ?? 0) + 1);
+    }
+    for (const v of views) {
+      v.destinationShared = (seen.get(v.attestation.destination) ?? 0) > 1;
+    }
+
+    return views.sort((a, b) => Number(b.attestation.exitTs - a.attestation.exitTs));
+  }
+
+  /**
+   * Check a disclosure someone handed you.
+   *
+   * Needs nothing but the token, the key and a public RPC — no wallet, no
+   * initialized client, no shredr account. That is the point: an auditor runs
+   * this, and they are not a shredr user.
+   */
+  async verifyDisclosureToken(
+    token: string,
+    viewingKey: string,
+  ): Promise<VerificationResult> {
+    const disclosure = decodeDisclosure(token);
+    const vk = decodeViewingKey(viewingKey);
+
+    // The exit PDA is inside the ciphertext, so the anchor cannot be fetched
+    // until the token is open. A wrong key stops here, before any RPC call.
+    let exitPda: PublicKey;
+    try {
+      const opened = await AuditService.open(vk, base64ToUint8Array(disclosure.ciphertext));
+      exitPda = new PublicKey(opened.exitPda);
+    } catch {
+      return { ok: false, failed: "decrypt" };
+    }
+
+    const root = await resolveAnchor(this.getConnection(), exitPda);
+    if (!root) {
+      throw new Error(
+        `No commitment found for exit account ${exitPda.toBase58()}. ` +
+          `If it was closed, verifying needs an RPC that serves archival history.`,
+      );
+    }
+
+    return verifyDisclosure(disclosure, vk, root, (burner) =>
+      deriveStealthPDA(new PublicKey(burner))[0].toBytes(),
+    );
   }
 
   /**
