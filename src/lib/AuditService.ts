@@ -508,6 +508,37 @@ export class AuditService {
 }
 
 /**
+ * Decode base64 that came from a human.
+ *
+ * Both handover values are pasted, so they arrive wrapped, quoted, or simply
+ * wrong. `atob` answers all of that with "The string to be decoded is not
+ * correctly encoded", which tells the person holding a receipt nothing at all.
+ *
+ * Whitespace is stripped rather than rejected: mail clients hard-wrap long
+ * base64, and a receipt that fails because it survived an inbox would be a
+ * miserable way to lose a payment record.
+ */
+function decodeBase64Strict(value: string, what: string): Uint8Array {
+    const cleaned = value.replace(/\s+/g, '');
+
+    if (cleaned.length === 0) {
+        throw new Error(`No ${what} provided`);
+    }
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(cleaned) || cleaned.length % 4 !== 0) {
+        throw new Error(
+            `That does not look like a ${what}. Check you copied the whole thing, ` +
+                `and that the receipt and the key are not swapped.`,
+        );
+    }
+
+    try {
+        return base64ToUint8Array(cleaned);
+    } catch {
+        throw new Error(`The ${what} is damaged and could not be decoded.`);
+    }
+}
+
+/**
  * Serialize a viewing key for handing to an auditor.
  *
  * Carries the IV as well as the key. The IV is derived, not random, but it is
@@ -522,10 +553,11 @@ export function encodeViewingKey(vk: ViewingKey): string {
 }
 
 export function decodeViewingKey(encoded: string): ViewingKey {
-    const bytes = base64ToUint8Array(encoded.trim());
+    const bytes = decodeBase64Strict(encoded, 'viewing key');
     if (bytes.length !== VIEWING_KEY_MATERIAL_BYTES) {
         throw new Error(
-            `Viewing key must be ${VIEWING_KEY_MATERIAL_BYTES} bytes, got ${bytes.length}`,
+            `A viewing key is ${VIEWING_KEY_MATERIAL_BYTES} bytes; this one is ${bytes.length}. ` +
+                `If it is much longer, it is probably the receipt.`,
         );
     }
     return { key: bytes.slice(0, 32), iv: bytes.slice(32) };
@@ -537,13 +569,24 @@ export function encodeDisclosure(d: Disclosure): string {
 }
 
 export function decodeDisclosure(token: string): Disclosure {
-    const parsed = JSON.parse(
-        new TextDecoder().decode(base64ToUint8Array(token.trim())),
-    );
-    if (typeof parsed?.ciphertext !== 'string' || !Array.isArray(parsed?.siblings)) {
-        throw new Error('Not a shredr disclosure token');
+    const bytes = decodeBase64Strict(token, 'receipt');
+
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+        throw new Error(
+            bytes.length === VIEWING_KEY_MATERIAL_BYTES
+                ? 'That is the viewing key, not the receipt. Check the two fields.'
+                : 'That is not a shredr receipt.',
+        );
     }
-    return parsed as Disclosure;
+
+    const d = parsed as Partial<Disclosure>;
+    if (typeof d?.ciphertext !== 'string' || !Array.isArray(d?.siblings)) {
+        throw new Error('That is not a shredr receipt.');
+    }
+    return d as Disclosure;
 }
 
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
@@ -612,7 +655,21 @@ export async function verifyDisclosure(
 
     const packed = packAttestation(attestation);
     const leaf = await AuditService.leaf(viewingKey, packed);
-    const siblings = disclosure.siblings.map(base64ToUint8Array);
+
+    // A sibling is 32 opaque bytes. Anything else means the receipt was edited
+    // between being issued and being checked, which is a commitment failure
+    // rather than a crash.
+    let siblings: Uint8Array[];
+    try {
+        siblings = disclosure.siblings.map((s) => {
+            const bytes = decodeBase64Strict(s, 'receipt');
+            if (bytes.length !== COMMITMENT_BYTES) throw new Error('bad sibling width');
+            return bytes;
+        });
+    } catch {
+        return { ok: false, attestation, failed: 'commitment' };
+    }
+
     const root = await AuditService.root([leaf, ...siblings]);
 
     if (!bytesEqual(root, onChainRoot.slice(0, COMMITMENT_BYTES))) {
