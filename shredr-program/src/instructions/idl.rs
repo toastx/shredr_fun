@@ -116,11 +116,17 @@ pub enum StealthInstruction {
     /// Delegate the pool ledger to the MagicBlock TEE validator
     #[account(0, signer, writable, name = "payer", desc = "Pays for the delegation")]
     #[account(1, writable, name = "ledger", desc = "Pool ledger PDA")]
-    #[account(2, name = "owner_program", desc = "This program's address")]
-    #[account(3, writable, name = "delegation_buffer", desc = "MagicBlock delegation buffer")]
-    #[account(4, writable, name = "delegation_record", desc = "MagicBlock delegation record")]
-    #[account(5, writable, name = "delegation_metadata", desc = "MagicBlock delegation metadata")]
-    #[account(6, name = "system_program", desc = "System Program")]
+    #[account(
+        2,
+        writable,
+        name = "permission",
+        desc = "ACL permission PDA for the ledger; created private, which is what keeps the rollup private"
+    )]
+    #[account(3, name = "owner_program", desc = "This program's address")]
+    #[account(4, writable, name = "delegation_buffer", desc = "MagicBlock delegation buffer")]
+    #[account(5, writable, name = "delegation_record", desc = "MagicBlock delegation record")]
+    #[account(6, writable, name = "delegation_metadata", desc = "MagicBlock delegation metadata")]
+    #[account(7, name = "system_program", desc = "System Program")]
     DelegatePoolLedger,
 
     /// Private transfer between two stealth PDAs inside the MagicBlock rollup

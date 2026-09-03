@@ -52,6 +52,9 @@ use crate::state::{
 };
 use crate::{Address, ProgramError, ProgramResult};
 
+use ephemeral_rollups_pinocchio::acl::consts::PERMISSION_PROGRAM_ID;
+use ephemeral_rollups_pinocchio::acl::pda::permission_pda_from_permissioned_account;
+use ephemeral_rollups_pinocchio::acl::{CreatePermissionCpiBuilder, MembersArgs};
 use ephemeral_rollups_pinocchio::instruction::delegate_account;
 use ephemeral_rollups_pinocchio::types::DelegateConfig;
 
@@ -554,10 +557,15 @@ impl AdvanceEpoch<'_> {
 /// Pay the front of the queue out, recording each spent nullifier, and compact
 /// what is left.
 ///
-/// Returns how many were actually paid, which can be fewer than were processed:
-/// a note whose record already exists was spent in an earlier epoch, so its
-/// queue entry is dropped rather than honoured. Dropping beats failing, because
-/// one stale entry would otherwise block every other payout in the batch.
+/// Returns how many were actually *paid*, which can be fewer than were
+/// processed. Two entries are consumed without payment: one whose record already
+/// exists was spent in an earlier epoch, and one aimed at the vault cannot be
+/// paid at all. Neither is an error, and that is deliberate — every failure here
+/// aborts the whole epoch turn, so anything a spender can trigger has to be
+/// survivable or it becomes a way to freeze everyone else's withdrawals.
+///
+/// The unpaid denomination stays in the vault as surplus backing. The accounting
+/// errs toward over-collateralized, never under.
 fn settle_payouts(
     ledger: &mut PoolLedger,
     vault: &AccountView,
@@ -566,7 +574,7 @@ fn settle_payouts(
     denomination: u64,
 ) -> Result<usize, ProgramError> {
     let queued = ledger.payout_count as usize;
-    let processing = queued.min(settlements.len() / 2);
+    let processing = queued.min(settlements.len() / 2).min(PAYOUT_QUEUE_CAP);
     if processing == 0 {
         return Ok(0);
     }
@@ -584,21 +592,37 @@ fn settle_payouts(
     };
     let mut payable = total_deposited.saturating_sub(total_settled);
 
-    let mut paid = 0usize;
+    // Which entries earn a payout. `PAYOUT_QUEUE_CAP` is 32, which is what makes
+    // a u32 the right shape here; the `min` above is what keeps it true.
+    let mut payable_mask: u32 = 0;
+    let mut records_created: u64 = 0;
 
+    // ── Pass 1: validate and write the nullifier records ──
+    //
+    // Nothing moves lamports directly in this pass. Each `create_pda` is a CPI,
+    // and the runtime reconciles balances at every CPI boundary — so a direct
+    // transfer left sitting between two CPIs is an unbalanced instruction even
+    // when the loop would have balanced out by its end. Settling more than one
+    // payout per turn is the whole point of a queue, so this split is load
+    // bearing rather than stylistic.
     for index in 0..processing {
         let destination = &settlements[index * 2];
         let record = &settlements[index * 2 + 1];
         let payout = ledger.payouts[index];
 
+        // The keeper supplied the wrong account for this queue entry. That is a
+        // caller error, not an attacker's choice, so failing is right.
         if destination.address().as_array() != &payout.destination {
             return Err(ShredrError::PoolDestinationMismatch.into());
         }
-        // Crediting the vault from the vault is a lamports imbalance the runtime
-        // rejects, and would silently zero a payout if it did not.
-        if destination.address() == vault.address() {
-            return Err(ShredrError::SelfTransferNotAllowed.into());
-        }
+
+        // The spender chose this destination, and nothing stopped them naming
+        // the vault. Crediting the vault from itself is an unbalanced
+        // instruction the runtime rejects — so failing here would leave that
+        // entry at the head of the queue and brick every other withdrawal in the
+        // pool, permanently, for the price of one deposit. Burn the note and pay
+        // nothing instead; the loss stays with whoever chose the address.
+        let payable_destination = destination.address() != vault.address();
 
         let (expected_record, record_bump) = Address::derive_program_address(
             &[seeds::NULLIFIER, &payout.nullifier],
@@ -613,32 +637,33 @@ fn settle_payouts(
         // Already spent in an earlier epoch. Drop the entry and pay nothing —
         // the note was honoured the first time, and failing here would let one
         // stale queue entry hold up everyone else's withdrawal.
-        if record.data_len() > 0 || record.lamports() > 0 {
+        //
+        // "Spent" means a real record: owned by this program, carrying the
+        // discriminator this program wrote. Emphatically *not* "the address has
+        // lamports". Nullifiers become public the moment the ledger commits, and
+        // the record address derives from the nullifier, so anyone watching can
+        // send one lamport to it before the epoch turns. Reading that as spent
+        // would drop the payout, leave the note unrecorded, and drop it again
+        // every epoch after — one lamport, and a deposit is unwithdrawable
+        // forever.
+        if is_nullifier_record(record) {
             continue;
         }
 
-        if payable < denomination {
-            return Err(ShredrError::PoolInsufficientBacking.into());
+        if payable_destination {
+            if payable < denomination {
+                return Err(ShredrError::PoolInsufficientBacking.into());
+            }
+            payable -= denomination;
+            payable_mask |= 1 << index;
         }
 
-        // Everything this payout costs the vault, checked before any of it
-        // moves: the payout itself plus the record's rent.
-        let outgoing = denomination
-            .checked_add(record_rent)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
-        let remaining = vault
-            .lamports()
-            .checked_sub(outgoing)
-            .ok_or(ProgramError::InsufficientFunds)?;
-        if remaining < vault_rent_minimum {
-            return Err(ShredrError::BalanceInvariantViolation.into());
-        }
-
-        // The record is created by the payer rather than the vault, because
-        // System will not debit an account it does not own and the vault is
-        // ours. The vault reimburses below, out of the surcharge this note's own
-        // deposit left behind — so the epoch turner is still not out of pocket,
-        // and every payout stays exactly one denomination.
+        // Written even when nothing is paid: that is what stops an unpayable
+        // note being re-queued every epoch.
+        //
+        // `create_pda` rather than a bare `CreateAccount`, because that refuses
+        // an address someone has already sent lamports to — and here that is not
+        // hypothetical, it is the griefing move the check above defends against.
         let record_bump_slice = [record_bump];
         let record_seeds = [
             Seed::from(seeds::NULLIFIER),
@@ -646,38 +671,65 @@ fn settle_payouts(
             Seed::from(&record_bump_slice),
         ];
 
-        CreateAccount {
-            from: payer,
-            to: record,
-            lamports: record_rent,
-            space: NULLIFIER_RECORD_LEN as u64,
-            owner: &PROGRAM_ADDRESS,
-        }
-        .invoke_signed(&[Signer::from(&record_seeds)])?;
-
+        create_pda(payer, record, &record_seeds, NULLIFIER_RECORD_LEN as u64)?;
         write_discriminator(record, &NULLIFIER_RECORD_DISCRIMINATOR, 0)?;
 
-        let reimbursed = payer
-            .lamports()
-            .checked_add(record_rent)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
+        records_created += 1;
+    }
+
+    // ── Pass 2: move the lamports ──
+    //
+    // Every CPI is behind us, so these writes cannot straddle one.
+    let paid = payable_mask.count_ones() as u64;
+    let rent_owed = records_created
+        .checked_mul(record_rent)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    let payouts_owed = paid
+        .checked_mul(denomination)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    let outgoing = rent_owed
+        .checked_add(payouts_owed)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+
+    let remaining = vault
+        .lamports()
+        .checked_sub(outgoing)
+        .ok_or(ProgramError::InsufficientFunds)?;
+    if remaining < vault_rent_minimum {
+        return Err(ShredrError::BalanceInvariantViolation.into());
+    }
+
+    // The records were funded by the payer, because System will not debit an
+    // account it does not own and the vault is ours. The vault settles up here,
+    // out of the surcharge those notes' own deposits left behind — so the epoch
+    // turner is never out of pocket and every payout is exactly one
+    // denomination.
+    let reimbursed = payer
+        .lamports()
+        .checked_add(rent_owed)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+
+    vault.set_lamports(remaining);
+    payer.set_lamports(reimbursed);
+
+    for index in 0..processing {
+        if payable_mask & (1 << index) == 0 {
+            continue;
+        }
+        let destination = &settlements[index * 2];
         let credited = destination
             .lamports()
             .checked_add(denomination)
             .ok_or(ProgramError::ArithmeticOverflow)?;
-
-        vault.set_lamports(remaining);
-        payer.set_lamports(reimbursed);
         destination.set_lamports(credited);
-
-        payable -= denomination;
-        paid += 1;
     }
 
+    // Every processed entry is consumed, paid or not. A skipped one was dropped
+    // deliberately, and leaving it queued would re-present it every epoch.
     ledger.payouts.copy_within(processing..queued, 0);
     ledger.payout_count = (queued - processing) as u32;
 
-    Ok(paid)
+    Ok(paid as usize)
 }
 
 impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for AdvanceEpoch<'a> {
@@ -721,15 +773,25 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for AdvanceEpoch<'a> {
 // DelegatePoolLedger
 // ─────────────────────────────────────────────
 
-/// Hand the ledger to the rollup so notes can be spent against it.
+/// Hand the ledger to the rollup so notes can be spent against it, **private**.
 ///
-/// No ACL permission is created, unlike the stealth path. There the permission
-/// names the one burner allowed to write; here any holder of a note secret may
-/// spend, and the secret is the authorization. A member list would be a list of
-/// the pool's users, which is the last thing this account should hold.
+/// The permission is not optional and not a formality. A delegated account with
+/// no permission is a *public* rollup account, and `PoolSpend` puts a note
+/// secret and its leaf index in its instruction data — so a public ledger means
+/// anyone reading the rollup can pair every deposit with its withdrawal. The
+/// pool's entire claim rests on this one CPI.
+///
+/// `MembersArgs::private()` is an **empty member list**, which is what "private,
+/// no observers" is spelled as. The inverse — `MembersArgs::public()` — is
+/// `members: None`, and omitting the permission altogether lands in the same
+/// place. Members here are readers, not writers: their `MemberFlags` grant
+/// `TX_LOGS`, `TX_MESSAGE`, `TX_BALANCES` and so on. Nobody needs to be named to
+/// *spend*, because the note secret is the authorization; naming anybody would
+/// only hand them the transcript.
 pub struct DelegatePoolLedger<'a> {
     pub payer: &'a AccountView,
     pub ledger: &'a AccountView,
+    pub permission: &'a AccountView,
     pub owner_program: &'a AccountView,
     pub delegation_buffer: &'a AccountView,
     pub delegation_record: &'a AccountView,
@@ -742,6 +804,7 @@ impl DelegatePoolLedger<'_> {
         let DelegatePoolLedger {
             payer,
             ledger,
+            permission,
             owner_program,
             delegation_buffer,
             delegation_record,
@@ -767,6 +830,27 @@ impl DelegatePoolLedger<'_> {
 
         let denomination_bytes = denomination.to_le_bytes();
         let pda_seeds: &[&[u8]] = &[seeds::POOL_LEDGER, &denomination_bytes];
+
+        // Before delegating, not after: the account is reassigned away from this
+        // program by `delegate_account`, and an undelegated-then-redelegated
+        // ledger keeps the permission it already has.
+        //
+        // Ownership, not lamports, decides whether it exists — a donated lamport
+        // must not be readable as "already permissioned", which would delegate
+        // the ledger public.
+        if !permission.owned_by(&PERMISSION_PROGRAM_ID) {
+            CreatePermissionCpiBuilder::new(
+                ledger,
+                permission,
+                payer,
+                system_program,
+                &PERMISSION_PROGRAM_ID,
+            )
+            .members(MembersArgs::private())
+            .seeds(pda_seeds)
+            .bump(bump)
+            .invoke()?;
+        }
 
         delegate_account(
             &[
@@ -799,6 +883,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for DelegatePoolLedger<'a> {
 
         let payer = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let ledger = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let permission = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let owner_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let delegation_buffer = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let delegation_record = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -819,9 +904,17 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for DelegatePoolLedger<'a> {
             return Err(ProgramError::IncorrectProgramId);
         }
 
+        // Pinned, because the permission is what makes the rollup private. A
+        // caller who could substitute this account could hand us a permission
+        // for something else and leave the ledger readable.
+        if permission.address() != &permission_pda_from_permissioned_account(ledger.address()) {
+            return Err(ShredrError::PoolPermissionMismatch.into());
+        }
+
         Ok(Self {
             payer,
             ledger,
+            permission,
             owner_program,
             delegation_buffer,
             delegation_record,
@@ -834,6 +927,20 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for DelegatePoolLedger<'a> {
 // ─────────────────────────────────────────────
 // Shared
 // ─────────────────────────────────────────────
+
+/// Whether `account` is a nullifier record this program actually wrote.
+///
+/// Ownership and discriminator, not lamports: see the call site for why the
+/// difference matters.
+fn is_nullifier_record(account: &AccountView) -> bool {
+    if !account.owned_by(&PROGRAM_ADDRESS) || account.data_len() < NULLIFIER_RECORD_LEN {
+        return false;
+    }
+
+    account
+        .try_borrow()
+        .is_ok_and(|data| data[..8] == NULLIFIER_RECORD_DISCRIMINATOR)
+}
 
 /// Append a root to the ledger's ring, oldest first out.
 fn push_root(ledger: &mut PoolLedger, root: &[u8; 32]) {

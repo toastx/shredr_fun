@@ -84,6 +84,26 @@ The vault's invariant is `lamports >= rent_minimum + (total_deposited - total_se
 
 Committing and undelegating the ledger reuses `CommitStealth` and `CommitAndUndelegateStealth` unchanged — they never looked at the account they were flushing.
 
+### Delegation must be private, explicitly
+
+`DelegatePoolLedger` creates an ACL permission for the ledger with
+`MembersArgs::private()` before delegating, and that CPI is the single line the
+pool's privacy rests on.
+
+The naming is a trap worth spelling out. `MembersArgs::public()` is
+`members: None`; `private()` is `Some(&[])` — an **empty** member list. Omitting
+the permission entirely lands in the same place as `public()`: a delegated
+account that is not gated, in a rollup anyone can read. Since `PoolSpend` puts a
+note secret and a leaf index in its instruction data, a public ledger means
+every deposit is pairable with its withdrawal by anyone watching, and the pool
+degrades to an expensive way of moving money in public.
+
+Members are *readers*, not writers — their `MemberFlags` grant `TX_LOGS`,
+`TX_MESSAGE`, `TX_BALANCES`, `ACCOUNT_SIGNATURES`. Nobody needs to be named in
+order to spend, because the note secret is the authorization. Naming anyone
+would only hand them the transcript, which is why the list is empty rather than
+populated.
+
 Nothing here has an admin. `InitializePool` is permissionless because both addresses derive from the denomination alone, so running it first only means paying everyone's rent. `AdvanceEpoch` is permissionless because the payout queue is authoritative: whoever pays the fee just executes what the enclave already authorized, and a pool with a privileged keeper is a pool with a liveness hostage.
 
 ### Denominations
@@ -112,7 +132,14 @@ It is only a minimum. The keeper is expected to wait a **randomized** interval a
 
 Trailing accounts come in `(destination, nullifier_record)` pairs, matched positionally against the front of the queue. Pass fewer pairs than the queue holds and the rest stay for the next turn, which is how a queue bigger than one transaction's account limit drains.
 
-A payout whose record already exists was spent in an earlier epoch, so its entry is dropped rather than honoured — and dropped rather than *failed*, because one stale entry erroring out would hold up every other withdrawal in the batch.
+Two kinds of entry are consumed without being paid, and both are dropped rather than raised as errors. A failure here aborts the entire epoch turn, so anything a *spender* can trigger has to be survivable or it becomes a way to freeze everyone else's withdrawals:
+
+* **Already spent.** Its nullifier record exists from an earlier epoch.
+* **Aimed at the vault.** A spender picks their own destination, and nothing stops them naming the vault — but crediting the vault from itself is an unbalanced instruction the runtime rejects. The note is burned and nothing is paid; the loss stays with whoever chose the address.
+
+Both leave the denomination in the vault as surplus backing. The accounting errs toward over-collateralized, never under.
+
+Settling happens in two passes: every nullifier record is written first, and only then do lamports move. The runtime reconciles balances at each CPI boundary, so a direct transfer left sitting between two record creations is an unbalanced instruction even when the batch would have balanced out by its end. Without the split, a turn could settle exactly one payout — which would make every batch a batch of one, and the batching is the point.
 
 ## System flow
 
@@ -168,7 +195,7 @@ Both live in the program and share no state. Cycles already in flight finish on 
 |---|---|---|
 | `merkle::DEPTH` | 20 | 1,048,576 deposits per pool, ever |
 | `ROOT_HISTORY_CAP` | 32 | epochs a spend proof stays valid |
-| `PAYOUT_QUEUE_CAP` | 32 | spends between epoch turns |
+| `PAYOUT_QUEUE_CAP` | 32 | spends between epoch turns, and settlements per turn |
 | withdrawals | — | **unbounded** |
 
 Only the first is a real ceiling, and reaching it means the pool took a million deposits. The other two are keeper-liveness bounds: a full payout queue makes further spends wait for a settle, and a proof older than 32 epochs needs regenerating against a newer root — which the client can always do, since it holds the leaves.
