@@ -51,7 +51,8 @@ pub enum ShredrError {
     /// The signature was verified, but against a key that is not the configured
     /// KYT attestation authority.
     KytUnknownAuthority = 6018,
-    /// The attestation is bound to a different burner.
+    /// The attestation is bound to a different subject — burner, or note
+    /// commitment for a pool deposit.
     KytAttestationBurnerMismatch = 6019,
     /// The deposit is larger than the amount the relayer cleared.
     KytAttestationAmountExceeded = 6020,
@@ -59,6 +60,33 @@ pub enum ShredrError {
     KytAttestationExpired = 6021,
     /// The relayer screened the depositor and refused it.
     KytScreeningRejected = 6022,
+    /// The attestation cleared a different wallet than the one depositing.
+    /// Only checkable where the depositor signs — see `kyt`.
+    KytAttestationDepositorMismatch = 6035,
+    /// The requested denomination has no pool. See `constants::DENOMINATIONS`.
+    InvalidDenomination = 6023,
+    /// The vault and ledger passed together belong to different pools.
+    PoolMismatch = 6024,
+    /// No room for another commitment before the next epoch turn.
+    PoolPendingFull = 6025,
+    /// The pool has taken every deposit it can hold.
+    PoolCommitmentsFull = 6026,
+    /// No room for another payout until the keeper settles.
+    PoolPayoutQueueFull = 6027,
+    /// No commitment in the ledger matches this note.
+    PoolUnknownNote = 6028,
+    /// This note has already been spent.
+    PoolNoteAlreadySpent = 6029,
+    /// The ledger is delegated when it must not be, or the reverse.
+    PoolLedgerDelegationState = 6030,
+    /// The epoch floor has not elapsed yet.
+    PoolEpochTooSoon = 6031,
+    /// A destination account does not match the payout it was passed for.
+    PoolDestinationMismatch = 6032,
+    /// Paying this out would take more from the vault than was ever put in.
+    PoolInsufficientBacking = 6033,
+    /// The ledger's epoch does not match the vault's.
+    PoolEpochMismatch = 6034,
 }
 
 impl From<ShredrError> for ProgramError {
