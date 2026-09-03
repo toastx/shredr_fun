@@ -14,6 +14,21 @@
 //! cross-program invocations, so they are covered end to end — success paths and
 //! every rejection path.
 //!
+//! `InitializeAndDelegate` is additionally gated on a KYT attestation signed by
+//! the authority baked in at build time. Mollusk does not run the ed25519
+//! precompile, so the signature bytes here are dummies — what is asserted is
+//! everything the *program* checks about the precompile instruction, which is
+//! exactly the part a real transaction leaves to us.
+//!
+//! The default build falls back to `constants::KYT_AUTHORITY_PLACEHOLDER`, so
+//! the ELF and this test binary agree on an authority without either holding a
+//! key. Override both together if you want to test against a real one:
+//!
+//! ```sh
+//! SHREDR_KYT_AUTHORITY=<base58 pubkey> cargo build-sbf
+//! SHREDR_KYT_AUTHORITY=<base58 pubkey> cargo test
+//! ```
+//!
 //! `InitializeAndDelegate`, `CommitStealth`, `CommitAndUndelegateStealth` and
 //! `UndelegationCallback` all CPI into the MagicBlock delegation program and the
 //! ACL permission program. Those ELFs are not available to the harness, so only
@@ -1249,6 +1264,120 @@ fn withdraw_full_drain_leaves_account_closable() {
 }
 
 // ─────────────────────────────────────────────
+// KYT attestation fixtures
+//
+// The program never verifies a signature — the ed25519 precompile does, and
+// Mollusk does not run precompiles. So the signature below is 64 zero bytes and
+// nothing here depends on it. What these fixtures do exercise is the layout the
+// program parses: the offsets table, the instruction-index sentinels, and the
+// message the offsets point at.
+// ─────────────────────────────────────────────
+
+/// `Ed25519SigVerify111111111111111111111111111`.
+fn ed25519_program_id() -> Pubkey {
+    solana_sdk_ids::ed25519_program::ID
+}
+
+/// The KYT authority compiled into *this* build of the library. All-zero when
+/// `SHREDR_KYT_AUTHORITY` was unset, which is the fail-closed sentinel.
+fn kyt_authority() -> [u8; 32] {
+    *shredr_program::constants::KYT_ATTESTATION_AUTHORITY.as_array()
+}
+
+/// Far enough out that a test never races the clock.
+fn far_future() -> i64 {
+    i64::MAX / 2
+}
+
+/// Build the 90-byte attestation message the relayer signs.
+fn attestation_message(
+    verdict: u8,
+    depositor: &Pubkey,
+    burner: &Pubkey,
+    max_amount: u64,
+    expiry_unix: i64,
+) -> Vec<u8> {
+    let mut message = Vec::with_capacity(90);
+    message.extend_from_slice(b"SHREDRKY");
+    message.push(1); // version
+    message.push(verdict);
+    message.extend_from_slice(depositor.as_ref());
+    message.extend_from_slice(burner.as_ref());
+    message.extend_from_slice(&max_amount.to_le_bytes());
+    message.extend_from_slice(&expiry_unix.to_le_bytes());
+    assert_eq!(message.len(), 90);
+    message
+}
+
+/// Offsets for one signature, laid out the way `solana_sdk`'s own builder does:
+/// header, then pubkey, signature and message packed in that order.
+struct Ed25519Layout {
+    signature_ix_index: u16,
+    pubkey_ix_index: u16,
+    message_ix_index: u16,
+    signature_count: u8,
+    /// Overrides the declared message size; `None` uses the real length.
+    declared_message_size: Option<u16>,
+}
+
+impl Default for Ed25519Layout {
+    fn default() -> Self {
+        Self {
+            signature_ix_index: u16::MAX,
+            pubkey_ix_index: u16::MAX,
+            message_ix_index: u16::MAX,
+            signature_count: 1,
+            declared_message_size: None,
+        }
+    }
+}
+
+fn ed25519_ix_data(authority: &[u8; 32], message: &[u8], layout: Ed25519Layout) -> Vec<u8> {
+    const HEADER: u16 = 16;
+    let pubkey_offset = HEADER;
+    let signature_offset = pubkey_offset + 32;
+    let message_offset = signature_offset + 64;
+
+    let mut data = vec![layout.signature_count, 0];
+    for field in [
+        signature_offset,
+        layout.signature_ix_index,
+        pubkey_offset,
+        layout.pubkey_ix_index,
+        message_offset,
+        layout
+            .declared_message_size
+            .unwrap_or(message.len() as u16),
+        layout.message_ix_index,
+    ] {
+        data.extend_from_slice(&field.to_le_bytes());
+    }
+
+    data.extend_from_slice(authority);
+    data.extend_from_slice(&[0u8; 64]); // the precompile's job, not ours
+    data.extend_from_slice(message);
+    data
+}
+
+fn ed25519_ix(authority: &[u8; 32], message: &[u8]) -> Instruction {
+    Instruction::new_with_bytes(
+        ed25519_program_id(),
+        &ed25519_ix_data(authority, message, Ed25519Layout::default()),
+        vec![],
+    )
+}
+
+/// The instructions sysvar account the program introspects.
+///
+/// Only the ed25519 instruction is in here. A real transaction also carries the
+/// deposit instruction itself, but the program scans by program id rather than
+/// by position, so its presence changes nothing and threading it in would mean
+/// rebuilding this after every test mutates its metas.
+fn instructions_sysvar_account(instructions: &[Instruction]) -> (Pubkey, Account) {
+    mollusk_svm::instructions_sysvar::keyed_account(instructions.iter())
+}
+
+// ─────────────────────────────────────────────
 // InitializeAndDelegate — pre-CPI validation only
 // ─────────────────────────────────────────────
 
@@ -1260,6 +1389,21 @@ struct InitAccounts {
 }
 
 fn init_setup(stealth_override: Option<Pubkey>, stealth_lamports: u64) -> InitAccounts {
+    init_setup_with_attestation(stealth_override, stealth_lamports, |burner| {
+        vec![ed25519_ix(
+            &kyt_authority(),
+            &attestation_message(1, &Pubkey::new_unique(), burner, u64::MAX, far_future()),
+        )]
+    })
+}
+
+/// `init_setup`, but the caller decides what the instructions sysvar holds —
+/// that is the only lever the KYT gate reads.
+fn init_setup_with_attestation(
+    stealth_override: Option<Pubkey>,
+    stealth_lamports: u64,
+    attestation: impl Fn(&Pubkey) -> Vec<Instruction>,
+) -> InitAccounts {
     let relayer = Pubkey::new_unique();
     let burner = Pubkey::new_unique();
     let (derived, _) = derive_stealth_pda(&burner);
@@ -1272,6 +1416,8 @@ fn init_setup(stealth_override: Option<Pubkey>, stealth_lamports: u64) -> InitAc
     let delegation_metadata = Pubkey::new_unique();
     let (system_program_key, system_program_account) =
         mollusk_svm::program::keyed_account_for_system_program();
+    let (instructions_sysvar_key, instructions_sysvar_acct) =
+        instructions_sysvar_account(&attestation(&burner));
 
     let metas = vec![
         AccountMeta::new(relayer, true),
@@ -1283,6 +1429,7 @@ fn init_setup(stealth_override: Option<Pubkey>, stealth_lamports: u64) -> InitAc
         AccountMeta::new(delegation_record, false),
         AccountMeta::new(delegation_metadata, false),
         AccountMeta::new_readonly(system_program_key, false),
+        AccountMeta::new_readonly(instructions_sysvar_key, false),
     ];
 
     let accounts = vec![
@@ -1304,6 +1451,7 @@ fn init_setup(stealth_override: Option<Pubkey>, stealth_lamports: u64) -> InitAc
         (delegation_record, system_account(0)),
         (delegation_metadata, system_account(0)),
         (system_program_key, system_program_account),
+        (instructions_sysvar_key, instructions_sysvar_acct),
     ];
 
     InitAccounts {
@@ -1407,9 +1555,95 @@ fn initialize_credits_prefunded_lamports() {
     assert!(
         !matches!(
             result.raw_result,
-            Err(InstructionError::Custom(6000..=6014))
+            Err(InstructionError::Custom(6000..=6022))
         ),
         "a pre-funded PDA must still initialize; got {:?}",
+        result.raw_result
+    );
+}
+
+/// Every KYT rejection code. The tests below assert only that a deposit was
+/// refused *by the gate*: which reason surfaces depends on the compiled-in
+/// authority, and the reasons themselves are pinned by the unit tests at the
+/// bottom of this file.
+const KYT_ERRORS: std::ops::RangeInclusive<u32> = 6015..=6022;
+
+#[test]
+fn initialize_refuses_a_deposit_with_no_attestation() {
+    let mollusk = mollusk();
+    let setup = init_setup_with_attestation(None, 0, |_| vec![]);
+
+    let result = mollusk.process_instruction(
+        &Instruction::new_with_bytes(
+            program_id(),
+            &init_ix_data(LAMPORTS_PER_SOL),
+            setup.metas.clone(),
+        ),
+        &setup.accounts,
+    );
+
+    assert!(
+        matches!(result.raw_result, Err(InstructionError::Custom(code)) if KYT_ERRORS.contains(&code)),
+        "an unattested deposit must be refused; got {:?}",
+        result.raw_result
+    );
+}
+
+#[test]
+fn initialize_refuses_an_attestation_for_another_burner() {
+    let mollusk = mollusk();
+    let stranger = Pubkey::new_unique();
+    let setup = init_setup_with_attestation(None, 0, move |_| {
+        vec![ed25519_ix(
+            &kyt_authority(),
+            &attestation_message(1, &Pubkey::new_unique(), &stranger, u64::MAX, far_future()),
+        )]
+    });
+
+    let result = mollusk.process_instruction(
+        &Instruction::new_with_bytes(
+            program_id(),
+            &init_ix_data(LAMPORTS_PER_SOL),
+            setup.metas.clone(),
+        ),
+        &setup.accounts,
+    );
+
+    assert!(
+        matches!(result.raw_result, Err(InstructionError::Custom(code)) if KYT_ERRORS.contains(&code)),
+        "an attestation bound to another burner must not clear this deposit; got {:?}",
+        result.raw_result
+    );
+}
+
+#[test]
+fn initialize_ignores_a_non_ed25519_instruction_in_the_sysvar() {
+    let mollusk = mollusk();
+
+    // Same bytes, wrong program: the precompile never ran, so nothing verified
+    // this signature and the scan must skip it rather than read it.
+    let setup = init_setup_with_attestation(None, 0, |burner| {
+        let message =
+            attestation_message(1, &Pubkey::new_unique(), burner, u64::MAX, far_future());
+        vec![Instruction::new_with_bytes(
+            Pubkey::new_unique(),
+            &ed25519_ix_data(&kyt_authority(), &message, Ed25519Layout::default()),
+            vec![],
+        )]
+    });
+
+    let result = mollusk.process_instruction(
+        &Instruction::new_with_bytes(
+            program_id(),
+            &init_ix_data(LAMPORTS_PER_SOL),
+            setup.metas.clone(),
+        ),
+        &setup.accounts,
+    );
+
+    assert!(
+        matches!(result.raw_result, Err(InstructionError::Custom(code)) if KYT_ERRORS.contains(&code)),
+        "an attestation not verified by the precompile must be ignored; got {:?}",
         result.raw_result
     );
 }
@@ -1958,4 +2192,207 @@ fn undelegation_callback_requires_buffer_signature() {
         ],
         &[Check::err(shredr_err(ShredrError::MissingSigner))],
     );
+}
+
+// ─────────────────────────────────────────────
+// KYT attestation parsing and policy
+//
+// These call the library directly rather than through Mollusk: the compiled-in
+// authority is irrelevant here, so every branch runs on a plain `cargo test`.
+// ─────────────────────────────────────────────
+
+use shredr_program::kyt::{attested_message, check_attestation};
+
+fn shredr_code(error: ShredrError) -> ProgramError {
+    ProgramError::Custom(error as u32)
+}
+
+/// A well-formed blob and the message inside it, for the authority given.
+fn attestation_fixture(burner: &Pubkey) -> ([u8; 32], Vec<u8>, Vec<u8>) {
+    let authority = Pubkey::new_unique().to_bytes();
+    let message = attestation_message(1, &Pubkey::new_unique(), burner, LAMPORTS_PER_SOL, far_future());
+    let blob = ed25519_ix_data(&authority, &message, Ed25519Layout::default());
+    (authority, message, blob)
+}
+
+#[test]
+fn attested_message_returns_the_signed_bytes() {
+    let burner = Pubkey::new_unique();
+    let (authority, message, blob) = attestation_fixture(&burner);
+
+    assert_eq!(attested_message(&blob, &authority).unwrap(), &message[..]);
+}
+
+#[test]
+fn attested_message_rejects_another_authority() {
+    let burner = Pubkey::new_unique();
+    let (_, _, blob) = attestation_fixture(&burner);
+
+    assert_eq!(
+        attested_message(&blob, &Pubkey::new_unique().to_bytes()),
+        Err(shredr_code(ShredrError::KytUnknownAuthority))
+    );
+}
+
+#[test]
+fn attested_message_rejects_offsets_into_another_instruction() {
+    // The precompile can be told to read its pubkey, signature or message from a
+    // different instruction in the transaction. Then the bytes sitting in this
+    // blob are not the bytes it verified, and reading them back would be a
+    // forgery with extra steps.
+    let burner = Pubkey::new_unique();
+    let authority = Pubkey::new_unique().to_bytes();
+    let message =
+        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+
+    for layout in [
+        Ed25519Layout {
+            message_ix_index: 0,
+            ..Default::default()
+        },
+        Ed25519Layout {
+            pubkey_ix_index: 0,
+            ..Default::default()
+        },
+        Ed25519Layout {
+            signature_ix_index: 0,
+            ..Default::default()
+        },
+    ] {
+        let blob = ed25519_ix_data(&authority, &message, layout);
+        assert_eq!(
+            attested_message(&blob, &authority),
+            Err(shredr_code(ShredrError::KytAttestationMalformed))
+        );
+    }
+}
+
+#[test]
+fn attested_message_rejects_extra_signatures() {
+    // Only the first offsets entry is read, so a blob claiming more would carry
+    // signatures nobody looked at.
+    let burner = Pubkey::new_unique();
+    let authority = Pubkey::new_unique().to_bytes();
+    let message =
+        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+    let blob = ed25519_ix_data(
+        &authority,
+        &message,
+        Ed25519Layout {
+            signature_count: 2,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        attested_message(&blob, &authority),
+        Err(shredr_code(ShredrError::KytAttestationMalformed))
+    );
+}
+
+#[test]
+fn attested_message_rejects_offsets_past_the_end() {
+    let burner = Pubkey::new_unique();
+    let authority = Pubkey::new_unique().to_bytes();
+    let message =
+        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+
+    // Declares a 90-byte message but carries none of it.
+    let mut truncated = ed25519_ix_data(&authority, &message, Ed25519Layout::default());
+    truncated.truncate(112);
+    assert_eq!(
+        attested_message(&truncated, &authority),
+        Err(shredr_code(ShredrError::KytAttestationMalformed))
+    );
+
+    // A size the program does not accept, whatever the blob holds.
+    let wrong_size = ed25519_ix_data(
+        &authority,
+        &message,
+        Ed25519Layout {
+            declared_message_size: Some(64),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        attested_message(&wrong_size, &authority),
+        Err(shredr_code(ShredrError::KytAttestationMalformed))
+    );
+
+    assert_eq!(
+        attested_message(&[], &authority),
+        Err(shredr_code(ShredrError::KytAttestationMalformed))
+    );
+}
+
+#[test]
+fn check_attestation_clears_a_matching_deposit() {
+    let burner = Pubkey::new_unique();
+    let message =
+        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+
+    assert_eq!(
+        check_attestation(&message, &burner.to_bytes(), LAMPORTS_PER_SOL, 0),
+        Ok(())
+    );
+}
+
+#[test]
+fn check_attestation_enforces_the_binding_and_the_ceiling() {
+    let burner = Pubkey::new_unique();
+    let expiry = 1_800_000_000;
+    let message =
+        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, expiry);
+
+    assert_eq!(
+        check_attestation(&message, &Pubkey::new_unique().to_bytes(), 1, 0),
+        Err(shredr_code(ShredrError::KytAttestationBurnerMismatch))
+    );
+    assert_eq!(
+        check_attestation(&message, &burner.to_bytes(), LAMPORTS_PER_SOL + 1, 0),
+        Err(shredr_code(ShredrError::KytAttestationAmountExceeded))
+    );
+    assert_eq!(
+        check_attestation(&message, &burner.to_bytes(), 1, expiry + 1),
+        Err(shredr_code(ShredrError::KytAttestationExpired))
+    );
+    // Inclusive: an attestation is good through its expiry second.
+    assert_eq!(check_attestation(&message, &burner.to_bytes(), 1, expiry), Ok(()));
+}
+
+#[test]
+fn check_attestation_refuses_a_screened_out_depositor() {
+    let burner = Pubkey::new_unique();
+    let message =
+        attestation_message(0, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+
+    assert_eq!(
+        check_attestation(&message, &burner.to_bytes(), 1, 0),
+        Err(shredr_code(ShredrError::KytScreeningRejected))
+    );
+}
+
+#[test]
+fn check_attestation_rejects_a_foreign_envelope() {
+    let burner = Pubkey::new_unique();
+    let good =
+        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+
+    // Magic: the authority signs other things, and none of them are deposits.
+    let mut wrong_magic = good.clone();
+    wrong_magic[..8].copy_from_slice(b"NOTSHRED");
+
+    // Version: a future layout means these offsets read different fields.
+    let mut wrong_version = good.clone();
+    wrong_version[8] = 2;
+
+    let mut short = good.clone();
+    short.truncate(89);
+
+    for message in [wrong_magic, wrong_version, short] {
+        assert_eq!(
+            check_attestation(&message, &burner.to_bytes(), 1, 0),
+            Err(shredr_code(ShredrError::KytAttestationMalformed))
+        );
+    }
 }

@@ -259,12 +259,8 @@ pub fn verify_deposit_attestation(
             continue;
         }
 
-        match check_candidate(
-            instruction.get_instruction_data(),
-            &authority,
-            burner,
-            deposit_amount,
-            now_unix,
+        match attested_message(instruction.get_instruction_data(), &authority).and_then(
+            |message| check_attestation(message, burner.as_array(), deposit_amount, now_unix),
         ) {
             Ok(()) => return Ok(()),
             Err(err) => reason = Some(err),
@@ -274,21 +270,24 @@ pub fn verify_deposit_attestation(
     Err(reason.unwrap_or_else(|| ShredrError::KytAttestationMissing.into()))
 }
 
-/// Every check one ed25519 instruction has to pass to clear this deposit.
-fn check_candidate(
-    ix_data: &[u8],
-    authority: &[u8; PUBKEY_LEN],
-    burner: &Address,
+/// Everything an attested message has to say for this deposit to be cleared.
+///
+/// Split out from [`verify_deposit_attestation`] and taking plain bytes, so the
+/// policy — binding, ceiling, expiry, verdict — is exercisable without an
+/// `AccountView` or a compiled-in authority.
+pub fn check_attestation(
+    message: &[u8],
+    burner: &[u8; PUBKEY_LEN],
     deposit_amount: u64,
     now_unix: i64,
 ) -> Result<(), ProgramError> {
-    let attestation = Attestation::parse(attested_message(ix_data, authority)?)?;
+    let attestation = Attestation::parse(message)?;
 
     if attestation.verdict() != VERDICT_ALLOW {
         return Err(ShredrError::KytScreeningRejected.into());
     }
 
-    if attestation.burner() != burner.as_ref() {
+    if attestation.burner() != burner.as_slice() {
         return Err(ShredrError::KytAttestationBurnerMismatch.into());
     }
 

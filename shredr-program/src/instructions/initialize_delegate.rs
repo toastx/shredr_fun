@@ -8,10 +8,18 @@
 //!
 //! Both PDAs in a cycle must be delegated to the *same* validator or the transfer
 //! between them is not executable — see `constants::tee_validator`.
+//!
+//! This is the only instruction that puts value into the pool from the base
+//! layer, so it is where compliance is enforced: the transaction must carry an
+//! `Ed25519SigVerify` instruction covering a KYT attestation from the relayer,
+//! bound to this burner. Both roles are gated, not just the funded one — the
+//! program deliberately does not distinguish them (see `lib.rs`), and a gate
+//! that applied to only one of the two would tell an observer which is which.
 
 use crate::constants::{seeds, tee_validator, PROGRAM_ADDRESS};
 use crate::errors::ShredrError;
 use crate::helpers::{get_stealth_mut, verify_stealth_pda, write_stealth_discriminator};
+use crate::kyt::verify_deposit_attestation;
 use crate::state::{role, STEALTH_ACCOUNT_SIZE};
 
 use crate::Address;
@@ -41,6 +49,8 @@ pub struct InitializeAndDelegate<'a> {
     pub delegation_record: &'a AccountView,
     pub delegation_metadata: &'a AccountView,
     pub system_program: &'a AccountView,
+    /// Instructions sysvar, read to find the relayer's KYT attestation.
+    pub instructions_sysvar: &'a AccountView,
     pub deposit_amount: u64,
     pub role: u8,
     /// Opaque bytes stored verbatim. `None` from a client that predates the
@@ -60,6 +70,7 @@ impl<'a> InitializeAndDelegate<'a> {
             delegation_record,
             delegation_metadata,
             system_program,
+            instructions_sysvar,
             deposit_amount,
             role,
             receipt_commitment,
@@ -69,6 +80,21 @@ impl<'a> InitializeAndDelegate<'a> {
         let burner_key = burner.address().clone();
 
         let bump = verify_stealth_pda(stealth_account, &burner_key)?;
+
+        // Read once and reused for the attestation's expiry and the deposit
+        // timestamp below, so both refer to the same instant.
+        let clock =
+            Clock::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
+
+        // Before anything moves. The rest of this instruction creates accounts and
+        // transfers lamports, and a compliance gate that ran after those would be
+        // a refund path, not a gate.
+        verify_deposit_attestation(
+            instructions_sysvar,
+            &burner_key,
+            deposit_amount,
+            clock.unix_timestamp,
+        )?;
 
         // Delegated PDAs are owned by the delegation program, so `get_stealth_mut`
         // would report the misleading `InvalidProgramOwner`.
@@ -181,9 +207,6 @@ impl<'a> InitializeAndDelegate<'a> {
 
         let stealth_state = get_stealth_mut(stealth_account)?;
 
-        let clock =
-            Clock::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
-
         // Accumulate: a reused PDA may still hold funds from a partial withdraw.
         let previous_deposited = stealth_state.deposited_amount;
 
@@ -276,6 +299,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
         let delegation_record = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let delegation_metadata = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let system_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let instructions_sysvar = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
 
         if !relayer.is_signer() {
             return Err(ShredrError::MissingSigner.into());
@@ -340,6 +364,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             delegation_record,
             delegation_metadata,
             system_program,
+            instructions_sysvar,
             deposit_amount,
             role,
             receipt_commitment,

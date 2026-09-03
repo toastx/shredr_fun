@@ -20,6 +20,8 @@
 * [The shred lifecycle](concepts/shred-lifecycle.md)
 * [Ephemeral rollups](concepts/ephemeral-rollups.md)
 * [The Kora relayer](concepts/relayer.md)
+* [KYT gating](concepts/kyt-gating.md)
+* [RPC operational security](concepts/rpc-opsec.md)
 * [State sync and recovery](concepts/state-sync-and-recovery.md)
 
 ## Frontend
