@@ -198,6 +198,76 @@ Same body shape.
 
 **`200 OK`** — `{ "message": "Addresses removed successfully" }`
 
+## KYT screening
+
+Screens a depositing wallet and returns a signed attestation the client turns
+into an `Ed25519SigVerify` instruction. Without one, the program refuses the
+deposit — see [KYT gating](../concepts/kyt-gating.md).
+
+{% hint style="warning" %}
+The compliance provider call is a **stub**. It clears everything except
+`KYT_DENYLIST`. Everything around it — the message layout, the binding, the
+signing, the expiry — is the production path, because that is what the on-chain
+program parses byte by byte.
+{% endhint %}
+
+### Screen a depositor
+
+```
+POST /api/kyt/screen
+Content-Type: application/json
+```
+
+```json
+{
+  "depositor": "base58 wallet being screened",
+  "burner": "base58 one-time burner the deposit lands on",
+  "maxAmount": "5000000000"
+}
+```
+
+`maxAmount` is a **string** — JSON numbers cannot carry a `u64` without loss.
+
+**`200 OK`**
+
+```json
+{
+  "verdict": 1,
+  "authority": "base58 pubkey that signed the message",
+  "message": "base64, exactly 90 bytes",
+  "signature": "base64, exactly 64 bytes",
+  "expiresAt": 1735689900
+}
+```
+
+A **refusal is also `200`**, with `"verdict": 0` and a `reason`. That is not an
+oversight: "we screened you and said no" is final, "the relayer is unreachable"
+is worth retrying, and a client that could not tell them apart would either
+retry into a wall or give up on a transient outage. Only the second is an error
+status.
+
+`burner` and `maxAmount` are inside the signed message, not just the request. An
+attestation that said only "this wallet is clean" would be a bearer token good
+for every deposit that wallet ever makes.
+
+**`503 Service Unavailable`** when `KYT_AUTHORITY_KEY` is unset.
+
+```bash
+curl -X POST http://localhost:8000/api/kyt/screen   -H 'Content-Type: application/json'   -d '{"depositor":"<wallet>","burner":"<burner>","maxAmount":"1000000000"}'
+```
+
+### What is deliberately not logged
+
+Nothing about a screening request reaches the application log. A line pairing a
+depositor with a burner is exactly the correlation the privacy design exists to
+prevent, and an access log with a source IP beside it is worse.
+
+The audit trail this service is meant to produce — `(depositor, burner, verdict,
+provider response, signature)` — is a compliance requirement and a
+deanonymisation set at the same time. It belongs in its own store, with its own
+access control, on a host that never sees an IP address. See
+[RPC operational security](../concepts/rpc-opsec.md).
+
 ## Health
 
 ```
@@ -225,6 +295,7 @@ Blob endpoints return a structured error via `AppError`:
 | `NotFound` | 404 | `Blob not found` |
 | `BlobTooLarge` | 400 | `Blob too large: N bytes (max M bytes)` |
 | `Internal` | 500 | The supplied message |
+| `KytUnavailable` | 503 | `KYT screening unavailable: <detail>` |
 
 Database errors are deliberately opaque to the client — the real error goes to the logs, not the response.
 
@@ -238,6 +309,7 @@ Keyed by client IP (`X-Forwarded-For` last entry → `X-Real-IP` → socket peer
 |---|---|
 | `POST /api/blobs`, `DELETE /api/blobs/{id}` | Burst 5, refill every 10s |
 | `GET /api/blobs`, `GET /api/blobs/{id}` | 30/sec, burst 60 |
+| `POST /api/kyt/screen` | Burst 5, refill every 10s |
 | `/webhook/*` | Burst 5, refill every 12s |
 
 Exceeding a limit returns `429 Too Many Requests`.
@@ -253,6 +325,15 @@ Exceeding a limit returns `429 Too Many Requests`.
 | `deleteBlob(id)` | `DELETE /api/blobs/{id}` | Returns `false` |
 
 → [ApiClient and WebSocketClient](../frontend/api-and-websocket.md)
+
+`KytService` uses the screening endpoint:
+
+| Method | Call | Failure behaviour |
+|---|---|---|
+| `screen(...)` | `POST /api/kyt/screen` | Throws `KytUnavailableError` |
+| `attest(...)` | Same, then builds the ed25519 instruction | Throws `KytRefusedError` on `verdict: 0` |
+
+→ [KYT gating](../concepts/kyt-gating.md)
 
 ## Next
 

@@ -22,6 +22,9 @@ pub enum AppError {
     
     #[error("Internal server error: {0}")]
     Internal(String),
+
+    #[error("KYT screening unavailable: {0}")]
+    KytUnavailable(String),
 }
 
 #[derive(Serialize)]
@@ -40,6 +43,9 @@ impl IntoResponse for AppError {
             AppError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             AppError::BlobTooLarge { .. } => (StatusCode::BAD_REQUEST, self.to_string()),
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            // 503 rather than 500: the client retries this and gives up on a
+            // refusal, so "we cannot sign right now" must not look like "no".
+            AppError::KytUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
         };
 
         let body = Json(ErrorResponse {
