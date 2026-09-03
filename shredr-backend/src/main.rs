@@ -1,5 +1,6 @@
 mod error;
 mod db;
+mod kyt;
 mod webhook;
 // mod websocket;
 
@@ -18,6 +19,7 @@ use tower_governor::{
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use db::{db_routes, AppState, DbHandler};
+use kyt::{kyt_routes, KytState};
 use webhook::{webhook_routes, WebhookState};
 // use websocket::{websocket_routes, WebSocketMessage, WebSocketState};
 
@@ -122,6 +124,10 @@ async fn main() {
     // let ws_state = Arc::new(WebSocketState { clients_count: Arc::new(Mutex::new(0)), rx });
     let helius = Arc::new(Helius::new(&helius_api_key, Cluster::MainnetBeta).expect("Helius init failed"));
     let webhook_state = Arc::new(WebhookState { helius });
+    // Reads KYT_AUTHORITY_KEY; without it the endpoint 503s per request instead
+    // of failing the boot, so a missing compliance key is visible in a way a
+    // dead service three layers down is not.
+    let kyt_state = Arc::new(KytState::from_env());
 
     // Rate limits
     let general_config = Arc::new(
@@ -133,6 +139,16 @@ async fn main() {
             .unwrap(),
     );
     let db_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .period(Duration::from_secs(10))
+            .burst_size(5)
+            .key_extractor(ForwardedIpKeyExtractor::default())
+            .finish()
+            .unwrap(),
+    );
+    // Tighter than the general limit: this endpoint is a signing oracle for the
+    // compliance authority, and one attestation per deposit is all anyone needs.
+    let kyt_config = Arc::new(
         GovernorConfigBuilder::default()
             .period(Duration::from_secs(10))
             .burst_size(5)
@@ -171,6 +187,7 @@ async fn main() {
     let router = Router::new()
         .merge(db_routes::write_router(app_state.clone()).layer(GovernorLayer::new(db_config)))
         .merge(db_routes::read_router(app_state).layer(GovernorLayer::new(general_config)))
+        .merge(kyt_routes::router(kyt_state).layer(GovernorLayer::new(kyt_config)))
         .merge(webhook_routes::router(webhook_state).layer(GovernorLayer::new(webhook_config)))
         // .merge(websocket_routes::router(ws_state))
         .route("/health", get(|| async { "OK" }))
