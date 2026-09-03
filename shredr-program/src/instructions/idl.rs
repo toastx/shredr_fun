@@ -56,6 +56,57 @@ pub enum StealthInstruction {
     )]
     InitializeAndDelegate { deposit_amount: u64, role: u8 },
 
+    /// Create the vault and ledger for one shielded-pool denomination
+    #[account(0, signer, writable, name = "payer", desc = "Pays rent for both accounts")]
+    #[account(1, writable, name = "vault", desc = "Pool vault PDA, holds the lamports")]
+    #[account(2, writable, name = "ledger", desc = "Pool ledger PDA, holds the note set")]
+    #[account(3, name = "system_program", desc = "System Program")]
+    InitializePool { denomination: u64 },
+
+    /// Deposit one denomination into the shielded pool under a note commitment
+    #[account(
+        0,
+        signer,
+        writable,
+        name = "depositor",
+        desc = "Wallet funding the deposit; screened by the KYT attestation"
+    )]
+    #[account(1, writable, name = "vault", desc = "Pool vault PDA")]
+    #[account(
+        2,
+        name = "instructions_sysvar",
+        desc = "Instructions sysvar, read to find the relayer's KYT attestation"
+    )]
+    #[account(3, name = "system_program", desc = "System Program")]
+    PoolDeposit { commitment: [u8; 32] },
+
+    /// Spend a note and queue its payout. Rollup only — carries the note secret
+    #[account(0, writable, name = "ledger", desc = "Delegated pool ledger PDA")]
+    PoolSpend { secret: [u8; 32], destination: [u8; 32] },
+
+    /// Pay the payout queue out and fold pending commitments into the ledger
+    #[account(0, signer, writable, name = "payer", desc = "Pays the transaction")]
+    #[account(1, writable, name = "vault", desc = "Pool vault PDA")]
+    #[account(2, writable, name = "ledger", desc = "Undelegated pool ledger PDA")]
+    #[account(
+        3,
+        writable,
+        optional,
+        name = "destinations",
+        desc = "One writable account per payout to settle, in queue order"
+    )]
+    AdvanceEpoch,
+
+    /// Delegate the pool ledger to the MagicBlock TEE validator
+    #[account(0, signer, writable, name = "payer", desc = "Pays for the delegation")]
+    #[account(1, writable, name = "ledger", desc = "Pool ledger PDA")]
+    #[account(2, name = "owner_program", desc = "This program's address")]
+    #[account(3, writable, name = "delegation_buffer", desc = "MagicBlock delegation buffer")]
+    #[account(4, writable, name = "delegation_record", desc = "MagicBlock delegation record")]
+    #[account(5, writable, name = "delegation_metadata", desc = "MagicBlock delegation metadata")]
+    #[account(6, name = "system_program", desc = "System Program")]
+    DelegatePoolLedger,
+
     /// Private transfer between two stealth PDAs inside the MagicBlock rollup
     #[account(
         0,

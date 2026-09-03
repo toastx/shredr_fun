@@ -29,6 +29,23 @@
 //! 6. **CloseStealthAccount** — reclaim a spent PDA's rent. Both PDAs end here.
 //! 7. **UndelegationCallback** — invoked by the delegation program, not by users.
 //!
+//! ## The shielded pool
+//!
+//! The instructions above are the original path: value hops between two stealth
+//! PDAs inside the rollup, and the anonymity set is whatever other cycles happen
+//! to overlap it in time.
+//!
+//! `instructions::pool` is the successor. One vault per denomination holds every
+//! lamport, deposits publish a commitment, spends publish a nullifier, and the
+//! anonymity set is every note in the pool. The two paths coexist: nothing here
+//! is shared state, so cycles already in flight finish on the old one.
+//!
+//! 8. **InitializePool** — create a denomination's vault and ledger.
+//! 9. **PoolDeposit** — lamports in, commitment published. Base layer.
+//! 10. **PoolSpend** — note spent, payout queued. Rollup only.
+//! 11. **AdvanceEpoch** — pay the queue out, fold commitments in. Base layer.
+//! 12. **DelegatePoolLedger** — hand the ledger to the rollup.
+//!
 //! ### Security model
 //!
 //! - The burner is a one-time key derived client-side from `mainKey + nonce`.
@@ -50,6 +67,7 @@ pub mod errors;
 pub mod helpers;
 pub mod instructions;
 pub mod kyt;
+pub mod note;
 pub mod state;
 
 use crate::instructions::close::CloseStealthAccount;
@@ -57,6 +75,9 @@ use crate::instructions::commit_undelegate::{
     CommitAndUndelegateStealth, CommitStealth, UndelegationCallback,
 };
 use crate::instructions::initialize_delegate::InitializeAndDelegate;
+use crate::instructions::pool::{
+    AdvanceEpoch, DelegatePoolLedger, InitializePool, PoolDeposit, PoolSpend,
+};
 use crate::instructions::private_transfer::PrivateTransfer;
 use crate::instructions::withdraw::Withdraw;
 
@@ -70,6 +91,11 @@ enum InstructionDiscriminator {
     CommitAndUndelegateStealth,
     Withdraw,
     CloseStealthAccount,
+    InitializePool,
+    PoolDeposit,
+    PoolSpend,
+    AdvanceEpoch,
+    DelegatePoolLedger,
     UndelegationCallback,
 }
 
@@ -80,6 +106,11 @@ impl InstructionDiscriminator {
     const COMMIT_AND_UNDELEGATE_STEALTH: u8 = 3;
     const WITHDRAW: u8 = 4;
     const CLOSE_STEALTH_ACCOUNT: u8 = 5;
+    const INITIALIZE_POOL: u8 = 6;
+    const POOL_DEPOSIT: u8 = 7;
+    const POOL_SPEND: u8 = 8;
+    const ADVANCE_EPOCH: u8 = 9;
+    const DELEGATE_POOL_LEDGER: u8 = 10;
     // Undelegation callback called by the delegation program
     const UNDELEGATION_CALLBACK: u8 = 0xFF;
 
@@ -91,6 +122,11 @@ impl InstructionDiscriminator {
             Self::COMMIT_AND_UNDELEGATE_STEALTH => Ok(Self::CommitAndUndelegateStealth),
             Self::WITHDRAW => Ok(Self::Withdraw),
             Self::CLOSE_STEALTH_ACCOUNT => Ok(Self::CloseStealthAccount),
+            Self::INITIALIZE_POOL => Ok(Self::InitializePool),
+            Self::POOL_DEPOSIT => Ok(Self::PoolDeposit),
+            Self::POOL_SPEND => Ok(Self::PoolSpend),
+            Self::ADVANCE_EPOCH => Ok(Self::AdvanceEpoch),
+            Self::DELEGATE_POOL_LEDGER => Ok(Self::DelegatePoolLedger),
             Self::UNDELEGATION_CALLBACK => Ok(Self::UndelegationCallback),
             _ => Err(ProgramError::InvalidInstructionData),
         }
@@ -127,6 +163,17 @@ fn process_instruction(
         InstructionDiscriminator::CloseStealthAccount => {
             CloseStealthAccount::try_from((accounts, data))?.process()
         }
+        InstructionDiscriminator::InitializePool => {
+            InitializePool::try_from((accounts, data))?.process()
+        }
+        InstructionDiscriminator::PoolDeposit => PoolDeposit::try_from((accounts, data))?.process(),
+        InstructionDiscriminator::PoolSpend => PoolSpend::try_from((accounts, data))?.process(),
+        InstructionDiscriminator::AdvanceEpoch => {
+            AdvanceEpoch::try_from((accounts, data))?.process()
+        }
+        InstructionDiscriminator::DelegatePoolLedger => {
+            DelegatePoolLedger::try_from((accounts, data))?.process()
+        }
         InstructionDiscriminator::UndelegationCallback => {
             UndelegationCallback::try_from((accounts, data))?.process(program_id)
         }
@@ -155,6 +202,21 @@ fn log_instruction(instruction: InstructionDiscriminator) {
             }
             InstructionDiscriminator::CloseStealthAccount => {
                 pinocchio_log::log!("CloseStealthAccount");
+            }
+            InstructionDiscriminator::InitializePool => {
+                pinocchio_log::log!("InitializePool");
+            }
+            InstructionDiscriminator::PoolDeposit => {
+                pinocchio_log::log!("PoolDeposit");
+            }
+            InstructionDiscriminator::PoolSpend => {
+                pinocchio_log::log!("PoolSpend");
+            }
+            InstructionDiscriminator::AdvanceEpoch => {
+                pinocchio_log::log!("AdvanceEpoch");
+            }
+            InstructionDiscriminator::DelegatePoolLedger => {
+                pinocchio_log::log!("DelegatePoolLedger");
             }
             InstructionDiscriminator::UndelegationCallback => {
                 pinocchio_log::log!("UndelegationCallback");
