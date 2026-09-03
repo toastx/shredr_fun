@@ -281,6 +281,22 @@ export const MAGIC_CONTEXT = "MagicContext1111111111111111111111111111111";
  *  PDA under this same address. */
 export const PERMISSION_PROGRAM_ID = "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1";
 
+// ============ KYT SCREENING ============
+
+/**
+ * Compliance relayer that screens depositors and signs deposit attestations.
+ *
+ * Separate from the Kora relayer on purpose: Kora pays fees and can broadcast,
+ * this one only signs 90-byte messages. Keeping them apart keeps a compromised
+ * screening service to "can clear deposits it should not have" rather than
+ * "can move money".
+ *
+ * Defaults to the main backend, which is where the placeholder lives.
+ *
+ * env: VITE_KYT_API_URL
+ */
+export const KYT_API_URL = env("VITE_KYT_API_URL") || API_BASE_URL;
+
 // ============ SHREDR DENOMINATIONS ============
 
 /** Allowed normalized denominations (SOL) for amount-correlation resistance. */

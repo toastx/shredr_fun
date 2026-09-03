@@ -35,11 +35,13 @@ import {
 import { resolveAnchor } from "./anchor";
 import { apiClient } from "./ApiClient";
 import { koraRelayer } from "./KoraRelayer";
+import { kytService } from "./KytService";
 import {
   Connection,
   Keypair,
   LAMPORTS_PER_SOL,
   PublicKey,
+  type TransactionInstruction,
 } from "@solana/web3.js";
 import {
   HELIUS_RPC_URL,
@@ -535,10 +537,14 @@ export class ShredrClient {
    *   - **Kora** as relayer + fee payer (server-side)
    *   - The **burner keypair** (we have it client-side), which authorizes
    *     moving its balance into the PDA
+   *   - The **compliance relayer**, over an off-chain attestation that this
+   *     depositor was screened. The program refuses the deposit without it.
    *
    * @param burner        Burner keypair owning the stealth PDA (defaults to current)
    * @param depositAmount Lamports to sweep; defaults to the burner's full balance.
    *                      Pass `0n` to create an empty delegated PDA.
+   * @throws KytRefusedError if screening refuses the depositor — nothing is
+   *         broadcast, so a refusal costs the caller nothing.
    * @returns Signature of the broadcast transaction
    */
   async initializeAndDelegate(
@@ -581,14 +587,48 @@ export class ShredrClient {
       STEALTH_ROLE[resolvedRole],
     );
 
+    // Screening runs before the write-ahead note below, not after: a refusal
+    // means nothing was broadcast and nothing should be recorded as pending.
+    // Both legs are screened — the program gates both, and a client that only
+    // attested the funded one would be telling an observer which is which.
+    const attestation = await this.attestDeposit(burnerKp.publicKey, deposit);
+
     // Write-ahead: record the note *before* broadcasting. A crash between send
     // and persist is the one window that strands funds with nothing pointing
     // at them, so the record must always land first.
     await this.recordNote(b, pda, resolvedRole, Number(deposit));
 
-    const signature = await koraRelayer.signAndSend(connection, [ix], [burnerKp]);
+    const signature = await koraRelayer.signAndSend(
+      connection,
+      [attestation, ix],
+      [burnerKp],
+    );
     await utxoService.setState(pda.toBase58(), "delegated", Number(deposit));
     return signature;
+  }
+
+  /**
+   * Screen the connected wallet for a deposit into `burner`, and return the
+   * `Ed25519SigVerify` instruction to prepend.
+   *
+   * The depositor is the wallet this client was initialised from. It never
+   * appears in the transaction — the deposit arrives from a one-time burner —
+   * so the only record connecting the two is the relayer's, which is the point:
+   * provable to an auditor holding those logs, invisible to a chain observer.
+   */
+  private async attestDeposit(
+    burner: PublicKey,
+    depositAmount: bigint,
+  ): Promise<TransactionInstruction> {
+    if (!this._walletPubkey) {
+      throw new Error("Client is not initialised — no depositor to screen");
+    }
+
+    return kytService.attest(
+      new PublicKey(this._walletPubkey),
+      burner,
+      depositAmount,
+    );
   }
 
   /** Persist a note for a burner/PDA pair, tolerating an uninitialised tree. */

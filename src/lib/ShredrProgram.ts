@@ -20,7 +20,11 @@
  *   0xFF - UndelegationCallback: called by the delegation program (not user-invoked)
  */
 
-import { PublicKey, TransactionInstruction } from "@solana/web3.js";
+import {
+  PublicKey,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+  TransactionInstruction,
+} from "@solana/web3.js";
 import {
   address,
   createNoopSigner,
@@ -261,10 +265,20 @@ export function createInitializeAndDelegateInstruction(
   // the Codama client for it would buy nothing.
   instruction.data = Buffer.concat([instruction.data, Buffer.from(commitment)]);
 
+  // Account 9: the instructions sysvar, which the program introspects to find
+  // the relayer's KYT attestation. Appended rather than generated, for the same
+  // reason as the commitment above. It must stay at index 9 — the program reads
+  // accounts positionally — so nothing may be inserted before it.
+  instruction.keys.push({
+    pubkey: SYSVAR_INSTRUCTIONS_PUBKEY,
+    isSigner: false,
+    isWritable: false,
+  });
+
   // The program CPIs into the ACL permission program and the MagicBlock
   // delegation program. Solana resolves a CPI's callee from the transaction's
   // account keys, so both must appear here or the CPI cannot be dispatched.
-  // `InitializeAndDelegate::try_from` reads exactly nine accounts positionally,
+  // `InitializeAndDelegate::try_from` reads exactly ten accounts positionally,
   // so these trailing entries are ignored by the program itself.
   instruction.keys.push(
     { pubkey: PERMISSION_PROGRAM_ID, isSigner: false, isWritable: false },
