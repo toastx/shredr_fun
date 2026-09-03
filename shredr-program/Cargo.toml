@@ -50,3 +50,6 @@ solana-program-error = "3.0"
 # stealth PDAs from the host side of the tests.
 solana-pubkey = { version = "4.2", features = ["curve25519"] }
 solana-sdk-ids = "3.1"
+# An independent sha256 for the tests, so the Merkle assertions do not lean on
+# the same implementation they are checking.
+sha2 = "0.10"

@@ -21,6 +21,11 @@ pub mod seeds {
 
     /// Pool ledger PDAs: `[POOL_LEDGER, denomination_le]`.
     pub const POOL_LEDGER: &[u8] = b"shredr_pool_ledger";
+
+    /// Nullifier record PDAs: `[NULLIFIER, nullifier]`. Keyed by the nullifier
+    /// itself, so creating the account *is* the double-spend check and there is
+    /// no set to search or to outgrow.
+    pub const NULLIFIER: &[u8] = b"shredr_nullifier";
 }
 
 /// Lamport denominations a pool may be created for.

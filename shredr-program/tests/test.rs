@@ -2405,18 +2405,19 @@ fn check_attestation_rejects_a_foreign_envelope() {
 // ─────────────────────────────────────────────
 // Shielded pool
 //
-// The pool's two accounts are built here byte by byte rather than through
-// `InitializePool`, so a test can start from any state — mid-epoch, queue full,
-// note already spent — without replaying the instructions that got it there.
-// `pool_layout_is_stable` is what keeps these offsets honest.
+// The pool's accounts are built here byte by byte rather than through
+// `InitializePool`, so a test can start mid-epoch or with a note already spent
+// without replaying the instructions that got it there. `pool_layout_is_stable`
+// is what keeps these offsets honest.
 // ─────────────────────────────────────────────
 
+use sha2::{Digest, Sha256};
 use shredr_program::{
     constants::{DENOMINATIONS, MIN_EPOCH_SECS},
-    note,
+    merkle, note,
     state::{
-        PoolLedger, PoolVault, PAYOUT_QUEUE_CAP, PENDING_COMMITMENT_CAP, POOL_COMMITMENT_CAP,
-        POOL_LEDGER_SIZE, POOL_NULLIFIER_CAP, POOL_VAULT_SIZE,
+        PoolLedger, PoolVault, NULLIFIER_RECORD_LEN, PAYOUT_QUEUE_CAP, POOL_LEDGER_SIZE,
+        POOL_VAULT_SIZE, ROOT_HISTORY_CAP,
     },
 };
 
@@ -2431,41 +2432,31 @@ const V_TOTAL_DEPOSITED: usize = 16;
 const V_TOTAL_SETTLED: usize = 24;
 const V_EPOCH: usize = 32;
 const V_LAST_EPOCH_AT: usize = 40;
-const V_PENDING_COUNT: usize = 48;
-const V_BUMP: usize = 52;
-const V_PENDING: usize = 56;
+const V_NEXT_LEAF_INDEX: usize = 48;
+const V_BUMP: usize = 56;
+const V_ROOT: usize = 64;
+const V_FILLED_SUBTREES: usize = 96;
 
 // PoolLedger
 const L_DENOMINATION: usize = 8;
 const L_EPOCH: usize = 16;
-const L_COMMITMENT_COUNT: usize = 24;
-const L_NULLIFIER_COUNT: usize = 28;
+const L_ROOT_COUNT: usize = 24;
+const L_ROOT_CURSOR: usize = 28;
 const L_PAYOUT_COUNT: usize = 32;
 const L_BUMP: usize = 36;
 const L_DELEGATED: usize = 37;
-const L_COMMITMENTS: usize = 40;
-const L_NULLIFIERS: usize = L_COMMITMENTS + POOL_COMMITMENT_CAP * 32;
-const L_PAYOUTS: usize = L_NULLIFIERS + POOL_NULLIFIER_CAP * 32;
+const L_ROOTS: usize = 40;
+const L_PAYOUTS: usize = L_ROOTS + ROOT_HISTORY_CAP * 32;
 
 /// Pins the `#[repr(C)]` layout the program casts to, so a field reorder breaks
 /// here instead of silently corrupting every fixture below.
 #[test]
 fn pool_layout_is_stable() {
-    assert_eq!(V_PENDING - 8 + PENDING_COMMITMENT_CAP * 32, POOL_VAULT_SIZE);
+    assert_eq!(V_FILLED_SUBTREES - 8 + merkle::DEPTH * 32, POOL_VAULT_SIZE);
     assert_eq!(L_PAYOUTS - 8 + PAYOUT_QUEUE_CAP * 64, POOL_LEDGER_SIZE);
 
-    let vault = PoolVault {
-        denomination: 1,
-        total_deposited: 2,
-        total_settled: 3,
-        epoch: 4,
-        last_epoch_at: 5,
-        pending_count: 6,
-        bump: 7,
-        _padding: [0; 3],
-        pending: [[0u8; 32]; PENDING_COMMITMENT_CAP],
-    };
-    let base = &vault as *const _ as usize;
+    let vault: Box<PoolVault> = Box::new(unsafe { core::mem::zeroed() });
+    let base = vault.as_ref() as *const _ as usize;
     let at = |field: *const u8| field as usize - base + 8;
 
     assert_eq!(at(&vault.denomination as *const _ as *const u8), V_DENOMINATION);
@@ -2473,24 +2464,23 @@ fn pool_layout_is_stable() {
     assert_eq!(at(&vault.total_settled as *const _ as *const u8), V_TOTAL_SETTLED);
     assert_eq!(at(&vault.epoch as *const _ as *const u8), V_EPOCH);
     assert_eq!(at(&vault.last_epoch_at as *const _ as *const u8), V_LAST_EPOCH_AT);
-    assert_eq!(at(&vault.pending_count as *const _ as *const u8), V_PENDING_COUNT);
+    assert_eq!(at(&vault.next_leaf_index as *const _ as *const u8), V_NEXT_LEAF_INDEX);
     assert_eq!(at(&vault.bump as *const _ as *const u8), V_BUMP);
-    assert_eq!(at(&vault.pending as *const _ as *const u8), V_PENDING);
+    assert_eq!(at(&vault.root as *const _ as *const u8), V_ROOT);
+    assert_eq!(at(&vault.filled_subtrees as *const _ as *const u8), V_FILLED_SUBTREES);
 
-    // 34KB; boxed so this does not blow the test thread's stack.
     let ledger: Box<PoolLedger> = Box::new(unsafe { core::mem::zeroed() });
     let base = ledger.as_ref() as *const _ as usize;
     let at = |field: *const u8| field as usize - base + 8;
 
     assert_eq!(at(&ledger.denomination as *const _ as *const u8), L_DENOMINATION);
     assert_eq!(at(&ledger.epoch as *const _ as *const u8), L_EPOCH);
-    assert_eq!(at(&ledger.commitment_count as *const _ as *const u8), L_COMMITMENT_COUNT);
-    assert_eq!(at(&ledger.nullifier_count as *const _ as *const u8), L_NULLIFIER_COUNT);
+    assert_eq!(at(&ledger.root_count as *const _ as *const u8), L_ROOT_COUNT);
+    assert_eq!(at(&ledger.root_cursor as *const _ as *const u8), L_ROOT_CURSOR);
     assert_eq!(at(&ledger.payout_count as *const _ as *const u8), L_PAYOUT_COUNT);
     assert_eq!(at(&ledger.bump as *const _ as *const u8), L_BUMP);
     assert_eq!(at(&ledger.delegated as *const _ as *const u8), L_DELEGATED);
-    assert_eq!(at(&ledger.commitments as *const _ as *const u8), L_COMMITMENTS);
-    assert_eq!(at(&ledger.nullifiers as *const _ as *const u8), L_NULLIFIERS);
+    assert_eq!(at(&ledger.roots as *const _ as *const u8), L_ROOTS);
     assert_eq!(at(&ledger.payouts as *const _ as *const u8), L_PAYOUTS);
 }
 
@@ -2507,6 +2497,141 @@ fn commitment_and_nullifier_are_unlinkable_without_the_secret() {
     assert_ne!(note::nullifier(&secret), note::nullifier(&[43u8; 32]));
 }
 
+// ─────────────────────────────────────────────
+// Merkle tree
+//
+// `TestTree` is a plain, obviously-correct tree: it holds every leaf and hashes
+// the whole thing on demand. The program's incremental construction keeps only
+// `DEPTH` nodes and never sees the leaves again, so the tests below are worth
+// having precisely because the two implementations share no code.
+// ─────────────────────────────────────────────
+
+fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(left);
+    hasher.update(right);
+    hasher.finalize().into()
+}
+
+/// Hash of an empty subtree at `level`, where `DEPTH` is the root.
+fn zero_at(level: usize) -> [u8; 32] {
+    if level < merkle::DEPTH {
+        merkle::ZEROS[level]
+    } else {
+        merkle::empty_root()
+    }
+}
+
+#[derive(Default)]
+struct TestTree {
+    leaves: Vec<[u8; 32]>,
+}
+
+impl TestTree {
+    fn push(&mut self, leaf: [u8; 32]) -> u64 {
+        self.leaves.push(leaf);
+        self.leaves.len() as u64 - 1
+    }
+
+    fn node(&self, level: usize, index: usize) -> [u8; 32] {
+        // Everything past the last leaf is empty by definition, which is also
+        // what keeps this from walking 2^20 nodes.
+        if (index << level) >= self.leaves.len() {
+            return zero_at(level);
+        }
+        if level == 0 {
+            return self.leaves[index];
+        }
+        hash_pair(
+            &self.node(level - 1, index * 2),
+            &self.node(level - 1, index * 2 + 1),
+        )
+    }
+
+    fn root(&self) -> [u8; 32] {
+        self.node(merkle::DEPTH, 0)
+    }
+
+    fn path(&self, leaf_index: u64) -> [[u8; 32]; merkle::DEPTH] {
+        let mut path = [[0u8; 32]; merkle::DEPTH];
+        for (level, sibling) in path.iter_mut().enumerate() {
+            *sibling = self.node(level, ((leaf_index as usize) >> level) ^ 1);
+        }
+        path
+    }
+}
+
+/// The constants are a compile-time table; this is the recurrence they came
+/// from. If someone changes `DEPTH` and forgets to regenerate them, the tree
+/// silently accepts paths against the wrong empty subtrees.
+#[test]
+fn zeros_are_the_empty_subtree_hashes() {
+    let mut expected: [u8; 32] = Sha256::digest(b"SHREDR_EMPTY_LEAF_V1").into();
+
+    for level in 0..merkle::DEPTH {
+        assert_eq!(merkle::ZEROS[level], expected, "ZEROS[{level}]");
+        expected = hash_pair(&expected, &expected);
+    }
+
+    assert_eq!(merkle::empty_root(), expected);
+}
+
+/// The incremental insert and a full recompute must agree at every size, and a
+/// path taken from one must verify against the other. This is the load-bearing
+/// test of the whole pool: if these two ever disagree, deposits become
+/// unspendable.
+#[test]
+fn incremental_inserts_match_a_full_recompute() {
+    let mut filled = merkle::ZEROS;
+    let mut tree = TestTree::default();
+
+    assert_eq!(tree.root(), merkle::empty_root(), "an empty tree");
+
+    // Deliberately odd count: the incremental and recomputed trees only differ
+    // on how they treat the unfilled right-hand side, so an even number of
+    // leaves would hide exactly the bug worth catching.
+    for i in 0u64..9 {
+        let leaf = note::commitment(&[i as u8; 32]);
+        let index = tree.push(leaf);
+
+        let incremental = merkle::insert(&mut filled, index, &leaf).expect("insert");
+
+        assert_eq!(incremental, tree.root(), "root after leaf {i}");
+        assert_eq!(
+            merkle::root_from_path(&leaf, index, &tree.path(index)),
+            incremental,
+            "path for leaf {i} must reach the root the insert produced"
+        );
+    }
+
+    // Every earlier leaf must still verify against the newest root — otherwise
+    // only the most recent depositor could ever withdraw.
+    let root = tree.root();
+    for i in 0u64..9 {
+        let leaf = note::commitment(&[i as u8; 32]);
+        assert_eq!(merkle::root_from_path(&leaf, i, &tree.path(i)), root);
+    }
+}
+
+#[test]
+fn a_path_for_the_wrong_leaf_reaches_a_different_root() {
+    let mut tree = TestTree::default();
+    for i in 0u64..4 {
+        tree.push(note::commitment(&[i as u8; 32]));
+    }
+
+    let forged = note::commitment(&[99u8; 32]);
+    assert_ne!(
+        merkle::root_from_path(&forged, 0, &tree.path(0)),
+        tree.root(),
+        "a note that was never deposited must not verify"
+    );
+}
+
+// ─────────────────────────────────────────────
+// Pool fixtures
+// ─────────────────────────────────────────────
+
 fn pool_vault_pda(denomination: u64) -> (Pubkey, u8) {
     Pubkey::find_program_address(
         &[b"shredr_pool_vault", &denomination.to_le_bytes()],
@@ -2521,6 +2646,19 @@ fn pool_ledger_pda(denomination: u64) -> (Pubkey, u8) {
     )
 }
 
+fn nullifier_record_pda(nullifier: &[u8; 32]) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"shredr_nullifier", nullifier], &program_id())
+}
+
+fn rent_exempt(len: usize) -> u64 {
+    mollusk().sysvars.rent.minimum_balance(len)
+}
+
+/// What each deposit leaves behind to fund its note's eventual nullifier record.
+fn record_rent() -> u64 {
+    rent_exempt(NULLIFIER_RECORD_LEN)
+}
+
 struct PoolSetup {
     vault: Pubkey,
     ledger: Pubkey,
@@ -2528,11 +2666,13 @@ struct PoolSetup {
     ledger_account: Account,
 }
 
-/// An initialized, empty pool holding `deposited` lamports of backing, so settle
-/// tests do not have to walk a deposit in first.
+/// An initialized pool holding `deposited` lamports of backing, plus the record
+/// rent those deposits would have left behind, so settle tests do not have to
+/// walk deposits in first.
 fn pool_setup(deposited: u64, last_epoch_at: i64) -> PoolSetup {
     let (vault, vault_bump) = pool_vault_pda(DENOM);
     let (ledger, ledger_bump) = pool_ledger_pda(DENOM);
+    let notes = deposited / DENOM;
 
     let mut vault_data = vec![0u8; VAULT_LEN];
     vault_data[0..8].copy_from_slice(b"SHREDRPV");
@@ -2540,6 +2680,11 @@ fn pool_setup(deposited: u64, last_epoch_at: i64) -> PoolSetup {
     vault_data[V_TOTAL_DEPOSITED..V_TOTAL_DEPOSITED + 8].copy_from_slice(&deposited.to_le_bytes());
     vault_data[V_LAST_EPOCH_AT..V_LAST_EPOCH_AT + 8].copy_from_slice(&last_epoch_at.to_le_bytes());
     vault_data[V_BUMP] = vault_bump;
+    vault_data[V_ROOT..V_ROOT + 32].copy_from_slice(&merkle::empty_root());
+    for (level, zero) in merkle::ZEROS.iter().enumerate() {
+        let start = V_FILLED_SUBTREES + level * 32;
+        vault_data[start..start + 32].copy_from_slice(zero);
+    }
 
     let mut ledger_data = vec![0u8; LEDGER_LEN];
     ledger_data[0..8].copy_from_slice(b"SHREDRPL");
@@ -2550,7 +2695,7 @@ fn pool_setup(deposited: u64, last_epoch_at: i64) -> PoolSetup {
         vault,
         ledger,
         vault_account: Account {
-            lamports: rent_exempt(VAULT_LEN) + deposited,
+            lamports: rent_exempt(VAULT_LEN) + deposited + notes * record_rent(),
             data: vault_data,
             owner: program_id(),
             executable: false,
@@ -2566,31 +2711,59 @@ fn pool_setup(deposited: u64, last_epoch_at: i64) -> PoolSetup {
     }
 }
 
-fn rent_exempt(len: usize) -> u64 {
-    mollusk().sysvars.rent.minimum_balance(len)
-}
-
 fn set_u32(data: &mut [u8], offset: usize, value: u32) {
     data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-/// Put `secrets` into the ledger as ingested, spendable notes.
-fn seed_commitments(ledger: &mut Account, secrets: &[[u8; 32]]) {
-    for (index, secret) in secrets.iter().enumerate() {
-        let start = L_COMMITMENTS + index * 32;
-        ledger.data[start..start + 32].copy_from_slice(&note::commitment(secret));
-    }
-    set_u32(&mut ledger.data, L_COMMITMENT_COUNT, secrets.len() as u32);
+/// Publish `root` so spends may prove against it.
+fn publish_root(ledger: &mut Account, root: &[u8; 32]) {
+    let count = u32::from_le_bytes(
+        ledger.data[L_ROOT_COUNT..L_ROOT_COUNT + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let start = L_ROOTS + count * 32;
+    ledger.data[start..start + 32].copy_from_slice(root);
+    set_u32(&mut ledger.data, L_ROOT_COUNT, count as u32 + 1);
+    set_u32(&mut ledger.data, L_ROOT_CURSOR, count as u32 + 1);
 }
 
 fn set_delegated(ledger: &mut Account, delegated: bool) {
     ledger.data[L_DELEGATED] = delegated as u8;
 }
 
-fn spend_instruction(setup: &PoolSetup, secret: &[u8; 32], destination: &Pubkey) -> Instruction {
+/// A delegated ledger holding `secrets` as spendable notes, and the tree that
+/// produces their paths.
+fn spendable_pool(secrets: &[[u8; 32]]) -> (PoolSetup, TestTree) {
+    let mut setup = pool_setup(DENOM * secrets.len() as u64, 0);
+    let mut tree = TestTree::default();
+
+    for secret in secrets {
+        tree.push(note::commitment(secret));
+    }
+
+    publish_root(&mut setup.ledger_account, &tree.root());
+    set_delegated(&mut setup.ledger_account, true);
+
+    (setup, tree)
+}
+
+fn spend_instruction(
+    setup: &PoolSetup,
+    secret: &[u8; 32],
+    destination: &Pubkey,
+    root: &[u8; 32],
+    leaf_index: u64,
+    path: &[[u8; 32]; merkle::DEPTH],
+) -> Instruction {
     let mut data = vec![IX_POOL_SPEND];
     data.extend_from_slice(secret);
     data.extend_from_slice(&destination.to_bytes());
+    data.extend_from_slice(root);
+    data.extend_from_slice(&leaf_index.to_le_bytes());
+    for sibling in path {
+        data.extend_from_slice(sibling);
+    }
 
     Instruction::new_with_bytes(
         program_id(),
@@ -2637,30 +2810,82 @@ fn initialize_pool_rejects_an_unlisted_denomination() {
     );
 }
 
+#[test]
+fn initialize_pool_creates_both_accounts_with_an_empty_tree() {
+    let mollusk = mollusk();
+    let payer = Pubkey::new_unique();
+    let (vault, _) = pool_vault_pda(DENOM);
+    let (ledger, _) = pool_ledger_pda(DENOM);
+    let (system_program_key, system_program_account) =
+        mollusk_svm::program::keyed_account_for_system_program();
+
+    let mut data = vec![IX_INITIALIZE_POOL];
+    data.extend_from_slice(&DENOM.to_le_bytes());
+
+    let result = mollusk.process_and_validate_instruction(
+        &Instruction::new_with_bytes(
+            program_id(),
+            &data,
+            vec![
+                AccountMeta::new(payer, true),
+                AccountMeta::new(vault, false),
+                AccountMeta::new(ledger, false),
+                AccountMeta::new_readonly(system_program_key, false),
+            ],
+        ),
+        &[
+            (payer, system_account(10 * LAMPORTS_PER_SOL)),
+            (vault, system_account(0)),
+            (ledger, system_account(0)),
+            (system_program_key, system_program_account),
+        ],
+        &[Check::success()],
+    );
+
+    let vault_account = result.get_account(&vault).expect("vault");
+    let ledger_account = result.get_account(&ledger).expect("ledger");
+
+    assert_eq!(vault_account.data.len(), VAULT_LEN);
+    assert_eq!(ledger_account.data.len(), LEDGER_LEN);
+    assert_eq!(
+        &vault_account.data[V_ROOT..V_ROOT + 32],
+        &merkle::empty_root(),
+        "a fresh pool starts at the empty root"
+    );
+    assert_eq!(
+        &vault_account.data[V_FILLED_SUBTREES..V_FILLED_SUBTREES + 32],
+        &merkle::ZEROS[0],
+        "the frontier starts as the empty subtrees"
+    );
+    // Published immediately, so the first depositor is not waiting on an epoch
+    // turn before any root exists to prove against.
+    assert_eq!(ledger_account.data[L_ROOT_COUNT], 1);
+    assert_eq!(
+        &ledger_account.data[L_ROOTS..L_ROOTS + 32],
+        &merkle::empty_root()
+    );
+}
+
 // ── PoolSpend ──
 
 #[test]
-fn pool_spend_queues_a_payout_and_burns_the_note() {
+fn pool_spend_queues_a_payout_for_a_proven_note() {
     let mollusk = mollusk();
     let secret = [1u8; 32];
     let destination = Pubkey::new_unique();
-
-    let mut setup = pool_setup(DENOM, 0);
-    seed_commitments(&mut setup.ledger_account, &[secret]);
-    set_delegated(&mut setup.ledger_account, true);
+    let (setup, tree) = spendable_pool(&[secret, [2u8; 32], [3u8; 32]]);
 
     let result = mollusk.process_and_validate_instruction(
-        &spend_instruction(&setup, &secret, &destination),
+        &spend_instruction(&setup, &secret, &destination, &tree.root(), 0, &tree.path(0)),
         &[(setup.ledger, setup.ledger_account.clone())],
         &[Check::success()],
     );
 
     let ledger = result.get_account(&setup.ledger).expect("ledger");
 
-    assert_eq!(ledger.data[L_NULLIFIER_COUNT], 1);
     assert_eq!(ledger.data[L_PAYOUT_COUNT], 1);
     assert_eq!(
-        &ledger.data[L_NULLIFIERS..L_NULLIFIERS + 32],
+        &ledger.data[L_PAYOUTS..L_PAYOUTS + 32],
         &note::nullifier(&secret),
         "the published nullifier must be the note's, not its commitment"
     );
@@ -2669,44 +2894,78 @@ fn pool_spend_queues_a_payout_and_burns_the_note() {
         &destination.to_bytes(),
         "the payout must name the destination the spender asked for"
     );
-
-    // The commitment stays. Removing it would shrink the anonymity set by
-    // exactly the note just spent, which is the one an observer watching the
-    // ledger would most like to see leave.
-    assert_eq!(ledger.data[L_COMMITMENT_COUNT], 1);
+    assert_eq!(
+        ledger.data[L_ROOT_COUNT], 1,
+        "spending changes no root — the tree only grows on the base layer"
+    );
 }
 
 #[test]
-fn pool_spend_refuses_a_note_that_is_not_in_the_pool() {
+fn pool_spend_refuses_a_note_that_was_never_deposited() {
     let mollusk = mollusk();
-    let mut setup = pool_setup(DENOM, 0);
-    seed_commitments(&mut setup.ledger_account, &[[1u8; 32]]);
-    set_delegated(&mut setup.ledger_account, true);
+    let (setup, tree) = spendable_pool(&[[1u8; 32], [2u8; 32]]);
 
+    // A real path, but for a leaf the tree does not contain.
     mollusk.process_and_validate_instruction(
-        &spend_instruction(&setup, &[9u8; 32], &Pubkey::new_unique()),
+        &spend_instruction(
+            &setup,
+            &[99u8; 32],
+            &Pubkey::new_unique(),
+            &tree.root(),
+            0,
+            &tree.path(0),
+        ),
         &[(setup.ledger, setup.ledger_account.clone())],
         &[Check::err(shredr_err(ShredrError::PoolUnknownNote))],
     );
 }
 
 #[test]
-fn pool_spend_refuses_a_second_spend_of_the_same_note() {
+fn pool_spend_refuses_a_path_to_a_root_nobody_published() {
     let mollusk = mollusk();
     let secret = [1u8; 32];
+    let (setup, _) = spendable_pool(&[secret]);
 
-    let mut setup = pool_setup(DENOM, 0);
-    seed_commitments(&mut setup.ledger_account, &[secret]);
-    set_delegated(&mut setup.ledger_account, true);
-
-    // Already spent: the nullifier is on record even though the commitment
-    // still is too.
-    setup.ledger_account.data[L_NULLIFIERS..L_NULLIFIERS + 32]
-        .copy_from_slice(&note::nullifier(&secret));
-    set_u32(&mut setup.ledger_account.data, L_NULLIFIER_COUNT, 1);
+    // A tree the pool never saw: internally consistent, and worthless.
+    let mut forged = TestTree::default();
+    forged.push(note::commitment(&secret));
+    forged.push(note::commitment(&[7u8; 32]));
 
     mollusk.process_and_validate_instruction(
-        &spend_instruction(&setup, &secret, &Pubkey::new_unique()),
+        &spend_instruction(
+            &setup,
+            &secret,
+            &Pubkey::new_unique(),
+            &forged.root(),
+            0,
+            &forged.path(0),
+        ),
+        &[(setup.ledger, setup.ledger_account.clone())],
+        &[Check::err(shredr_err(ShredrError::PoolUnknownRoot))],
+    );
+}
+
+#[test]
+fn pool_spend_refuses_a_second_spend_in_the_same_epoch() {
+    let mollusk = mollusk();
+    let secret = [1u8; 32];
+    let (mut setup, tree) = spendable_pool(&[secret]);
+
+    // Already queued this epoch. Across epochs the record PDA catches it
+    // instead; within one, the queue is the spent set.
+    setup.ledger_account.data[L_PAYOUTS..L_PAYOUTS + 32]
+        .copy_from_slice(&note::nullifier(&secret));
+    set_u32(&mut setup.ledger_account.data, L_PAYOUT_COUNT, 1);
+
+    mollusk.process_and_validate_instruction(
+        &spend_instruction(
+            &setup,
+            &secret,
+            &Pubkey::new_unique(),
+            &tree.root(),
+            0,
+            &tree.path(0),
+        ),
         &[(setup.ledger, setup.ledger_account.clone())],
         &[Check::err(shredr_err(ShredrError::PoolNoteAlreadySpent))],
     );
@@ -2716,16 +2975,21 @@ fn pool_spend_refuses_a_second_spend_of_the_same_note() {
 fn pool_spend_refuses_to_run_on_the_base_layer() {
     let mollusk = mollusk();
     let secret = [1u8; 32];
-
-    let mut setup = pool_setup(DENOM, 0);
-    seed_commitments(&mut setup.ledger_account, &[secret]);
+    let (mut setup, tree) = spendable_pool(&[secret]);
     set_delegated(&mut setup.ledger_account, false);
 
-    // The instruction data carries the note secret. On the base layer that data
-    // is public forever, and publishing it hands every observer the link between
-    // this note's commitment and its nullifier.
+    // The instruction data carries the note secret and its leaf index. On the
+    // base layer that data is public forever, and publishing it hands every
+    // observer the link between this note's deposit and its withdrawal.
     mollusk.process_and_validate_instruction(
-        &spend_instruction(&setup, &secret, &Pubkey::new_unique()),
+        &spend_instruction(
+            &setup,
+            &secret,
+            &Pubkey::new_unique(),
+            &tree.root(),
+            0,
+            &tree.path(0),
+        ),
         &[(setup.ledger, setup.ledger_account.clone())],
         &[Check::err(shredr_err(
             ShredrError::PoolLedgerDelegationState,
@@ -2742,15 +3006,55 @@ fn queue_payout(ledger: &mut Account, index: usize, secret: &[u8; 32], destinati
     set_u32(&mut ledger.data, L_PAYOUT_COUNT, index as u32 + 1);
 }
 
-fn advance_instruction(setup: &PoolSetup, payer: &Pubkey, destinations: &[Pubkey]) -> Instruction {
+/// `AdvanceEpoch` takes `(destination, nullifier_record)` pairs after its four
+/// fixed accounts.
+fn advance_call(
+    setup: &PoolSetup,
+    payer: &Pubkey,
+    settlements: &[(Pubkey, [u8; 32])],
+    existing_records: &[Pubkey],
+) -> (Instruction, Vec<(Pubkey, Account)>) {
+    let (system_program_key, system_program_account) =
+        mollusk_svm::program::keyed_account_for_system_program();
+
     let mut metas = vec![
         AccountMeta::new(*payer, true),
         AccountMeta::new(setup.vault, false),
         AccountMeta::new(setup.ledger, false),
+        AccountMeta::new_readonly(system_program_key, false),
     ];
-    metas.extend(destinations.iter().map(|d| AccountMeta::new(*d, false)));
+    let mut accounts = vec![
+        (*payer, system_account(LAMPORTS_PER_SOL)),
+        (setup.vault, setup.vault_account.clone()),
+        (setup.ledger, setup.ledger_account.clone()),
+        (system_program_key, system_program_account),
+    ];
 
-    Instruction::new_with_bytes(program_id(), &[IX_ADVANCE_EPOCH], metas)
+    for (destination, secret) in settlements {
+        let (record, _) = nullifier_record_pda(&note::nullifier(secret));
+        metas.push(AccountMeta::new(*destination, false));
+        metas.push(AccountMeta::new(record, false));
+        accounts.push((*destination, system_account(0)));
+        accounts.push((
+            record,
+            if existing_records.contains(&record) {
+                Account {
+                    lamports: record_rent(),
+                    data: b"SHREDRNL".to_vec(),
+                    owner: program_id(),
+                    executable: false,
+                    rent_epoch: 0,
+                }
+            } else {
+                system_account(0)
+            },
+        ));
+    }
+
+    (
+        Instruction::new_with_bytes(program_id(), &[IX_ADVANCE_EPOCH], metas),
+        accounts,
+    )
 }
 
 /// A pool whose last epoch is far enough back that the batching floor elapsed.
@@ -2763,40 +3067,43 @@ fn settled_pool(deposited: u64) -> PoolSetup {
 }
 
 #[test]
-fn advance_epoch_pays_the_queue_and_ingests_pending_commitments() {
+fn advance_epoch_pays_the_queue_and_publishes_the_root() {
     let mollusk = mollusk();
     let payer = Pubkey::new_unique();
     let destination = Pubkey::new_unique();
     let secret = [1u8; 32];
-    let pending = note::commitment(&[2u8; 32]);
 
     let mut setup = settled_pool(2 * DENOM);
     queue_payout(&mut setup.ledger_account, 0, &secret, &destination);
-    setup.vault_account.data[V_PENDING..V_PENDING + 32].copy_from_slice(&pending);
-    set_u32(&mut setup.vault_account.data, V_PENDING_COUNT, 1);
+
+    // A root the deposits since the last turn have been folding into.
+    let mut tree = TestTree::default();
+    tree.push(note::commitment(&secret));
+    setup.vault_account.data[V_ROOT..V_ROOT + 32].copy_from_slice(&tree.root());
 
     let vault_before = setup.vault_account.lamports;
+    let (instruction, accounts) = advance_call(&setup, &payer, &[(destination, secret)], &[]);
 
-    let result = mollusk.process_and_validate_instruction(
-        &advance_instruction(&setup, &payer, &[destination]),
-        &[
-            (payer, system_account(LAMPORTS_PER_SOL)),
-            (setup.vault, setup.vault_account.clone()),
-            (setup.ledger, setup.ledger_account.clone()),
-            (destination, system_account(0)),
-        ],
-        &[Check::success()],
-    );
+    let result =
+        mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
 
     let vault = result.get_account(&setup.vault).expect("vault");
     let ledger = result.get_account(&setup.ledger).expect("ledger");
+    let (record, _) = nullifier_record_pda(&note::nullifier(&secret));
 
     assert_eq!(
         result.get_account(&destination).expect("destination").lamports,
         DENOM,
         "the destination is paid exactly one denomination"
     );
-    assert_eq!(vault.lamports, vault_before - DENOM);
+    // The record rent came out of the surcharge this note's deposit left behind,
+    // so the epoch turner is not out of pocket.
+    assert_eq!(vault.lamports, vault_before - DENOM - record_rent());
+    assert_eq!(
+        result.get_account(&record).expect("record").data,
+        b"SHREDRNL",
+        "the spent note is recorded so it cannot be spent in a later epoch"
+    );
     assert_eq!(
         u64::from_le_bytes(
             vault.data[V_TOTAL_SETTLED..V_TOTAL_SETTLED + 8]
@@ -2807,14 +3114,48 @@ fn advance_epoch_pays_the_queue_and_ingests_pending_commitments() {
     );
 
     assert_eq!(ledger.data[L_PAYOUT_COUNT], 0, "the queue is drained");
-    assert_eq!(vault.data[V_PENDING_COUNT], 0, "pending commitments are ingested");
-    assert_eq!(ledger.data[L_COMMITMENT_COUNT], 1);
-    assert_eq!(&ledger.data[L_COMMITMENTS..L_COMMITMENTS + 32], &pending);
+    assert_eq!(ledger.data[L_ROOT_COUNT], 1, "the new root is published");
+    assert_eq!(&ledger.data[L_ROOTS..L_ROOTS + 32], &tree.root());
 
     // Both halves move together, so a settle cannot be replayed against a ledger
     // that has already advanced.
     assert_eq!(vault.data[V_EPOCH], 1);
     assert_eq!(ledger.data[L_EPOCH], 1);
+}
+
+#[test]
+fn advance_epoch_drops_a_note_already_spent_in_an_earlier_epoch() {
+    let mollusk = mollusk();
+    let payer = Pubkey::new_unique();
+    let destination = Pubkey::new_unique();
+    let secret = [1u8; 32];
+
+    let mut setup = settled_pool(2 * DENOM);
+    queue_payout(&mut setup.ledger_account, 0, &secret, &destination);
+
+    let (record, _) = nullifier_record_pda(&note::nullifier(&secret));
+    let vault_before = setup.vault_account.lamports;
+    let (instruction, accounts) = advance_call(&setup, &payer, &[(destination, secret)], &[record]);
+
+    // Dropped rather than failed: the note was honoured the first time, and
+    // erroring here would let one stale entry hold up everyone else's payout.
+    let result =
+        mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
+
+    assert_eq!(
+        result.get_account(&destination).expect("destination").lamports,
+        0,
+        "a note is paid once"
+    );
+    assert_eq!(
+        result.get_account(&setup.vault).expect("vault").lamports,
+        vault_before
+    );
+    assert_eq!(
+        result.get_account(&setup.ledger).expect("ledger").data[L_PAYOUT_COUNT],
+        0,
+        "the entry is still consumed"
+    );
 }
 
 #[test]
@@ -2829,14 +3170,11 @@ fn advance_epoch_refuses_before_the_batching_floor() {
 
     // Without the floor anyone could settle immediately after a spend, and a
     // batch of one ties the payout to the spend that queued it.
+    let (instruction, accounts) = advance_call(&setup, &payer, &[(destination, [1u8; 32])], &[]);
+
     mollusk.process_and_validate_instruction(
-        &advance_instruction(&setup, &payer, &[destination]),
-        &[
-            (payer, system_account(LAMPORTS_PER_SOL)),
-            (setup.vault, setup.vault_account.clone()),
-            (setup.ledger, setup.ledger_account.clone()),
-            (destination, system_account(0)),
-        ],
+        &instruction,
+        &accounts,
         &[Check::err(shredr_err(ShredrError::PoolEpochTooSoon))],
     );
 }
@@ -2847,20 +3185,18 @@ fn advance_epoch_refuses_a_destination_the_queue_did_not_name() {
     let payer = Pubkey::new_unique();
     let queued_destination = Pubkey::new_unique();
     let attacker = Pubkey::new_unique();
+    let secret = [1u8; 32];
 
     let mut setup = settled_pool(DENOM);
-    queue_payout(&mut setup.ledger_account, 0, &[1u8; 32], &queued_destination);
+    queue_payout(&mut setup.ledger_account, 0, &secret, &queued_destination);
 
     // Destinations are matched positionally against the queue, so this is what
     // stops whoever turns the epoch from redirecting a payout to themselves.
+    let (instruction, accounts) = advance_call(&setup, &payer, &[(attacker, secret)], &[]);
+
     mollusk.process_and_validate_instruction(
-        &advance_instruction(&setup, &payer, &[attacker]),
-        &[
-            (payer, system_account(LAMPORTS_PER_SOL)),
-            (setup.vault, setup.vault_account.clone()),
-            (setup.ledger, setup.ledger_account.clone()),
-            (attacker, system_account(0)),
-        ],
+        &instruction,
+        &accounts,
         &[Check::err(shredr_err(ShredrError::PoolDestinationMismatch))],
     );
 }
@@ -2870,28 +3206,26 @@ fn advance_epoch_refuses_to_pay_more_than_was_deposited() {
     let mollusk = mollusk();
     let payer = Pubkey::new_unique();
     let destination = Pubkey::new_unique();
+    let secret = [1u8; 32];
 
     // Backing for nothing, but a payout queued anyway — what a compromised or
     // buggy enclave would produce. The counters, not the balance, are what stop
     // it: lamports anyone can send to a derivable address are not backing.
     let mut setup = settled_pool(0);
     setup.vault_account.lamports += 10 * DENOM;
-    queue_payout(&mut setup.ledger_account, 0, &[1u8; 32], &destination);
+    queue_payout(&mut setup.ledger_account, 0, &secret, &destination);
+
+    let (instruction, accounts) = advance_call(&setup, &payer, &[(destination, secret)], &[]);
 
     mollusk.process_and_validate_instruction(
-        &advance_instruction(&setup, &payer, &[destination]),
-        &[
-            (payer, system_account(LAMPORTS_PER_SOL)),
-            (setup.vault, setup.vault_account.clone()),
-            (setup.ledger, setup.ledger_account.clone()),
-            (destination, system_account(0)),
-        ],
+        &instruction,
+        &accounts,
         &[Check::err(shredr_err(ShredrError::PoolInsufficientBacking))],
     );
 }
 
 #[test]
-fn advance_epoch_settles_only_what_it_was_given_destinations_for() {
+fn advance_epoch_settles_only_what_it_was_given_accounts_for() {
     let mollusk = mollusk();
     let payer = Pubkey::new_unique();
     let first = Pubkey::new_unique();
@@ -2903,16 +3237,10 @@ fn advance_epoch_settles_only_what_it_was_given_destinations_for() {
 
     // A queue larger than one transaction's account limit drains over several
     // turns, so a partial settle must compact rather than drop.
-    let result = mollusk.process_and_validate_instruction(
-        &advance_instruction(&setup, &payer, &[first]),
-        &[
-            (payer, system_account(LAMPORTS_PER_SOL)),
-            (setup.vault, setup.vault_account.clone()),
-            (setup.ledger, setup.ledger_account.clone()),
-            (first, system_account(0)),
-        ],
-        &[Check::success()],
-    );
+    let (instruction, accounts) = advance_call(&setup, &payer, &[(first, [1u8; 32])], &[]);
+
+    let result =
+        mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
 
     let ledger = result.get_account(&setup.ledger).expect("ledger");
     assert_eq!(ledger.data[L_PAYOUT_COUNT], 1);
@@ -2932,13 +3260,11 @@ fn advance_epoch_refuses_a_delegated_ledger() {
     let mut setup = settled_pool(DENOM);
     set_delegated(&mut setup.ledger_account, true);
 
+    let (instruction, accounts) = advance_call(&setup, &payer, &[], &[]);
+
     mollusk.process_and_validate_instruction(
-        &advance_instruction(&setup, &payer, &[]),
-        &[
-            (payer, system_account(LAMPORTS_PER_SOL)),
-            (setup.vault, setup.vault_account.clone()),
-            (setup.ledger, setup.ledger_account.clone()),
-        ],
+        &instruction,
+        &accounts,
         &[Check::err(shredr_err(
             ShredrError::PoolLedgerDelegationState,
         ))],
@@ -3001,10 +3327,11 @@ fn pool_attestation(cleared: &Pubkey, commitment: &[u8; 32]) -> Instruction {
 }
 
 #[test]
-fn pool_deposit_takes_the_denomination_and_queues_the_commitment() {
+fn pool_deposit_appends_the_commitment_and_moves_the_root() {
     let mollusk = mollusk();
     let depositor = Pubkey::new_unique();
-    let commitment = note::commitment(&[5u8; 32]);
+    let secret = [5u8; 32];
+    let commitment = note::commitment(&secret);
     let setup = pool_setup(0, 0);
 
     let (instruction, accounts) = deposit_call(
@@ -3019,17 +3346,27 @@ fn pool_deposit_takes_the_denomination_and_queues_the_commitment() {
         mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
 
     let vault = result.get_account(&setup.vault).expect("vault");
-    assert_eq!(vault.lamports, vault_before + DENOM);
+
+    // Denomination plus the record rent this note will need when it is spent.
+    assert_eq!(vault.lamports, vault_before + DENOM + record_rent());
     assert_eq!(
         u64::from_le_bytes(
             vault.data[V_TOTAL_DEPOSITED..V_TOTAL_DEPOSITED + 8]
                 .try_into()
                 .unwrap()
         ),
-        DENOM
+        DENOM,
+        "only the denomination is backing; the surcharge is not"
     );
-    assert_eq!(vault.data[V_PENDING_COUNT], 1);
-    assert_eq!(&vault.data[V_PENDING..V_PENDING + 32], &commitment);
+    assert_eq!(vault.data[V_NEXT_LEAF_INDEX], 1);
+
+    let mut tree = TestTree::default();
+    tree.push(commitment);
+    assert_eq!(
+        &vault.data[V_ROOT..V_ROOT + 32],
+        &tree.root(),
+        "the on-chain root must match a full recompute of the same leaf"
+    );
 }
 
 #[test]
@@ -3078,5 +3415,43 @@ fn pool_deposit_refuses_without_an_attestation() {
         result.get_account(&setup.vault).expect("vault").lamports,
         setup.vault_account.lamports,
         "the gate must run before any lamports move"
+    );
+}
+
+/// Deposit, then spend what was deposited — the two halves have to agree on the
+/// tree or nothing in the pool is ever withdrawable.
+#[test]
+fn a_deposited_note_is_spendable_against_the_published_root() {
+    let mollusk = mollusk();
+    let depositor = Pubkey::new_unique();
+    let destination = Pubkey::new_unique();
+    let secret = [5u8; 32];
+    let commitment = note::commitment(&secret);
+
+    let setup = pool_setup(0, 0);
+    let (deposit, accounts) = deposit_call(
+        &setup,
+        &depositor,
+        &commitment,
+        Some(pool_attestation(&depositor, &commitment)),
+    );
+    let deposited = mollusk.process_and_validate_instruction(&deposit, &accounts, &[Check::success()]);
+
+    // The root the vault ended up with, published as an epoch turn would.
+    let vault = deposited.get_account(&setup.vault).expect("vault");
+    let root: [u8; 32] = vault.data[V_ROOT..V_ROOT + 32].try_into().unwrap();
+
+    let mut spendable = setup;
+    spendable.ledger_account.data[L_ROOTS..L_ROOTS + 32].copy_from_slice(&root);
+    set_u32(&mut spendable.ledger_account.data, L_ROOT_COUNT, 1);
+    set_delegated(&mut spendable.ledger_account, true);
+
+    let mut tree = TestTree::default();
+    tree.push(commitment);
+
+    mollusk.process_and_validate_instruction(
+        &spend_instruction(&spendable, &secret, &destination, &root, 0, &tree.path(0)),
+        &[(spendable.ledger, spendable.ledger_account.clone())],
+        &[Check::success()],
     );
 }

@@ -60,6 +60,9 @@ pub enum ShredrError {
     KytAttestationExpired = 6021,
     /// The relayer screened the depositor and refused it.
     KytScreeningRejected = 6022,
+    /// A nullifier record account is not the PDA for the payout it was passed
+    /// against.
+    PoolNullifierRecordMismatch = 6036,
     /// The attestation cleared a different wallet than the one depositing.
     /// Only checkable where the depositor signs — see `kyt`.
     KytAttestationDepositorMismatch = 6035,
@@ -67,13 +70,13 @@ pub enum ShredrError {
     InvalidDenomination = 6023,
     /// The vault and ledger passed together belong to different pools.
     PoolMismatch = 6024,
-    /// No room for another commitment before the next epoch turn.
-    PoolPendingFull = 6025,
-    /// The pool has taken every deposit it can hold.
-    PoolCommitmentsFull = 6026,
+    /// The commitment tree is full: 2^merkle::DEPTH notes.
+    PoolTreeFull = 6025,
+    /// The Merkle path does not reach a root the ledger recognises.
+    PoolUnknownRoot = 6026,
     /// No room for another payout until the keeper settles.
     PoolPayoutQueueFull = 6027,
-    /// No commitment in the ledger matches this note.
+    /// The Merkle path does not prove this note is in the tree.
     PoolUnknownNote = 6028,
     /// This note has already been spent.
     PoolNoteAlreadySpent = 6029,

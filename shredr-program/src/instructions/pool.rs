@@ -1,15 +1,23 @@
 //! The shielded pool.
 //!
-//! One vault per denomination holds every lamport; one ledger per denomination
-//! holds the note set. A deposit publishes a commitment and hands over
-//! `denomination` lamports. A spend, inside the rollup, publishes a nullifier
-//! and queues a payout. An epoch turn, on the base layer, pays the queue out and
-//! folds new commitments in.
+//! One vault per denomination holds every lamport and the commitment tree; one
+//! ledger per denomination holds the recent roots and the payout queue. A deposit
+//! appends a commitment. A spend, inside the rollup, proves a Merkle path and
+//! queues a payout. An epoch turn, on the base layer, pays the queue out and
+//! publishes the new root.
 //!
-//! What the base layer ever sees is a list of commitments, a list of nullifiers,
-//! and a batch of equal-sized transfers. Pairing any commitment with any
-//! nullifier requires a note secret, and the only instruction that carries one
+//! What the base layer ever sees is a stream of equal-sized deposits, a stream of
+//! nullifiers, and batches of equal-sized transfers. Pairing any deposit with any
+//! withdrawal requires a note secret, and the only instruction that carries one
 //! runs inside the enclave.
+//!
+//! ## Nothing here is capped by the number of notes
+//!
+//! The tree's on-chain footprint is `merkle::DEPTH` nodes whatever the pool holds,
+//! and spent notes are recorded as one small PDA each rather than in a list. So
+//! deposits are bounded by `2^DEPTH` and withdrawals by nothing at all. Storing
+//! commitments in an account would have capped both at whatever fit — which is
+//! backwards, because a pool's size is exactly what makes it private.
 //!
 //! ## Instruction set
 //!
@@ -32,17 +40,17 @@ use crate::constants::{
 };
 use crate::errors::ShredrError;
 use crate::helpers::{
-    contains_hash, derive_pool_ledger, derive_pool_vault, get_ledger_mut, get_vault_mut,
-    write_discriminator,
+    derive_pool_ledger, derive_pool_vault, get_ledger_mut, get_vault_mut, write_discriminator,
 };
 use crate::kyt::verify_deposit_attestation;
+use crate::merkle;
 use crate::note;
 use crate::state::{
-    Payout, PoolLedger, PAYOUT_QUEUE_CAP, PENDING_COMMITMENT_CAP, POOL_COMMITMENT_CAP,
-    POOL_LEDGER_DISCRIMINATOR, POOL_LEDGER_SIZE, POOL_NULLIFIER_CAP, POOL_VAULT_DISCRIMINATOR,
-    POOL_VAULT_SIZE,
+    Payout, PoolLedger, NULLIFIER_RECORD_DISCRIMINATOR, NULLIFIER_RECORD_LEN, PAYOUT_QUEUE_CAP,
+    POOL_LEDGER_DISCRIMINATOR, POOL_LEDGER_SIZE, POOL_VAULT_DISCRIMINATOR, POOL_VAULT_SIZE,
+    ROOT_HISTORY_CAP,
 };
-use crate::{ProgramError, ProgramResult};
+use crate::{Address, ProgramError, ProgramResult};
 
 use ephemeral_rollups_pinocchio::instruction::delegate_account;
 use ephemeral_rollups_pinocchio::types::DelegateConfig;
@@ -54,15 +62,26 @@ use pinocchio::sysvars::Sysvar;
 use pinocchio::AccountView;
 use pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer};
 
+/// Lamports a deposit leaves behind, on top of the denomination, to fund the
+/// nullifier record its note will need when it is spent.
+///
+/// Charging it at deposit rather than at withdrawal keeps every payout exactly
+/// one denomination — a payout net of a fee would be a payout of a distinguishing
+/// size — and keeps `AdvanceEpoch` free to be run by anyone, since the epoch
+/// turner is not out of pocket.
+fn nullifier_rent(rent: &Rent) -> Result<u64, ProgramError> {
+    rent.try_minimum_balance(NULLIFIER_RECORD_LEN)
+}
+
 // ─────────────────────────────────────────────
 // InitializePool
 // ─────────────────────────────────────────────
 
 /// Create the vault and ledger for one denomination.
 ///
-/// Permissionless. Both addresses derive from the denomination alone, so there
-/// is one canonical pool per amount and the only thing a caller can do by
-/// running this first is pay the rent for everyone else.
+/// Permissionless. Both addresses derive from the denomination alone, so there is
+/// one canonical pool per amount and the only thing a caller gains by running
+/// this first is paying the rent for everyone else.
 pub struct InitializePool<'a> {
     pub payer: &'a AccountView,
     pub vault: &'a AccountView,
@@ -122,23 +141,30 @@ impl InitializePool<'_> {
         let clock =
             Clock::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
 
+        let empty_root = merkle::empty_root();
+
         let vault_state = get_vault_mut(vault)?;
         vault_state.denomination = denomination;
         vault_state.total_deposited = 0;
         vault_state.total_settled = 0;
         vault_state.epoch = 0;
         vault_state.last_epoch_at = clock.unix_timestamp;
-        vault_state.pending_count = 0;
+        vault_state.next_leaf_index = 0;
         vault_state.bump = vault_bump;
+        vault_state.root = empty_root;
+        // The frontier of an empty tree: every pending left sibling is the empty
+        // subtree of its level.
+        vault_state.filled_subtrees = merkle::ZEROS;
 
         let ledger_state = get_ledger_mut(ledger)?;
         ledger_state.denomination = denomination;
         ledger_state.epoch = 0;
-        ledger_state.commitment_count = 0;
-        ledger_state.nullifier_count = 0;
+        ledger_state.root_count = 0;
+        ledger_state.root_cursor = 0;
         ledger_state.payout_count = 0;
         ledger_state.bump = ledger_bump;
         ledger_state.delegated = false;
+        push_root(ledger_state, &empty_root);
 
         Ok(())
     }
@@ -182,17 +208,26 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializePool<'a> {
 // PoolDeposit
 // ─────────────────────────────────────────────
 
-/// Put `denomination` lamports into the pool under a note commitment.
+/// Put one denomination into the pool and append its note commitment.
 ///
 /// Deliberately public. Everyone's deposit is visible and that is what makes the
-/// withdrawal private: the anonymity set is every note in the pool, so the
+/// withdrawal private: the anonymity set is every note in the pool, so a
 /// depositor wants the deposit list to be as long and as public as possible.
 /// There is no burner here and no stealth PDA — the wallet signs its own
 /// transfer.
 ///
 /// Which is also why this is the one place the KYT attestation's `depositor`
-/// field can be checked: unlike the stealth path, the wallet is an account in
-/// the transaction.
+/// field can be checked against reality: unlike the stealth path, the wallet is
+/// an account in the transaction.
+///
+/// # Duplicate commitments
+///
+/// Not rejected, and they do not need to be. Two identical leaves share one
+/// nullifier, so only one can ever be spent — but the spender is whoever holds
+/// the secret, which the copier by definition does not. Submitting someone
+/// else's commitment donates a denomination to the pool and takes nothing from
+/// them. The only person a duplicate hurts is a client that reused a secret, and
+/// that is a client bug to fix where the randomness lives.
 pub struct PoolDeposit<'a> {
     pub depositor: &'a AccountView,
     pub vault: &'a AccountView,
@@ -232,30 +267,31 @@ impl PoolDeposit<'_> {
             clock.unix_timestamp,
         )?;
 
+        let rent =
+            Rent::get().map_err(|_| -> ProgramError { ShredrError::RentUnavailable.into() })?;
+        let surcharge = nullifier_rent(&rent)?;
+
         Transfer {
             from: depositor,
             to: vault,
-            lamports: denomination,
+            lamports: denomination
+                .checked_add(surcharge)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
         }
         .invoke()?;
 
         let state = get_vault_mut(vault)?;
 
-        let pending = state.pending_count as usize;
-        if pending >= PENDING_COMMITMENT_CAP {
-            return Err(ShredrError::PoolPendingFull.into());
-        }
+        let root = merkle::insert(
+            &mut state.filled_subtrees,
+            state.next_leaf_index,
+            &commitment,
+        )?;
 
-        // A repeated commitment would be a note two people could spend, and the
-        // second spend would find the nullifier already used — so the loser's
-        // funds would be stuck in the pool with nothing able to release them.
-        // Cheaper to refuse here than to explain later.
-        if contains_hash(&state.pending, pending, &commitment) {
-            return Err(ShredrError::PoolUnknownNote.into());
-        }
-
-        state.pending[pending] = commitment;
-        state.pending_count += 1;
+        state.root = root;
+        state.next_leaf_index += 1;
+        // The surcharge is surplus, not backing: it is spent creating this note's
+        // nullifier record, and counting it would let a payout draw on rent.
         state.total_deposited = state
             .total_deposited
             .checked_add(denomination)
@@ -304,19 +340,26 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for PoolDeposit<'a> {
 
 /// Spend a note and queue its payout. Runs inside the ephemeral rollup.
 ///
+/// Instruction data is
+/// `[secret 32][destination 32][root 32][leaf_index u64][path 32 * DEPTH]`.
+///
 /// The note secret is the authorization: no signer is required, because anyone
 /// who knows the secret is by definition the note's owner. That is also why this
 /// instruction must never run on the base layer — the secret is in its data, and
 /// on L1 that data is public forever. The `delegated` flag is what enforces it.
 ///
 /// Every party that handles this transaction before it reaches the enclave sees
-/// the secret and can link the deposit to the withdrawal. In practice that means
-/// the rollup fee payer, which therefore has to sit inside the same trust domain
-/// as the enclave. See `docs/concepts/shielded-pool.md`.
+/// the secret and the leaf index, and can pair the deposit with the withdrawal
+/// itself. In practice that means the rollup fee payer, which therefore has to
+/// sit inside the same trust domain as the enclave. See
+/// `docs/concepts/shielded-pool.md`.
 pub struct PoolSpend<'a> {
     pub ledger: &'a AccountView,
     pub secret: [u8; 32],
     pub destination: [u8; 32],
+    pub root: [u8; 32],
+    pub leaf_index: u64,
+    pub path: [[u8; 32]; merkle::DEPTH],
 }
 
 impl PoolSpend<'_> {
@@ -325,6 +368,9 @@ impl PoolSpend<'_> {
             ledger,
             secret,
             destination,
+            root,
+            leaf_index,
+            path,
         } = self;
 
         let state = get_ledger_mut(ledger)?;
@@ -338,34 +384,36 @@ impl PoolSpend<'_> {
             return Err(ShredrError::PoolMismatch.into());
         }
 
+        // Any root the ledger has seen, not only the newest. A path is built
+        // against the tree as it stood when the client read it, and every deposit
+        // since has moved the root — accepting only the current one would make a
+        // spend race every deposit in flight.
+        let known = state.root_count as usize;
+        if !state.roots[..known].iter().any(|entry| entry == &root) {
+            return Err(ShredrError::PoolUnknownRoot.into());
+        }
+
         let commitment = note::commitment(&secret);
-        if !contains_hash(
-            &state.commitments,
-            state.commitment_count as usize,
-            &commitment,
-        ) {
+        if merkle::root_from_path(&commitment, leaf_index, &path) != root {
             return Err(ShredrError::PoolUnknownNote.into());
         }
 
         let nullifier = note::nullifier(&secret);
-        let spent = state.nullifier_count as usize;
-        if contains_hash(&state.nullifiers, spent, &nullifier) {
+
+        // This epoch's spent set is the queue itself. A note spent twice in one
+        // epoch is caught here; one spent across epochs is caught at settlement
+        // by its record PDA already existing.
+        let queued = state.payout_count as usize;
+        if state.payouts[..queued]
+            .iter()
+            .any(|payout| payout.nullifier == nullifier)
+        {
             return Err(ShredrError::PoolNoteAlreadySpent.into());
         }
 
-        let queued = state.payout_count as usize;
         if queued >= PAYOUT_QUEUE_CAP {
             return Err(ShredrError::PoolPayoutQueueFull.into());
         }
-        // Unreachable while the two caps match, since a nullifier can only be
-        // added for a commitment that exists. Checked anyway: the alternative to
-        // an error here is a write past the end of the account.
-        if spent >= POOL_NULLIFIER_CAP {
-            return Err(ShredrError::PoolCommitmentsFull.into());
-        }
-
-        state.nullifiers[spent] = nullifier;
-        state.nullifier_count += 1;
 
         state.payouts[queued] = Payout {
             nullifier,
@@ -385,14 +433,24 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for PoolSpend<'a> {
 
         let ledger = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
 
-        if data.len() != 64 {
+        const PATH_OFFSET: usize = 32 + 32 + 32 + 8;
+        if data.len() != PATH_OFFSET + merkle::DEPTH * 32 {
             return Err(ProgramError::InvalidInstructionData);
+        }
+
+        let mut path = [[0u8; 32]; merkle::DEPTH];
+        for (level, sibling) in path.iter_mut().enumerate() {
+            let start = PATH_OFFSET + level * 32;
+            sibling.copy_from_slice(&data[start..start + 32]);
         }
 
         Ok(Self {
             ledger,
             secret: <[u8; 32]>::try_from(&data[0..32]).expect("length checked"),
             destination: <[u8; 32]>::try_from(&data[32..64]).expect("length checked"),
+            root: <[u8; 32]>::try_from(&data[64..96]).expect("length checked"),
+            leaf_index: parse_u64(data, 96)?,
+            path,
         })
     }
 }
@@ -401,41 +459,48 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for PoolSpend<'a> {
 // AdvanceEpoch
 // ─────────────────────────────────────────────
 
-/// Turn the epoch: pay out the queue, then fold pending commitments into the
-/// ledger.
+/// Turn the epoch: pay out the queue, then publish the tree's current root.
 ///
 /// Permissionless, so the pool has no admin and no single keeper it depends on.
 /// The queue is authoritative — whoever pays the fee just executes what the
 /// enclave already authorized.
 ///
-/// Destinations are passed as trailing accounts, matched positionally to the
-/// front of the payout queue. Passing fewer than the queue holds settles that
-/// many and leaves the rest for the next turn, which is how a queue larger than
+/// Trailing accounts come in `(destination, nullifier_record)` pairs, matched
+/// positionally to the front of the queue. Passing fewer pairs than the queue
+/// holds settles that many and leaves the rest, which is how a queue larger than
 /// one transaction's account limit drains.
 ///
-/// The two halves are one instruction because they are one atomic epoch: a
-/// settle that succeeded and an ingest that failed would leave deposits stranded
-/// in `pending` with the vault already lighter.
+/// Settling and root publication are one instruction because they are one atomic
+/// epoch: a settle that succeeded with the root left stale would strand every
+/// deposit since the last turn.
 pub struct AdvanceEpoch<'a> {
+    pub payer: &'a AccountView,
     pub vault: &'a AccountView,
     pub ledger: &'a AccountView,
-    pub destinations: &'a [AccountView],
+    /// `(destination, nullifier_record)` pairs.
+    pub settlements: &'a [AccountView],
 }
 
 impl AdvanceEpoch<'_> {
     pub fn process(self) -> ProgramResult {
         let AdvanceEpoch {
+            payer,
             vault,
             ledger,
-            destinations,
+            settlements,
         } = self;
 
         let clock =
             Clock::get().map_err(|_| -> ProgramError { ShredrError::ClockUnavailable.into() })?;
 
-        let (denomination, epoch, last_epoch_at) = {
+        let (denomination, epoch, last_epoch_at, root) = {
             let state = get_vault_mut(vault)?;
-            (state.denomination, state.epoch, state.last_epoch_at)
+            (
+                state.denomination,
+                state.epoch,
+                state.last_epoch_at,
+                state.root,
+            )
         };
 
         let (expected_vault, _) = derive_pool_vault(denomination)?;
@@ -466,35 +531,17 @@ impl AdvanceEpoch<'_> {
             return Err(ShredrError::PoolEpochMismatch.into());
         }
 
-        let settled = settle_payouts(vault, ledger_state, destinations, denomination)?;
+        let paid = settle_payouts(ledger_state, vault, payer, settlements, denomination)?;
 
         let vault_state = get_vault_mut(vault)?;
         vault_state.total_settled = vault_state
             .total_settled
-            .checked_add((settled as u64).saturating_mul(denomination))
+            .checked_add((paid as u64).saturating_mul(denomination))
             .ok_or(ProgramError::ArithmeticOverflow)?;
 
-        // Ingest. Whatever does not fit stays pending rather than being dropped:
-        // those lamports are already in the vault, so a discarded commitment is a
-        // note nobody can ever spend.
-        let mut ingested = 0usize;
-        let pending = vault_state.pending_count as usize;
-        while ingested < pending {
-            let next = ledger_state.commitment_count as usize;
-            if next >= POOL_COMMITMENT_CAP {
-                break;
-            }
-            ledger_state.commitments[next] = vault_state.pending[ingested];
-            ledger_state.commitment_count += 1;
-            ingested += 1;
-        }
-
-        // Keep the tail. `copy_within` rather than a loop so an overlapping move
-        // is the compiler's problem.
-        if ingested > 0 {
-            vault_state.pending.copy_within(ingested..pending, 0);
-            vault_state.pending_count = (pending - ingested) as u32;
-        }
+        // Publish the root every deposit since the last turn has been folding
+        // into. This is what makes those deposits spendable.
+        push_root(ledger_state, &root);
 
         vault_state.epoch = epoch.checked_add(1).ok_or(ProgramError::ArithmeticOverflow)?;
         vault_state.last_epoch_at = clock.unix_timestamp;
@@ -504,49 +551,47 @@ impl AdvanceEpoch<'_> {
     }
 }
 
-/// Pay the front of the queue out to `destinations`, and compact what is left.
+/// Pay the front of the queue out, recording each spent nullifier, and compact
+/// what is left.
 ///
-/// Returns how many were settled.
+/// Returns how many were actually paid, which can be fewer than were processed:
+/// a note whose record already exists was spent in an earlier epoch, so its
+/// queue entry is dropped rather than honoured. Dropping beats failing, because
+/// one stale entry would otherwise block every other payout in the batch.
 fn settle_payouts(
-    vault: &AccountView,
     ledger: &mut PoolLedger,
-    destinations: &[AccountView],
+    vault: &AccountView,
+    payer: &AccountView,
+    settlements: &[AccountView],
     denomination: u64,
 ) -> Result<usize, ProgramError> {
     let queued = ledger.payout_count as usize;
-    let settling = queued.min(destinations.len());
-    if settling == 0 {
+    let processing = queued.min(settlements.len() / 2);
+    if processing == 0 {
         return Ok(0);
     }
 
     let rent = Rent::get().map_err(|_| -> ProgramError { ShredrError::RentUnavailable.into() })?;
-    let rent_minimum = rent.try_minimum_balance(vault.data_len())?;
+    let record_rent = nullifier_rent(&rent)?;
+    let vault_rent_minimum = rent.try_minimum_balance(vault.data_len())?;
 
     // Checked against the counters rather than the balance: anyone can send
     // lamports to a derivable address, and backing inferred from the balance
-    // would let them do it.
+    // would let them fake it.
     let (total_deposited, total_settled) = {
         let state = get_vault_mut(vault)?;
         (state.total_deposited, state.total_settled)
     };
-    let payable = total_deposited.saturating_sub(total_settled);
-    let requested = (settling as u64)
-        .checked_mul(denomination)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
-    if requested > payable {
-        return Err(ShredrError::PoolInsufficientBacking.into());
-    }
+    let mut payable = total_deposited.saturating_sub(total_settled);
 
-    let remaining = vault
-        .lamports()
-        .checked_sub(requested)
-        .ok_or(ProgramError::InsufficientFunds)?;
-    if remaining < rent_minimum {
-        return Err(ShredrError::BalanceInvariantViolation.into());
-    }
+    let mut paid = 0usize;
 
-    for (index, destination) in destinations.iter().take(settling).enumerate() {
-        if destination.address().as_array() != &ledger.payouts[index].destination {
+    for index in 0..processing {
+        let destination = &settlements[index * 2];
+        let record = &settlements[index * 2 + 1];
+        let payout = ledger.payouts[index];
+
+        if destination.address().as_array() != &payout.destination {
             return Err(ShredrError::PoolDestinationMismatch.into());
         }
         // Crediting the vault from the vault is a lamports imbalance the runtime
@@ -555,19 +600,84 @@ fn settle_payouts(
             return Err(ShredrError::SelfTransferNotAllowed.into());
         }
 
+        let (expected_record, record_bump) = Address::derive_program_address(
+            &[seeds::NULLIFIER, &payout.nullifier],
+            &PROGRAM_ADDRESS,
+        )
+        .ok_or(ProgramError::InvalidAccountData)?;
+
+        if record.address() != &expected_record {
+            return Err(ShredrError::PoolNullifierRecordMismatch.into());
+        }
+
+        // Already spent in an earlier epoch. Drop the entry and pay nothing —
+        // the note was honoured the first time, and failing here would let one
+        // stale queue entry hold up everyone else's withdrawal.
+        if record.data_len() > 0 || record.lamports() > 0 {
+            continue;
+        }
+
+        if payable < denomination {
+            return Err(ShredrError::PoolInsufficientBacking.into());
+        }
+
+        // Everything this payout costs the vault, checked before any of it
+        // moves: the payout itself plus the record's rent.
+        let outgoing = denomination
+            .checked_add(record_rent)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        let remaining = vault
+            .lamports()
+            .checked_sub(outgoing)
+            .ok_or(ProgramError::InsufficientFunds)?;
+        if remaining < vault_rent_minimum {
+            return Err(ShredrError::BalanceInvariantViolation.into());
+        }
+
+        // The record is created by the payer rather than the vault, because
+        // System will not debit an account it does not own and the vault is
+        // ours. The vault reimburses below, out of the surcharge this note's own
+        // deposit left behind — so the epoch turner is still not out of pocket,
+        // and every payout stays exactly one denomination.
+        let record_bump_slice = [record_bump];
+        let record_seeds = [
+            Seed::from(seeds::NULLIFIER),
+            Seed::from(&payout.nullifier),
+            Seed::from(&record_bump_slice),
+        ];
+
+        CreateAccount {
+            from: payer,
+            to: record,
+            lamports: record_rent,
+            space: NULLIFIER_RECORD_LEN as u64,
+            owner: &PROGRAM_ADDRESS,
+        }
+        .invoke_signed(&[Signer::from(&record_seeds)])?;
+
+        write_discriminator(record, &NULLIFIER_RECORD_DISCRIMINATOR, 0)?;
+
+        let reimbursed = payer
+            .lamports()
+            .checked_add(record_rent)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
         let credited = destination
             .lamports()
             .checked_add(denomination)
             .ok_or(ProgramError::ArithmeticOverflow)?;
+
+        vault.set_lamports(remaining);
+        payer.set_lamports(reimbursed);
         destination.set_lamports(credited);
+
+        payable -= denomination;
+        paid += 1;
     }
 
-    vault.set_lamports(remaining);
+    ledger.payouts.copy_within(processing..queued, 0);
+    ledger.payout_count = (queued - processing) as u32;
 
-    ledger.payouts.copy_within(settling..queued, 0);
-    ledger.payout_count = (queued - settling) as u32;
-
-    Ok(settling)
+    Ok(paid)
 }
 
 impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for AdvanceEpoch<'a> {
@@ -576,16 +686,20 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for AdvanceEpoch<'a> {
     fn try_from(value: (&'a [AccountView], &'a [u8])) -> Result<Self, ProgramError> {
         let (accounts, _data) = value;
 
-        if accounts.len() < 3 {
+        if accounts.len() < 4 {
             return Err(ProgramError::NotEnoughAccountKeys);
         }
 
         let payer = &accounts[0];
         let vault = &accounts[1];
         let ledger = &accounts[2];
+        let system_program = &accounts[3];
 
         if !payer.is_signer() {
             return Err(ShredrError::MissingSigner.into());
+        }
+        if system_program.address() != &pinocchio_system::ID {
+            return Err(ProgramError::IncorrectProgramId);
         }
 
         // Both are read through `borrow_unchecked_mut`, so the same account
@@ -595,9 +709,10 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for AdvanceEpoch<'a> {
         }
 
         Ok(Self {
+            payer,
             vault,
             ledger,
-            destinations: &accounts[3..],
+            settlements: &accounts[4..],
         })
     }
 }
@@ -609,9 +724,9 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for AdvanceEpoch<'a> {
 /// Hand the ledger to the rollup so notes can be spent against it.
 ///
 /// No ACL permission is created, unlike the stealth path. There the permission
-/// names the one burner allowed to write; here any holder of a note secret is
-/// allowed to spend, and the secret is the authorization. A member list would be
-/// a list of the pool's users, which is the last thing this account should hold.
+/// names the one burner allowed to write; here any holder of a note secret may
+/// spend, and the secret is the authorization. A member list would be a list of
+/// the pool's users, which is the last thing this account should hold.
 pub struct DelegatePoolLedger<'a> {
     pub payer: &'a AccountView,
     pub ledger: &'a AccountView,
@@ -720,6 +835,16 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for DelegatePoolLedger<'a> {
 // Shared
 // ─────────────────────────────────────────────
 
+/// Append a root to the ledger's ring, oldest first out.
+fn push_root(ledger: &mut PoolLedger, root: &[u8; 32]) {
+    let cursor = ledger.root_cursor as usize % ROOT_HISTORY_CAP;
+    ledger.roots[cursor] = *root;
+    ledger.root_cursor = ((cursor + 1) % ROOT_HISTORY_CAP) as u32;
+    if (ledger.root_count as usize) < ROOT_HISTORY_CAP {
+        ledger.root_count += 1;
+    }
+}
+
 /// Create a program-owned PDA, tolerating an address someone has already sent
 /// lamports to.
 ///
@@ -727,10 +852,10 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for DelegatePoolLedger<'a> {
 /// derivable from a public denomination — so without this, one lamport sent to a
 /// vault address would make that pool permanently uncreatable.
 ///
-/// Anything found there stays as an unaccounted surplus. Unlike a stealth PDA it
-/// is deliberately *not* credited: `total_deposited` backs the notes, and
-/// crediting a stranger's lamports would let them inflate the pool's apparent
-/// backing without a commitment to match.
+/// Anything found there stays as unaccounted surplus. Unlike a stealth PDA it is
+/// deliberately *not* credited: `total_deposited` backs the notes, and crediting
+/// a stranger's lamports would let them inflate the pool's apparent backing
+/// without a commitment to match.
 fn create_pda(
     payer: &AccountView,
     account: &AccountView,
