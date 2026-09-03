@@ -6,6 +6,16 @@ export { ShredrClient, shredrClient } from './ShredrClient';
 export { ApiClient, apiClient } from './ApiClient';
 export { WebSocketClient, webSocketClient } from './WebSocketClient';
 export { KoraRelayer, koraRelayer } from './KoraRelayer';
+export {
+    KytService,
+    kytService,
+    KytRefusedError,
+    KytUnavailableError,
+    KYT_VERDICT,
+    ATTESTATION_BYTES,
+    toInstruction as createKytAttestationInstruction,
+} from './KytService';
+export type { KytAttestation } from './KytService';
 
 // On-chain program client
 export {
