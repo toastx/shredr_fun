@@ -36,6 +36,8 @@
 //! - Withdrawals require the burner to sign and the account to be undelegated.
 //! - Amount- and timing-correlation resistance are **client-side policy**; the
 //!   program accepts any amount and imposes no delay. See `constants`.
+//! - Every base-layer deposit carries a KYT attestation signed by the compliance
+//!   relayer, verified through the ed25519 precompile. See `kyt`.
 
 #![no_std]
 #![allow(unexpected_cfgs)]
@@ -47,6 +49,7 @@ pub mod constants;
 pub mod errors;
 pub mod helpers;
 pub mod instructions;
+pub mod kyt;
 pub mod state;
 
 use crate::instructions::close::CloseStealthAccount;

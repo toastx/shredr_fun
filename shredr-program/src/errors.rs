@@ -38,6 +38,27 @@ pub enum ShredrError {
     AccountNotEmpty = 6013,
     /// Rent sysvar is unavailable.
     RentUnavailable = 6014,
+    /// The build has no KYT attestation authority configured, so no deposit can
+    /// be cleared. Deliberate: an unconfigured gate must refuse, not wave through.
+    KytAuthorityUnset = 6015,
+    /// No `Ed25519SigVerify` instruction in this transaction carried a KYT
+    /// attestation for this deposit.
+    KytAttestationMissing = 6016,
+    /// The ed25519 instruction or the message it covers is not shaped like an
+    /// attestation: wrong length, wrong magic, wrong version, several signatures,
+    /// or offsets pointing outside the instruction.
+    KytAttestationMalformed = 6017,
+    /// The signature was verified, but against a key that is not the configured
+    /// KYT attestation authority.
+    KytUnknownAuthority = 6018,
+    /// The attestation is bound to a different burner.
+    KytAttestationBurnerMismatch = 6019,
+    /// The deposit is larger than the amount the relayer cleared.
+    KytAttestationAmountExceeded = 6020,
+    /// The attestation is past its expiry.
+    KytAttestationExpired = 6021,
+    /// The relayer screened the depositor and refused it.
+    KytScreeningRejected = 6022,
 }
 
 impl From<ShredrError> for ProgramError {
