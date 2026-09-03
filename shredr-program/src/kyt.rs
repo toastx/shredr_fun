@@ -29,15 +29,22 @@
 //! [ 8]      version        1
 //! [ 9]      verdict        1 = allow, anything else = screened and refused
 //! [10..42]  depositor      the L1 wallet the relayer screened
-//! [42..74]  burner         binds the attestation to one stealth PDA
+//! [42..74]  subject        binds the attestation to one deposit
 //! [74..82]  max_amount     u64 LE, lamports ceiling for this attestation
 //! [82..90]  expiry_unix    i64 LE, unix seconds, inclusive
 //! ```
 //!
-//! `depositor` is recorded for auditors and never checked here: the funding
-//! wallet does not appear in the deposit transaction at all — that is the point
-//! of the burner — so the program has nothing to compare it against. The
-//! relayer's signature is what binds it.
+//! `subject` is whatever uniquely identifies the deposit being cleared: the
+//! burner for a stealth PDA, the note commitment for a pool deposit. Either way
+//! it is one-time, so an attestation cannot be lifted onto another deposit.
+//!
+//! `depositor` is checked only when the depositing wallet is actually an account
+//! in the transaction. On the stealth path it is not — funds arrive from a
+//! one-time burner, which is the point — so there is nothing to compare against
+//! and the relayer's signature is the only binding. Pool deposits are the other
+//! case: the wallet signs the transfer itself, so the check is available and is
+//! made. Without it, an attestation issued for a clean wallet could be presented
+//! by a dirty one that happened to learn the commitment.
 //!
 //! ## Replay ceiling
 //!
@@ -78,7 +85,7 @@ pub const ATTESTATION_LEN: usize = 90;
 const OFF_VERSION: usize = 8;
 const OFF_VERDICT: usize = 9;
 const OFF_DEPOSITOR: usize = 10;
-const OFF_BURNER: usize = 42;
+const OFF_SUBJECT: usize = 42;
 const OFF_MAX_AMOUNT: usize = 74;
 const OFF_EXPIRY: usize = 82;
 
@@ -130,9 +137,9 @@ impl<'a> Attestation<'a> {
         &self.raw[OFF_DEPOSITOR..OFF_DEPOSITOR + PUBKEY_LEN]
     }
 
-    /// The burner this attestation is bound to.
-    pub fn burner(&self) -> &'a [u8] {
-        &self.raw[OFF_BURNER..OFF_BURNER + PUBKEY_LEN]
+    /// What this attestation is bound to: a burner, or a note commitment.
+    pub fn subject(&self) -> &'a [u8] {
+        &self.raw[OFF_SUBJECT..OFF_SUBJECT + PUBKEY_LEN]
     }
 
     /// Lamport ceiling the relayer cleared.
@@ -234,7 +241,8 @@ pub fn attested_message<'a>(
 /// gets a usable reason instead of a flat "missing".
 pub fn verify_deposit_attestation(
     instructions_sysvar: &AccountView,
-    burner: &Address,
+    subject: &[u8; PUBKEY_LEN],
+    expected_depositor: Option<&[u8; PUBKEY_LEN]>,
     deposit_amount: u64,
     now_unix: i64,
 ) -> Result<(), ProgramError> {
@@ -260,7 +268,15 @@ pub fn verify_deposit_attestation(
         }
 
         match attested_message(instruction.get_instruction_data(), &authority).and_then(
-            |message| check_attestation(message, burner.as_array(), deposit_amount, now_unix),
+            |message| {
+                check_attestation(
+                    message,
+                    subject,
+                    expected_depositor,
+                    deposit_amount,
+                    now_unix,
+                )
+            },
         ) {
             Ok(()) => return Ok(()),
             Err(err) => reason = Some(err),
@@ -277,7 +293,8 @@ pub fn verify_deposit_attestation(
 /// `AccountView` or a compiled-in authority.
 pub fn check_attestation(
     message: &[u8],
-    burner: &[u8; PUBKEY_LEN],
+    subject: &[u8; PUBKEY_LEN],
+    expected_depositor: Option<&[u8; PUBKEY_LEN]>,
     deposit_amount: u64,
     now_unix: i64,
 ) -> Result<(), ProgramError> {
@@ -287,8 +304,14 @@ pub fn check_attestation(
         return Err(ShredrError::KytScreeningRejected.into());
     }
 
-    if attestation.burner() != burner.as_slice() {
+    if attestation.subject() != subject.as_slice() {
         return Err(ShredrError::KytAttestationBurnerMismatch.into());
+    }
+
+    if let Some(depositor) = expected_depositor {
+        if attestation.depositor() != depositor.as_slice() {
+            return Err(ShredrError::KytAttestationDepositorMismatch.into());
+        }
     }
 
     if deposit_amount > attestation.max_amount() {

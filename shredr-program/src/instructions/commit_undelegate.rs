@@ -7,9 +7,15 @@
 //! Undelegation runs on both PDAs of a cycle — the exit PDA so it can pay out, the
 //! drained deposit PDA so it can be closed. Both are observable base-layer events,
 //! so the client must space them apart in time or they re-associate the accounts.
+//!
+//! The commit instructions never look at the account they are flushing, so the
+//! shielded pool's ledger reuses them as-is. `UndelegationCallback` is the one
+//! that has to know the difference: it clears the `delegated` flag, and which
+//! struct that flag lives in depends on the discriminator.
 
 use crate::errors::ShredrError;
-use crate::helpers::{get_stealth_mut, verify_stealth_pda};
+use crate::helpers::{derive_pool_ledger, get_ledger_mut, get_stealth_mut, verify_stealth_pda};
+use crate::state::{POOL_LEDGER_DISCRIMINATOR, STEALTH_ACCOUNT_DISCRIMINATOR};
 use crate::AccountView;
 use crate::ProgramError;
 use crate::ProgramResult;
@@ -154,15 +160,31 @@ impl<'a> UndelegationCallback<'a> {
 
         undelegate(stealth_account, program_id, buffer_account, payer, ix_data)?;
 
-        let stealth_state = get_stealth_mut(stealth_account)?;
+        // Both branches exist to do the same one thing: the buffered state was
+        // copied back verbatim and still says `delegated`. Left set, the account
+        // is rejected by every base-layer instruction, forever.
+        //
+        // `undelegate` derives the account it re-creates from seeds in `ix_data`,
+        // so each branch also re-derives the address it expects. Without that,
+        // whatever came back is only asserted to be program-owned.
+        let discriminator = read_discriminator(stealth_account)?;
 
-        // `undelegate` derives the account it re-creates from `ix_data` seeds, so
-        // confirm what came back is really a `[STEALTH_ADDRESS, burner]` PDA.
-        verify_stealth_pda(stealth_account, &stealth_state.owner)?;
-
-        // The buffered state was copied back verbatim and still says `delegated`.
-        // Left set, `Withdraw` and `Close` would reject the account forever.
-        stealth_state.delegated = false;
+        match discriminator {
+            STEALTH_ACCOUNT_DISCRIMINATOR => {
+                let stealth_state = get_stealth_mut(stealth_account)?;
+                verify_stealth_pda(stealth_account, &stealth_state.owner)?;
+                stealth_state.delegated = false;
+            }
+            POOL_LEDGER_DISCRIMINATOR => {
+                let ledger_state = get_ledger_mut(stealth_account)?;
+                let (expected, _) = derive_pool_ledger(ledger_state.denomination)?;
+                if stealth_account.address() != &expected {
+                    return Err(ShredrError::PoolMismatch.into());
+                }
+                ledger_state.delegated = false;
+            }
+            _ => return Err(ShredrError::InvalidDiscriminator.into()),
+        }
 
         Ok(())
     }
@@ -206,4 +228,12 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for UndelegationCallback<'a> {
             ix_data,
         })
     }
+}
+
+/// Read an account's 8-byte discriminator without committing to a type.
+fn read_discriminator(account: &AccountView) -> Result<[u8; 8], ProgramError> {
+    let data = account.try_borrow()?;
+    data.get(0..8)
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .ok_or_else(|| ShredrError::AccountDataTooSmall.into())
 }

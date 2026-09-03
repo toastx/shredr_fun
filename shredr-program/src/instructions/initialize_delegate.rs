@@ -89,9 +89,13 @@ impl<'a> InitializeAndDelegate<'a> {
         // Before anything moves. The rest of this instruction creates accounts and
         // transfers lamports, and a compliance gate that ran after those would be
         // a refund path, not a gate.
+        // No expected depositor: the funding wallet is not an account in this
+        // transaction, so there is nothing to compare the attestation against.
+        // Pool deposits are the case where it is, and they check it.
         verify_deposit_attestation(
             instructions_sysvar,
-            &burner_key,
+            burner_key.as_array(),
+            None,
             deposit_amount,
             clock.unix_timestamp,
         )?;
