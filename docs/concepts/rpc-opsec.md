@@ -82,6 +82,31 @@ Mitigations are client policy, not program policy — the program accepts any am
 
 None of these are RPC concerns strictly speaking. They are here because the RPC layer is where people expect timing protection to come from, and it cannot provide it. The router can hide who connected. It cannot hide that an L1 transaction landed.
 
+## The rollup fee payer
+
+Everything above is about observers outside the system. The shielded pool adds a
+party inside it.
+
+Its spend instruction carries the note secret in its data, because there is no
+proof system to replace it with. Anyone who handles that transaction before it
+reaches the enclave can hash the secret twice and pair the deposit commitment
+with the withdrawal nullifier themselves — which is the one link the pool exists
+to hide.
+
+The party who handles it is the fee payer. So for a pool deployment:
+
+* **Run a dedicated Kora instance for rollup traffic.** `KORA_ROLLUP_RELAYER_URL`
+  already exists as a separate endpoint; here that separation is load-bearing
+  rather than a convenience.
+* **Put it in the enclave's trust domain.** Same operator, same host if possible,
+  same no-logging posture as the router above.
+* **Never point it at a shared or third-party paymaster.** A public paymaster
+  seeing pool spends is a public paymaster that can deanonymise every one of
+  them.
+
+See [The shielded pool](shielded-pool.md) for what removing this dependency would
+cost — it is a proof system, not a configuration change.
+
 ## Enclave attestation
 
 Everything above assumes the thing on the far side of the router is the enclave you think it is. Verify it, do not assume it:

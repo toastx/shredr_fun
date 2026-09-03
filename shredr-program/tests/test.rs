@@ -62,6 +62,10 @@ const IX_COMMIT_STEALTH: u8 = 2;
 const IX_COMMIT_AND_UNDELEGATE_STEALTH: u8 = 3;
 const IX_WITHDRAW: u8 = 4;
 const IX_CLOSE_STEALTH_ACCOUNT: u8 = 5;
+const IX_INITIALIZE_POOL: u8 = 6;
+const IX_POOL_DEPOSIT: u8 = 7;
+const IX_POOL_SPEND: u8 = 8;
+const IX_ADVANCE_EPOCH: u8 = 9;
 const IX_UNDELEGATION_CALLBACK: u8 = 0xFF;
 
 // ─────────────────────────────────────────────
@@ -366,7 +370,8 @@ fn unknown_discriminator_is_rejected() {
     let mollusk = mollusk();
     let key = Pubkey::new_unique();
 
-    for discriminator in [6u8, 7, 42, 0xFE] {
+    // 6..=10 are the shielded pool's; 0xFF is the undelegation callback.
+    for discriminator in [11u8, 42, 200, 0xFE] {
         mollusk.process_and_validate_instruction(
             &Instruction::new_with_bytes(
                 program_id(),
@@ -2332,7 +2337,7 @@ fn check_attestation_clears_a_matching_deposit() {
         attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
 
     assert_eq!(
-        check_attestation(&message, &burner.to_bytes(), LAMPORTS_PER_SOL, 0),
+        check_attestation(&message, &burner.to_bytes(), None, LAMPORTS_PER_SOL, 0),
         Ok(())
     );
 }
@@ -2345,19 +2350,19 @@ fn check_attestation_enforces_the_binding_and_the_ceiling() {
         attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, expiry);
 
     assert_eq!(
-        check_attestation(&message, &Pubkey::new_unique().to_bytes(), 1, 0),
+        check_attestation(&message, &Pubkey::new_unique().to_bytes(), None, 1, 0),
         Err(shredr_code(ShredrError::KytAttestationBurnerMismatch))
     );
     assert_eq!(
-        check_attestation(&message, &burner.to_bytes(), LAMPORTS_PER_SOL + 1, 0),
+        check_attestation(&message, &burner.to_bytes(), None, LAMPORTS_PER_SOL + 1, 0),
         Err(shredr_code(ShredrError::KytAttestationAmountExceeded))
     );
     assert_eq!(
-        check_attestation(&message, &burner.to_bytes(), 1, expiry + 1),
+        check_attestation(&message, &burner.to_bytes(), None, 1, expiry + 1),
         Err(shredr_code(ShredrError::KytAttestationExpired))
     );
     // Inclusive: an attestation is good through its expiry second.
-    assert_eq!(check_attestation(&message, &burner.to_bytes(), 1, expiry), Ok(()));
+    assert_eq!(check_attestation(&message, &burner.to_bytes(), None, 1, expiry), Ok(()));
 }
 
 #[test]
@@ -2367,7 +2372,7 @@ fn check_attestation_refuses_a_screened_out_depositor() {
         attestation_message(0, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
 
     assert_eq!(
-        check_attestation(&message, &burner.to_bytes(), 1, 0),
+        check_attestation(&message, &burner.to_bytes(), None, 1, 0),
         Err(shredr_code(ShredrError::KytScreeningRejected))
     );
 }
@@ -2391,8 +2396,687 @@ fn check_attestation_rejects_a_foreign_envelope() {
 
     for message in [wrong_magic, wrong_version, short] {
         assert_eq!(
-            check_attestation(&message, &burner.to_bytes(), 1, 0),
+            check_attestation(&message, &burner.to_bytes(), None, 1, 0),
             Err(shredr_code(ShredrError::KytAttestationMalformed))
         );
     }
+}
+
+// ─────────────────────────────────────────────
+// Shielded pool
+//
+// The pool's two accounts are built here byte by byte rather than through
+// `InitializePool`, so a test can start from any state — mid-epoch, queue full,
+// note already spent — without replaying the instructions that got it there.
+// `pool_layout_is_stable` is what keeps these offsets honest.
+// ─────────────────────────────────────────────
+
+use shredr_program::{
+    constants::{DENOMINATIONS, MIN_EPOCH_SECS},
+    note,
+    state::{
+        PoolLedger, PoolVault, PAYOUT_QUEUE_CAP, PENDING_COMMITMENT_CAP, POOL_COMMITMENT_CAP,
+        POOL_LEDGER_SIZE, POOL_NULLIFIER_CAP, POOL_VAULT_SIZE,
+    },
+};
+
+const DENOM: u64 = DENOMINATIONS[0];
+
+const VAULT_LEN: usize = 8 + POOL_VAULT_SIZE;
+const LEDGER_LEN: usize = 8 + POOL_LEDGER_SIZE;
+
+// PoolVault
+const V_DENOMINATION: usize = 8;
+const V_TOTAL_DEPOSITED: usize = 16;
+const V_TOTAL_SETTLED: usize = 24;
+const V_EPOCH: usize = 32;
+const V_LAST_EPOCH_AT: usize = 40;
+const V_PENDING_COUNT: usize = 48;
+const V_BUMP: usize = 52;
+const V_PENDING: usize = 56;
+
+// PoolLedger
+const L_DENOMINATION: usize = 8;
+const L_EPOCH: usize = 16;
+const L_COMMITMENT_COUNT: usize = 24;
+const L_NULLIFIER_COUNT: usize = 28;
+const L_PAYOUT_COUNT: usize = 32;
+const L_BUMP: usize = 36;
+const L_DELEGATED: usize = 37;
+const L_COMMITMENTS: usize = 40;
+const L_NULLIFIERS: usize = L_COMMITMENTS + POOL_COMMITMENT_CAP * 32;
+const L_PAYOUTS: usize = L_NULLIFIERS + POOL_NULLIFIER_CAP * 32;
+
+/// Pins the `#[repr(C)]` layout the program casts to, so a field reorder breaks
+/// here instead of silently corrupting every fixture below.
+#[test]
+fn pool_layout_is_stable() {
+    assert_eq!(V_PENDING - 8 + PENDING_COMMITMENT_CAP * 32, POOL_VAULT_SIZE);
+    assert_eq!(L_PAYOUTS - 8 + PAYOUT_QUEUE_CAP * 64, POOL_LEDGER_SIZE);
+
+    let vault = PoolVault {
+        denomination: 1,
+        total_deposited: 2,
+        total_settled: 3,
+        epoch: 4,
+        last_epoch_at: 5,
+        pending_count: 6,
+        bump: 7,
+        _padding: [0; 3],
+        pending: [[0u8; 32]; PENDING_COMMITMENT_CAP],
+    };
+    let base = &vault as *const _ as usize;
+    let at = |field: *const u8| field as usize - base + 8;
+
+    assert_eq!(at(&vault.denomination as *const _ as *const u8), V_DENOMINATION);
+    assert_eq!(at(&vault.total_deposited as *const _ as *const u8), V_TOTAL_DEPOSITED);
+    assert_eq!(at(&vault.total_settled as *const _ as *const u8), V_TOTAL_SETTLED);
+    assert_eq!(at(&vault.epoch as *const _ as *const u8), V_EPOCH);
+    assert_eq!(at(&vault.last_epoch_at as *const _ as *const u8), V_LAST_EPOCH_AT);
+    assert_eq!(at(&vault.pending_count as *const _ as *const u8), V_PENDING_COUNT);
+    assert_eq!(at(&vault.bump as *const _ as *const u8), V_BUMP);
+    assert_eq!(at(&vault.pending as *const _ as *const u8), V_PENDING);
+
+    // 34KB; boxed so this does not blow the test thread's stack.
+    let ledger: Box<PoolLedger> = Box::new(unsafe { core::mem::zeroed() });
+    let base = ledger.as_ref() as *const _ as usize;
+    let at = |field: *const u8| field as usize - base + 8;
+
+    assert_eq!(at(&ledger.denomination as *const _ as *const u8), L_DENOMINATION);
+    assert_eq!(at(&ledger.epoch as *const _ as *const u8), L_EPOCH);
+    assert_eq!(at(&ledger.commitment_count as *const _ as *const u8), L_COMMITMENT_COUNT);
+    assert_eq!(at(&ledger.nullifier_count as *const _ as *const u8), L_NULLIFIER_COUNT);
+    assert_eq!(at(&ledger.payout_count as *const _ as *const u8), L_PAYOUT_COUNT);
+    assert_eq!(at(&ledger.bump as *const _ as *const u8), L_BUMP);
+    assert_eq!(at(&ledger.delegated as *const _ as *const u8), L_DELEGATED);
+    assert_eq!(at(&ledger.commitments as *const _ as *const u8), L_COMMITMENTS);
+    assert_eq!(at(&ledger.nullifiers as *const _ as *const u8), L_NULLIFIERS);
+    assert_eq!(at(&ledger.payouts as *const _ as *const u8), L_PAYOUTS);
+}
+
+/// The pool's privacy claim in one assertion: given a commitment you cannot
+/// recognise its nullifier, because the two are images of the same secret under
+/// different domain tags.
+#[test]
+fn commitment_and_nullifier_are_unlinkable_without_the_secret() {
+    let secret = [42u8; 32];
+
+    assert_eq!(note::commitment(&secret), note::commitment(&secret));
+    assert_ne!(note::commitment(&secret), note::nullifier(&secret));
+    assert_ne!(note::commitment(&secret), note::commitment(&[43u8; 32]));
+    assert_ne!(note::nullifier(&secret), note::nullifier(&[43u8; 32]));
+}
+
+fn pool_vault_pda(denomination: u64) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[b"shredr_pool_vault", &denomination.to_le_bytes()],
+        &program_id(),
+    )
+}
+
+fn pool_ledger_pda(denomination: u64) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[b"shredr_pool_ledger", &denomination.to_le_bytes()],
+        &program_id(),
+    )
+}
+
+struct PoolSetup {
+    vault: Pubkey,
+    ledger: Pubkey,
+    vault_account: Account,
+    ledger_account: Account,
+}
+
+/// An initialized, empty pool holding `deposited` lamports of backing, so settle
+/// tests do not have to walk a deposit in first.
+fn pool_setup(deposited: u64, last_epoch_at: i64) -> PoolSetup {
+    let (vault, vault_bump) = pool_vault_pda(DENOM);
+    let (ledger, ledger_bump) = pool_ledger_pda(DENOM);
+
+    let mut vault_data = vec![0u8; VAULT_LEN];
+    vault_data[0..8].copy_from_slice(b"SHREDRPV");
+    vault_data[V_DENOMINATION..V_DENOMINATION + 8].copy_from_slice(&DENOM.to_le_bytes());
+    vault_data[V_TOTAL_DEPOSITED..V_TOTAL_DEPOSITED + 8].copy_from_slice(&deposited.to_le_bytes());
+    vault_data[V_LAST_EPOCH_AT..V_LAST_EPOCH_AT + 8].copy_from_slice(&last_epoch_at.to_le_bytes());
+    vault_data[V_BUMP] = vault_bump;
+
+    let mut ledger_data = vec![0u8; LEDGER_LEN];
+    ledger_data[0..8].copy_from_slice(b"SHREDRPL");
+    ledger_data[L_DENOMINATION..L_DENOMINATION + 8].copy_from_slice(&DENOM.to_le_bytes());
+    ledger_data[L_BUMP] = ledger_bump;
+
+    PoolSetup {
+        vault,
+        ledger,
+        vault_account: Account {
+            lamports: rent_exempt(VAULT_LEN) + deposited,
+            data: vault_data,
+            owner: program_id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+        ledger_account: Account {
+            lamports: rent_exempt(LEDGER_LEN),
+            data: ledger_data,
+            owner: program_id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    }
+}
+
+fn rent_exempt(len: usize) -> u64 {
+    mollusk().sysvars.rent.minimum_balance(len)
+}
+
+fn set_u32(data: &mut [u8], offset: usize, value: u32) {
+    data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Put `secrets` into the ledger as ingested, spendable notes.
+fn seed_commitments(ledger: &mut Account, secrets: &[[u8; 32]]) {
+    for (index, secret) in secrets.iter().enumerate() {
+        let start = L_COMMITMENTS + index * 32;
+        ledger.data[start..start + 32].copy_from_slice(&note::commitment(secret));
+    }
+    set_u32(&mut ledger.data, L_COMMITMENT_COUNT, secrets.len() as u32);
+}
+
+fn set_delegated(ledger: &mut Account, delegated: bool) {
+    ledger.data[L_DELEGATED] = delegated as u8;
+}
+
+fn spend_instruction(setup: &PoolSetup, secret: &[u8; 32], destination: &Pubkey) -> Instruction {
+    let mut data = vec![IX_POOL_SPEND];
+    data.extend_from_slice(secret);
+    data.extend_from_slice(&destination.to_bytes());
+
+    Instruction::new_with_bytes(
+        program_id(),
+        &data,
+        vec![AccountMeta::new(setup.ledger, false)],
+    )
+}
+
+// ── InitializePool ──
+
+#[test]
+fn initialize_pool_rejects_an_unlisted_denomination() {
+    let mollusk = mollusk();
+    let odd = 7 * LAMPORTS_PER_SOL;
+    let payer = Pubkey::new_unique();
+    let (vault, _) = pool_vault_pda(odd);
+    let (ledger, _) = pool_ledger_pda(odd);
+    let (system_program_key, system_program_account) =
+        mollusk_svm::program::keyed_account_for_system_program();
+
+    let mut data = vec![IX_INITIALIZE_POOL];
+    data.extend_from_slice(&odd.to_le_bytes());
+
+    // A pool for an arbitrary amount is a pool of one, and every odd
+    // denomination someone creates splits the anonymity set of the real ones.
+    mollusk.process_and_validate_instruction(
+        &Instruction::new_with_bytes(
+            program_id(),
+            &data,
+            vec![
+                AccountMeta::new(payer, true),
+                AccountMeta::new(vault, false),
+                AccountMeta::new(ledger, false),
+                AccountMeta::new_readonly(system_program_key, false),
+            ],
+        ),
+        &[
+            (payer, system_account(10 * LAMPORTS_PER_SOL)),
+            (vault, system_account(0)),
+            (ledger, system_account(0)),
+            (system_program_key, system_program_account),
+        ],
+        &[Check::err(shredr_err(ShredrError::InvalidDenomination))],
+    );
+}
+
+// ── PoolSpend ──
+
+#[test]
+fn pool_spend_queues_a_payout_and_burns_the_note() {
+    let mollusk = mollusk();
+    let secret = [1u8; 32];
+    let destination = Pubkey::new_unique();
+
+    let mut setup = pool_setup(DENOM, 0);
+    seed_commitments(&mut setup.ledger_account, &[secret]);
+    set_delegated(&mut setup.ledger_account, true);
+
+    let result = mollusk.process_and_validate_instruction(
+        &spend_instruction(&setup, &secret, &destination),
+        &[(setup.ledger, setup.ledger_account.clone())],
+        &[Check::success()],
+    );
+
+    let ledger = result.get_account(&setup.ledger).expect("ledger");
+
+    assert_eq!(ledger.data[L_NULLIFIER_COUNT], 1);
+    assert_eq!(ledger.data[L_PAYOUT_COUNT], 1);
+    assert_eq!(
+        &ledger.data[L_NULLIFIERS..L_NULLIFIERS + 32],
+        &note::nullifier(&secret),
+        "the published nullifier must be the note's, not its commitment"
+    );
+    assert_eq!(
+        &ledger.data[L_PAYOUTS + 32..L_PAYOUTS + 64],
+        &destination.to_bytes(),
+        "the payout must name the destination the spender asked for"
+    );
+
+    // The commitment stays. Removing it would shrink the anonymity set by
+    // exactly the note just spent, which is the one an observer watching the
+    // ledger would most like to see leave.
+    assert_eq!(ledger.data[L_COMMITMENT_COUNT], 1);
+}
+
+#[test]
+fn pool_spend_refuses_a_note_that_is_not_in_the_pool() {
+    let mollusk = mollusk();
+    let mut setup = pool_setup(DENOM, 0);
+    seed_commitments(&mut setup.ledger_account, &[[1u8; 32]]);
+    set_delegated(&mut setup.ledger_account, true);
+
+    mollusk.process_and_validate_instruction(
+        &spend_instruction(&setup, &[9u8; 32], &Pubkey::new_unique()),
+        &[(setup.ledger, setup.ledger_account.clone())],
+        &[Check::err(shredr_err(ShredrError::PoolUnknownNote))],
+    );
+}
+
+#[test]
+fn pool_spend_refuses_a_second_spend_of_the_same_note() {
+    let mollusk = mollusk();
+    let secret = [1u8; 32];
+
+    let mut setup = pool_setup(DENOM, 0);
+    seed_commitments(&mut setup.ledger_account, &[secret]);
+    set_delegated(&mut setup.ledger_account, true);
+
+    // Already spent: the nullifier is on record even though the commitment
+    // still is too.
+    setup.ledger_account.data[L_NULLIFIERS..L_NULLIFIERS + 32]
+        .copy_from_slice(&note::nullifier(&secret));
+    set_u32(&mut setup.ledger_account.data, L_NULLIFIER_COUNT, 1);
+
+    mollusk.process_and_validate_instruction(
+        &spend_instruction(&setup, &secret, &Pubkey::new_unique()),
+        &[(setup.ledger, setup.ledger_account.clone())],
+        &[Check::err(shredr_err(ShredrError::PoolNoteAlreadySpent))],
+    );
+}
+
+#[test]
+fn pool_spend_refuses_to_run_on_the_base_layer() {
+    let mollusk = mollusk();
+    let secret = [1u8; 32];
+
+    let mut setup = pool_setup(DENOM, 0);
+    seed_commitments(&mut setup.ledger_account, &[secret]);
+    set_delegated(&mut setup.ledger_account, false);
+
+    // The instruction data carries the note secret. On the base layer that data
+    // is public forever, and publishing it hands every observer the link between
+    // this note's commitment and its nullifier.
+    mollusk.process_and_validate_instruction(
+        &spend_instruction(&setup, &secret, &Pubkey::new_unique()),
+        &[(setup.ledger, setup.ledger_account.clone())],
+        &[Check::err(shredr_err(
+            ShredrError::PoolLedgerDelegationState,
+        ))],
+    );
+}
+
+// ── AdvanceEpoch ──
+
+fn queue_payout(ledger: &mut Account, index: usize, secret: &[u8; 32], destination: &Pubkey) {
+    let start = L_PAYOUTS + index * 64;
+    ledger.data[start..start + 32].copy_from_slice(&note::nullifier(secret));
+    ledger.data[start + 32..start + 64].copy_from_slice(&destination.to_bytes());
+    set_u32(&mut ledger.data, L_PAYOUT_COUNT, index as u32 + 1);
+}
+
+fn advance_instruction(setup: &PoolSetup, payer: &Pubkey, destinations: &[Pubkey]) -> Instruction {
+    let mut metas = vec![
+        AccountMeta::new(*payer, true),
+        AccountMeta::new(setup.vault, false),
+        AccountMeta::new(setup.ledger, false),
+    ];
+    metas.extend(destinations.iter().map(|d| AccountMeta::new(*d, false)));
+
+    Instruction::new_with_bytes(program_id(), &[IX_ADVANCE_EPOCH], metas)
+}
+
+/// A pool whose last epoch is far enough back that the batching floor elapsed.
+///
+/// Anchored to the harness clock rather than to zero: Mollusk starts at
+/// timestamp 0, so a literal 0 here is "the epoch turned just now".
+fn settled_pool(deposited: u64) -> PoolSetup {
+    let now = mollusk().sysvars.clock.unix_timestamp;
+    pool_setup(deposited, now - MIN_EPOCH_SECS - 1)
+}
+
+#[test]
+fn advance_epoch_pays_the_queue_and_ingests_pending_commitments() {
+    let mollusk = mollusk();
+    let payer = Pubkey::new_unique();
+    let destination = Pubkey::new_unique();
+    let secret = [1u8; 32];
+    let pending = note::commitment(&[2u8; 32]);
+
+    let mut setup = settled_pool(2 * DENOM);
+    queue_payout(&mut setup.ledger_account, 0, &secret, &destination);
+    setup.vault_account.data[V_PENDING..V_PENDING + 32].copy_from_slice(&pending);
+    set_u32(&mut setup.vault_account.data, V_PENDING_COUNT, 1);
+
+    let vault_before = setup.vault_account.lamports;
+
+    let result = mollusk.process_and_validate_instruction(
+        &advance_instruction(&setup, &payer, &[destination]),
+        &[
+            (payer, system_account(LAMPORTS_PER_SOL)),
+            (setup.vault, setup.vault_account.clone()),
+            (setup.ledger, setup.ledger_account.clone()),
+            (destination, system_account(0)),
+        ],
+        &[Check::success()],
+    );
+
+    let vault = result.get_account(&setup.vault).expect("vault");
+    let ledger = result.get_account(&setup.ledger).expect("ledger");
+
+    assert_eq!(
+        result.get_account(&destination).expect("destination").lamports,
+        DENOM,
+        "the destination is paid exactly one denomination"
+    );
+    assert_eq!(vault.lamports, vault_before - DENOM);
+    assert_eq!(
+        u64::from_le_bytes(
+            vault.data[V_TOTAL_SETTLED..V_TOTAL_SETTLED + 8]
+                .try_into()
+                .unwrap()
+        ),
+        DENOM
+    );
+
+    assert_eq!(ledger.data[L_PAYOUT_COUNT], 0, "the queue is drained");
+    assert_eq!(vault.data[V_PENDING_COUNT], 0, "pending commitments are ingested");
+    assert_eq!(ledger.data[L_COMMITMENT_COUNT], 1);
+    assert_eq!(&ledger.data[L_COMMITMENTS..L_COMMITMENTS + 32], &pending);
+
+    // Both halves move together, so a settle cannot be replayed against a ledger
+    // that has already advanced.
+    assert_eq!(vault.data[V_EPOCH], 1);
+    assert_eq!(ledger.data[L_EPOCH], 1);
+}
+
+#[test]
+fn advance_epoch_refuses_before_the_batching_floor() {
+    let mollusk = mollusk();
+    let payer = Pubkey::new_unique();
+    let destination = Pubkey::new_unique();
+
+    let now = mollusk.sysvars.clock.unix_timestamp;
+    let mut setup = pool_setup(DENOM, now - MIN_EPOCH_SECS + 5);
+    queue_payout(&mut setup.ledger_account, 0, &[1u8; 32], &destination);
+
+    // Without the floor anyone could settle immediately after a spend, and a
+    // batch of one ties the payout to the spend that queued it.
+    mollusk.process_and_validate_instruction(
+        &advance_instruction(&setup, &payer, &[destination]),
+        &[
+            (payer, system_account(LAMPORTS_PER_SOL)),
+            (setup.vault, setup.vault_account.clone()),
+            (setup.ledger, setup.ledger_account.clone()),
+            (destination, system_account(0)),
+        ],
+        &[Check::err(shredr_err(ShredrError::PoolEpochTooSoon))],
+    );
+}
+
+#[test]
+fn advance_epoch_refuses_a_destination_the_queue_did_not_name() {
+    let mollusk = mollusk();
+    let payer = Pubkey::new_unique();
+    let queued_destination = Pubkey::new_unique();
+    let attacker = Pubkey::new_unique();
+
+    let mut setup = settled_pool(DENOM);
+    queue_payout(&mut setup.ledger_account, 0, &[1u8; 32], &queued_destination);
+
+    // Destinations are matched positionally against the queue, so this is what
+    // stops whoever turns the epoch from redirecting a payout to themselves.
+    mollusk.process_and_validate_instruction(
+        &advance_instruction(&setup, &payer, &[attacker]),
+        &[
+            (payer, system_account(LAMPORTS_PER_SOL)),
+            (setup.vault, setup.vault_account.clone()),
+            (setup.ledger, setup.ledger_account.clone()),
+            (attacker, system_account(0)),
+        ],
+        &[Check::err(shredr_err(ShredrError::PoolDestinationMismatch))],
+    );
+}
+
+#[test]
+fn advance_epoch_refuses_to_pay_more_than_was_deposited() {
+    let mollusk = mollusk();
+    let payer = Pubkey::new_unique();
+    let destination = Pubkey::new_unique();
+
+    // Backing for nothing, but a payout queued anyway — what a compromised or
+    // buggy enclave would produce. The counters, not the balance, are what stop
+    // it: lamports anyone can send to a derivable address are not backing.
+    let mut setup = settled_pool(0);
+    setup.vault_account.lamports += 10 * DENOM;
+    queue_payout(&mut setup.ledger_account, 0, &[1u8; 32], &destination);
+
+    mollusk.process_and_validate_instruction(
+        &advance_instruction(&setup, &payer, &[destination]),
+        &[
+            (payer, system_account(LAMPORTS_PER_SOL)),
+            (setup.vault, setup.vault_account.clone()),
+            (setup.ledger, setup.ledger_account.clone()),
+            (destination, system_account(0)),
+        ],
+        &[Check::err(shredr_err(ShredrError::PoolInsufficientBacking))],
+    );
+}
+
+#[test]
+fn advance_epoch_settles_only_what_it_was_given_destinations_for() {
+    let mollusk = mollusk();
+    let payer = Pubkey::new_unique();
+    let first = Pubkey::new_unique();
+    let second = Pubkey::new_unique();
+
+    let mut setup = settled_pool(2 * DENOM);
+    queue_payout(&mut setup.ledger_account, 0, &[1u8; 32], &first);
+    queue_payout(&mut setup.ledger_account, 1, &[2u8; 32], &second);
+
+    // A queue larger than one transaction's account limit drains over several
+    // turns, so a partial settle must compact rather than drop.
+    let result = mollusk.process_and_validate_instruction(
+        &advance_instruction(&setup, &payer, &[first]),
+        &[
+            (payer, system_account(LAMPORTS_PER_SOL)),
+            (setup.vault, setup.vault_account.clone()),
+            (setup.ledger, setup.ledger_account.clone()),
+            (first, system_account(0)),
+        ],
+        &[Check::success()],
+    );
+
+    let ledger = result.get_account(&setup.ledger).expect("ledger");
+    assert_eq!(ledger.data[L_PAYOUT_COUNT], 1);
+    assert_eq!(
+        &ledger.data[L_PAYOUTS + 32..L_PAYOUTS + 64],
+        &second.to_bytes(),
+        "the unsettled payout moves to the front of the queue"
+    );
+    assert_eq!(result.get_account(&first).expect("first").lamports, DENOM);
+}
+
+#[test]
+fn advance_epoch_refuses_a_delegated_ledger() {
+    let mollusk = mollusk();
+    let payer = Pubkey::new_unique();
+
+    let mut setup = settled_pool(DENOM);
+    set_delegated(&mut setup.ledger_account, true);
+
+    mollusk.process_and_validate_instruction(
+        &advance_instruction(&setup, &payer, &[]),
+        &[
+            (payer, system_account(LAMPORTS_PER_SOL)),
+            (setup.vault, setup.vault_account.clone()),
+            (setup.ledger, setup.ledger_account.clone()),
+        ],
+        &[Check::err(shredr_err(
+            ShredrError::PoolLedgerDelegationState,
+        ))],
+    );
+}
+
+// ── PoolDeposit ──
+
+/// The deposit instruction plus the accounts it needs, given an attestation.
+fn deposit_call(
+    setup: &PoolSetup,
+    depositor: &Pubkey,
+    commitment: &[u8; 32],
+    attestation: Option<Instruction>,
+) -> (Instruction, Vec<(Pubkey, Account)>) {
+    let (system_program_key, system_program_account) =
+        mollusk_svm::program::keyed_account_for_system_program();
+
+    let mut data = vec![IX_POOL_DEPOSIT];
+    data.extend_from_slice(commitment);
+
+    let instruction = Instruction::new_with_bytes(
+        program_id(),
+        &data,
+        vec![
+            AccountMeta::new(*depositor, true),
+            AccountMeta::new(setup.vault, false),
+            AccountMeta::new_readonly(solana_sdk_ids::sysvar::instructions::ID, false),
+            AccountMeta::new_readonly(system_program_key, false),
+        ],
+    );
+
+    let attestations: Vec<Instruction> = attestation.into_iter().collect();
+    let (sysvar_key, sysvar_account) = instructions_sysvar_account(&attestations);
+
+    (
+        instruction,
+        vec![
+            (*depositor, system_account(5 * LAMPORTS_PER_SOL)),
+            (setup.vault, setup.vault_account.clone()),
+            (sysvar_key, sysvar_account),
+            (system_program_key, system_program_account),
+        ],
+    )
+}
+
+/// Subject is the commitment, not a burner: it is what is unique about this
+/// deposit. `cleared` is the wallet the relayer screened.
+fn pool_attestation(cleared: &Pubkey, commitment: &[u8; 32]) -> Instruction {
+    ed25519_ix(
+        &kyt_authority(),
+        &attestation_message(
+            1,
+            cleared,
+            &Pubkey::new_from_array(*commitment),
+            DENOM,
+            far_future(),
+        ),
+    )
+}
+
+#[test]
+fn pool_deposit_takes_the_denomination_and_queues_the_commitment() {
+    let mollusk = mollusk();
+    let depositor = Pubkey::new_unique();
+    let commitment = note::commitment(&[5u8; 32]);
+    let setup = pool_setup(0, 0);
+
+    let (instruction, accounts) = deposit_call(
+        &setup,
+        &depositor,
+        &commitment,
+        Some(pool_attestation(&depositor, &commitment)),
+    );
+    let vault_before = setup.vault_account.lamports;
+
+    let result =
+        mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
+
+    let vault = result.get_account(&setup.vault).expect("vault");
+    assert_eq!(vault.lamports, vault_before + DENOM);
+    assert_eq!(
+        u64::from_le_bytes(
+            vault.data[V_TOTAL_DEPOSITED..V_TOTAL_DEPOSITED + 8]
+                .try_into()
+                .unwrap()
+        ),
+        DENOM
+    );
+    assert_eq!(vault.data[V_PENDING_COUNT], 1);
+    assert_eq!(&vault.data[V_PENDING..V_PENDING + 32], &commitment);
+}
+
+#[test]
+fn pool_deposit_refuses_an_attestation_issued_to_another_wallet() {
+    let mollusk = mollusk();
+    let depositor = Pubkey::new_unique();
+    let cleared_wallet = Pubkey::new_unique();
+    let commitment = note::commitment(&[5u8; 32]);
+    let setup = pool_setup(0, 0);
+
+    // Right commitment, wrong wallet. Without the depositor check an attestation
+    // issued for a clean wallet could be presented by a dirty one that happened
+    // to learn the commitment.
+    let (instruction, accounts) = deposit_call(
+        &setup,
+        &depositor,
+        &commitment,
+        Some(pool_attestation(&cleared_wallet, &commitment)),
+    );
+
+    mollusk.process_and_validate_instruction(
+        &instruction,
+        &accounts,
+        &[Check::err(shredr_err(
+            ShredrError::KytAttestationDepositorMismatch,
+        ))],
+    );
+}
+
+#[test]
+fn pool_deposit_refuses_without_an_attestation() {
+    let mollusk = mollusk();
+    let depositor = Pubkey::new_unique();
+    let commitment = note::commitment(&[5u8; 32]);
+    let setup = pool_setup(0, 0);
+
+    let (instruction, accounts) = deposit_call(&setup, &depositor, &commitment, None);
+    let result = mollusk.process_instruction(&instruction, &accounts);
+
+    assert!(
+        matches!(result.raw_result, Err(InstructionError::Custom(code)) if KYT_ERRORS.contains(&code)),
+        "an unattested pool deposit must be refused; got {:?}",
+        result.raw_result
+    );
+    assert_eq!(
+        result.get_account(&setup.vault).expect("vault").lamports,
+        setup.vault_account.lamports,
+        "the gate must run before any lamports move"
+    );
 }
