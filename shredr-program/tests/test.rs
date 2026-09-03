@@ -3159,6 +3159,168 @@ fn advance_epoch_drops_a_note_already_spent_in_an_earlier_epoch() {
 }
 
 #[test]
+fn advance_epoch_pays_a_note_whose_record_address_was_griefed() {
+    let mollusk = mollusk();
+    let payer = Pubkey::new_unique();
+    let destination = Pubkey::new_unique();
+    let secret = [1u8; 32];
+
+    let mut setup = settled_pool(2 * DENOM);
+    queue_payout(&mut setup.ledger_account, 0, &secret, &destination);
+
+    let (instruction, mut accounts) = advance_call(&setup, &payer, &[(destination, secret)], &[]);
+
+    // Nullifiers go public the moment the ledger commits, and the record address
+    // derives from the nullifier — so anyone watching can send a lamport to it
+    // before the epoch turns. If that counted as "already spent" the payout
+    // would be dropped, the note would stay unrecorded, and it would be dropped
+    // again every epoch after: one lamport, and the deposit is unwithdrawable
+    // forever.
+    let (record, _) = nullifier_record_pda(&note::nullifier(&secret));
+    accounts
+        .iter_mut()
+        .find(|(key, _)| *key == record)
+        .expect("record account")
+        .1
+        .lamports = 1;
+
+    let result =
+        mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
+
+    assert_eq!(
+        result.get_account(&destination).expect("destination").lamports,
+        DENOM,
+        "a donated lamport must not cancel a withdrawal"
+    );
+    let written = result.get_account(&record).expect("record");
+    assert_eq!(written.owner, program_id());
+    assert_eq!(written.data, b"SHREDRNL", "the note is properly recorded");
+}
+
+/// The queue exists so payouts leave in batches — a batch of one is a batch
+/// that ties each payout to the spend that queued it. Every other settle test
+/// here passes a single pair, which is exactly how a defect that let only one
+/// payout through per turn stayed invisible.
+#[test]
+fn advance_epoch_settles_several_payouts_in_one_turn() {
+    let mollusk = mollusk();
+    let payer = Pubkey::new_unique();
+
+    let notes: [(Pubkey, [u8; 32]); 3] = [
+        (Pubkey::new_unique(), [11u8; 32]),
+        (Pubkey::new_unique(), [12u8; 32]),
+        (Pubkey::new_unique(), [13u8; 32]),
+    ];
+
+    let mut setup = settled_pool(3 * DENOM);
+    for (index, (destination, secret)) in notes.iter().enumerate() {
+        queue_payout(&mut setup.ledger_account, index, secret, destination);
+    }
+
+    let vault_before = setup.vault_account.lamports;
+    let (instruction, accounts) = advance_call(&setup, &payer, &notes, &[]);
+
+    let result =
+        mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
+
+    for (destination, secret) in &notes {
+        assert_eq!(
+            result.get_account(destination).expect("destination").lamports,
+            DENOM,
+            "every queued payout in the batch is paid"
+        );
+        let (record, _) = nullifier_record_pda(&note::nullifier(secret));
+        assert_eq!(
+            result.get_account(&record).expect("record").data,
+            b"SHREDRNL"
+        );
+    }
+
+    let vault = result.get_account(&setup.vault).expect("vault");
+    assert_eq!(
+        vault.lamports,
+        vault_before - 3 * (DENOM + record_rent()),
+        "the vault funds three payouts and three records, and nothing else"
+    );
+    assert_eq!(
+        u64::from_le_bytes(
+            vault.data[V_TOTAL_SETTLED..V_TOTAL_SETTLED + 8]
+                .try_into()
+                .unwrap()
+        ),
+        3 * DENOM
+    );
+    assert_eq!(
+        result.get_account(&payer).expect("payer").lamports,
+        LAMPORTS_PER_SOL,
+        "the epoch turner fronts the record rent and is made whole"
+    );
+    assert_eq!(
+        result.get_account(&setup.ledger).expect("ledger").data[L_PAYOUT_COUNT],
+        0
+    );
+}
+
+#[test]
+fn advance_epoch_survives_a_payout_aimed_at_the_vault() {
+    let mollusk = mollusk();
+    let payer = Pubkey::new_unique();
+    let good_destination = Pubkey::new_unique();
+    let poison = [1u8; 32];
+    let honest = [2u8; 32];
+
+    let mut setup = settled_pool(3 * DENOM);
+    // A spender picks their own destination, so nothing stops them naming the
+    // vault. Crediting the vault from itself is an unbalanced instruction the
+    // runtime rejects — so if this were an error rather than a skip, one note
+    // would sit at the front of the queue and brick every other withdrawal in
+    // the pool, permanently, for the price of a single deposit.
+    let vault_address = setup.vault;
+    queue_payout(&mut setup.ledger_account, 0, &poison, &vault_address);
+    queue_payout(&mut setup.ledger_account, 1, &honest, &good_destination);
+
+    let (instruction, accounts) = advance_call(
+        &setup,
+        &payer,
+        &[(vault_address, poison), (good_destination, honest)],
+        &[],
+    );
+
+    let result =
+        mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
+
+    assert_eq!(
+        result.get_account(&good_destination).expect("destination").lamports,
+        DENOM,
+        "an honest payout behind a poisoned one must still be paid"
+    );
+
+    let (poison_record, _) = nullifier_record_pda(&note::nullifier(&poison));
+    assert_eq!(
+        result.get_account(&poison_record).expect("record").data,
+        b"SHREDRNL",
+        "the poisoned note is burned so it cannot be replayed every epoch"
+    );
+
+    assert_eq!(
+        result.get_account(&setup.ledger).expect("ledger").data[L_PAYOUT_COUNT],
+        0,
+        "both entries are consumed"
+    );
+
+    let vault = result.get_account(&setup.vault).expect("vault");
+    assert_eq!(
+        u64::from_le_bytes(
+            vault.data[V_TOTAL_SETTLED..V_TOTAL_SETTLED + 8]
+                .try_into()
+                .unwrap()
+        ),
+        DENOM,
+        "only the honest payout counts as settled"
+    );
+}
+
+#[test]
 fn advance_epoch_refuses_before_the_batching_floor() {
     let mollusk = mollusk();
     let payer = Pubkey::new_unique();

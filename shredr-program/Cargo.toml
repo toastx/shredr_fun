@@ -27,6 +27,15 @@ logging = []
 devnet = []
 mainnet = []
 
+# `overflow-checks` is the one that matters: the arithmetic here is bounded by
+# explicit guards rather than by types, and a release build without it wraps
+# silently instead of aborting. The rest is standard SBF release tuning.
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+
 [[bench]]
 name = "compute_units"
 harness = false

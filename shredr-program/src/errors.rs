@@ -63,6 +63,9 @@ pub enum ShredrError {
     /// A nullifier record account is not the PDA for the payout it was passed
     /// against.
     PoolNullifierRecordMismatch = 6036,
+    /// The permission account is not the ACL PDA for this pool's ledger.
+    /// Without the right one the ledger would be delegated public.
+    PoolPermissionMismatch = 6037,
     /// The attestation cleared a different wallet than the one depositing.
     /// Only checkable where the depositor signs — see `kyt`.
     KytAttestationDepositorMismatch = 6035,
