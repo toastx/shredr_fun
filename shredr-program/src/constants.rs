@@ -25,25 +25,47 @@ pub mod seeds {
 // amount that left it, and an observer watching both legs links them by amount
 // alone unless the client normalizes sizes and spaces the legs in time.
 
+/// Nothing-up-my-sleeve placeholder authority: `sha256("shredr devnet kyt
+/// placeholder")`, base58-encoded. No one holds a secret key for it, which is
+/// the point — it is non-zero so the gate is *exercisable*, and unsignable so a
+/// devnet build that forgets to configure a real relayer still clears nothing.
+pub const KYT_AUTHORITY_PLACEHOLDER: &str = "BkGMGEoFKWUZgawwcp3uLt51DYCqF3prmQ6W5mutKvJL";
+
 /// Ed25519 public key of the KYT attestation authority — the compliance relayer
 /// whose signature every base-layer deposit has to carry. See `crate::kyt`.
 ///
-/// Set at build time so the key is part of the deployed binary and rotating it
-/// is a redeploy, not a runtime toggle:
+/// Set at build time, so the key is part of the deployed binary and rotating it
+/// is a redeploy rather than a runtime toggle:
 ///
 /// ```sh
-/// SHREDR_KYT_AUTHORITY=<base58 pubkey> cargo build-sbf
+/// SHREDR_KYT_AUTHORITY=<base58 pubkey> cargo build-sbf --features mainnet
 /// ```
 ///
-/// The default is the all-zero address, which no one can sign for. That is the
-/// intended failure mode for an unconfigured build: `verify_deposit_attestation`
-/// returns `KytAuthorityUnset` and every deposit is refused. A build that
-/// silently accepted deposits without a gate would be worse than one that takes
-/// none at all.
+/// # Unset
+///
+/// Under `mainnet` the fallback is the all-zero address, which
+/// `verify_deposit_attestation` refuses outright with `KytAuthorityUnset`. A
+/// mainnet build that forgets the key therefore takes no deposits at all, which
+/// is the only acceptable way for a compliance gate to be missing.
+///
+/// Elsewhere it falls back to [`KYT_AUTHORITY_PLACEHOLDER`], so the test suite
+/// has a real key shape to build attestations against. That is not a weaker
+/// gate — nobody can sign for the placeholder either, so the ed25519 precompile
+/// rejects the transaction before the program runs. It only moves the failure
+/// from "no authority" to "bad signature".
+#[cfg(feature = "mainnet")]
 pub const KYT_ATTESTATION_AUTHORITY: Address =
     Address::from_str_const(match option_env!("SHREDR_KYT_AUTHORITY") {
         Some(key) => key,
         None => "11111111111111111111111111111111",
+    });
+
+/// See [`KYT_ATTESTATION_AUTHORITY`] — devnet/default variant.
+#[cfg(not(feature = "mainnet"))]
+pub const KYT_ATTESTATION_AUTHORITY: Address =
+    Address::from_str_const(match option_env!("SHREDR_KYT_AUTHORITY") {
+        Some(key) => key,
+        None => KYT_AUTHORITY_PLACEHOLDER,
     });
 
 /// TEE validator identity for **mainnet** MagicBlock delegation.
