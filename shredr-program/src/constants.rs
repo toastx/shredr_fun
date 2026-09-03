@@ -10,10 +10,49 @@ pub const PROGRAM_ADDRESS: Address = Address::new_from_array(crate::ID);
 
 /// PDA seed prefixes. Mirrors `SEEDS` in `src/lib/ShredrProgram.ts`.
 pub mod seeds {
-    /// Stealth account PDAs: `[STEALTH_ADDRESS, burner_pubkey]`. The only prefix
-    /// the program uses; deposit and exit PDAs share it.
+    /// Stealth account PDAs: `[STEALTH_ADDRESS, burner_pubkey]`. Shared by the
+    /// deposit and exit PDAs of the pre-pool transfer path.
     pub const STEALTH_ADDRESS: &[u8] = b"shredr_stealth_address";
+
+    /// Pool vault PDAs: `[POOL_VAULT, denomination_le]`. One per denomination,
+    /// so the address is derivable from the amount alone and there is exactly
+    /// one canonical pool for each.
+    pub const POOL_VAULT: &[u8] = b"shredr_pool_vault";
+
+    /// Pool ledger PDAs: `[POOL_LEDGER, denomination_le]`.
+    pub const POOL_LEDGER: &[u8] = b"shredr_pool_ledger";
 }
+
+/// Lamport denominations a pool may be created for.
+///
+/// Enforced on-chain rather than left to the client. A pool for an arbitrary
+/// amount would be a pool of one, and every odd denomination someone creates
+/// splits the anonymity set of the ones that matter. Mirrors
+/// `NORMALIZED_DENOMINATIONS_SOL` in `src/lib/constants.ts`.
+pub const DENOMINATIONS: [u64; 4] = [
+    1_000_000_000,
+    10_000_000_000,
+    100_000_000_000,
+    1_000_000_000_000,
+];
+
+/// Whether a denomination has a pool.
+pub fn is_valid_denomination(lamports: u64) -> bool {
+    DENOMINATIONS.contains(&lamports)
+}
+
+/// Shortest gap between epoch turns, in seconds.
+///
+/// This is a privacy floor, not a rate limit. Settling is a base-layer event
+/// that credits a destination; if anyone could turn the epoch on demand, every
+/// payout would arrive alone in its own batch and the timing would tie it back
+/// to the spend that queued it. The floor forces payouts to leave in groups.
+///
+/// It is a *minimum* only. The keeper is expected to wait a randomized interval
+/// above it — a fixed cadence is itself a fingerprint, and the program has no
+/// cheap source of randomness to impose one. Longer means bigger batches, better
+/// privacy, and slower withdrawals; that trade is the operator's to make.
+pub const MIN_EPOCH_SECS: i64 = 60;
 
 // MagicBlock and ACL program addresses are not redeclared here — use the typed
 // consts from `ephemeral_rollups_pinocchio` (`DELEGATION_PROGRAM_ID`,
