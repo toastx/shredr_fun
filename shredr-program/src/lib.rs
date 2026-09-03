@@ -67,6 +67,7 @@ pub mod errors;
 pub mod helpers;
 pub mod instructions;
 pub mod kyt;
+pub mod merkle;
 pub mod note;
 pub mod state;
 

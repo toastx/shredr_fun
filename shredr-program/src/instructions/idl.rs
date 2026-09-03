@@ -81,19 +81,35 @@ pub enum StealthInstruction {
     PoolDeposit { commitment: [u8; 32] },
 
     /// Spend a note and queue its payout. Rollup only — carries the note secret
+    ///
+    /// Data is `[secret][destination][root][leaf_index][path]`, where `path` is
+    /// one 32-byte sibling per `merkle::DEPTH` level. Shank cannot describe the
+    /// fixed-size path, so the client builds this instruction by hand.
     #[account(0, writable, name = "ledger", desc = "Delegated pool ledger PDA")]
-    PoolSpend { secret: [u8; 32], destination: [u8; 32] },
+    PoolSpend {
+        secret: [u8; 32],
+        destination: [u8; 32],
+        root: [u8; 32],
+        leaf_index: u64,
+    },
 
-    /// Pay the payout queue out and fold pending commitments into the ledger
-    #[account(0, signer, writable, name = "payer", desc = "Pays the transaction")]
+    /// Pay the payout queue out and publish the commitment tree's current root
+    #[account(
+        0,
+        signer,
+        writable,
+        name = "payer",
+        desc = "Pays the transaction and fronts each nullifier record's rent, reimbursed by the vault"
+    )]
     #[account(1, writable, name = "vault", desc = "Pool vault PDA")]
     #[account(2, writable, name = "ledger", desc = "Undelegated pool ledger PDA")]
+    #[account(3, name = "system_program", desc = "System Program")]
     #[account(
-        3,
+        4,
         writable,
         optional,
-        name = "destinations",
-        desc = "One writable account per payout to settle, in queue order"
+        name = "settlements",
+        desc = "(destination, nullifier_record) pairs, matched positionally to the front of the payout queue"
     )]
     AdvanceEpoch,
 

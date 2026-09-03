@@ -18,32 +18,59 @@ commitment = sha256("SHREDR_NOTE_V1" || secret)    published when you deposit
 nullifier  = sha256("SHREDR_NULL_V1" || secret)    published when you spend
 ```
 
-That is the whole scheme. Given a commitment you cannot compute its nullifier and vice versa, so the base layer ends up holding two lists it cannot pair. There is no Merkle tree, no proof system, and no trusted setup: membership is a scan of the commitment list, and the step that reveals a secret happens inside the enclave.
+That is the whole scheme. Given a commitment you cannot compute its nullifier and vice versa, so the base layer ends up holding two sets it cannot pair. There is no proof system and no trusted setup — the step that reveals a secret happens inside the enclave instead.
 
 The domain tags are versioned. Changing either changes every note, so a new version is a new pool, not a migration.
+
+## Why a tree, and why one PDA per spent note
+
+Both are here for the same reason: **nothing in a pool may be capped by how many notes it holds.** A pool's size is exactly what makes it private, so a design that stops taking deposits stops working.
+
+The obvious implementation — keep every commitment in an array and scan it — fails that twice over. Deposits are capped by whatever fits in an account, and the scan gets slower as the pool gets more useful.
+
+**Commitments go into an incremental Merkle tree.** On-chain state is `DEPTH` nodes and a leaf counter, fixed forever. Inserting costs `DEPTH` hashes; proving membership costs `DEPTH` hashes. Capacity is `2^DEPTH` — 1,048,576 notes at the depth used here.
+
+The leaves are never stored on chain, and do not need to be. Deposits are public base-layer transactions, so anyone can replay them and rebuild the tree. That is the client's job, and the backend can serve the leaf list as a convenience without learning anything, since it is public either way.
+
+`DEPTH = 20` is bounded from above by the transaction, not by storage: a spend carries one sibling per level at 32 bytes each, and depth 20 leaves comfortable room inside Solana's 1232-byte limit. Depth 26 would not.
+
+**Spent notes become one small PDA each,** at `["shredr_nullifier", nullifier]`. Its *existence* is the double-spend check — creating it is the test, performed by the runtime, in constant time, with no set to search or outgrow. A withdrawal costs about 0.001 SOL of rent for that record, charged to the depositor as a surcharge at deposit time rather than deducted from the payout: a payout net of a fee would be a payout of a distinguishing size, and the whole point of fixed denominations is that every payout looks like every other.
+
+### Roots and the history ring
+
+A spender proves against the tree as it stood when their client read it, and every deposit since has moved the root. So the ledger keeps a ring of recent roots and accepts a path to any of them. Accepting only the newest would make every spend race every deposit in flight.
+
+The ring advances once per epoch turn, so `ROOT_HISTORY_CAP` is how many epochs a proof stays valid.
 
 ## Two accounts, and why
 
 ```
    ┌───────────────────────────┐        ┌───────────────────────────┐
-   │ PoolVault                 │        │ PoolLedger                │
+   │ PoolVault   ~0.7 KB       │        │ PoolLedger   ~3 KB        │
    │ base layer, always        │        │ alternates                │
-   │                           │        │                           │
-   │ • every lamport           │        │ • commitments (ingested)  │
-   │ • pending commitments     │───────▶│ • nullifiers              │
-   │ • total_deposited/settled │ ingest │ • payout queue            │
+   │                           │ publish│                           │
+   │ • every lamport           │  root  │ • recent roots (ring)     │
+   │ • tree root + frontier    │───────▶│ • payout queue            │
+   │ • total_deposited/settled │        │                           │
    │ • epoch, last_epoch_at    │◀───────│                           │
    └───────────────────────────┘ settle └───────────────────────────┘
               ▲                                      ▲
               │ PoolDeposit                          │ PoolSpend
          base layer                              rollup only
+
+   ┌───────────────────────────┐
+   │ NullifierRecord   8 bytes │  one per spent note, created at settle.
+   │ base layer                │  Existing *is* the double-spend check.
+   └───────────────────────────┘
 ```
+
+Neither pool account grows with the number of notes. Both are smaller than a single stealth PDA.
 
 A delegated account is not writable on the base layer. Put the funds and the spend ledger in one account and deposits fail whenever the pool is busy — which is most of the time, because the pool is only useful while it is delegated.
 
-So the funds never leave L1. The vault takes deposits at any moment and parks their commitments in `pending`. The ledger is the half that goes to the rollup, and it picks up those commitments the next time it comes back.
+So the funds never leave L1. The vault takes deposits at any moment and folds each commitment straight into the tree. The ledger is the half that goes to the rollup; each epoch turn publishes the vault's current root into it, which is what makes the deposits since the last turn spendable.
 
-The vault's invariant is `lamports >= rent_minimum + (total_deposited - total_settled)`. Greater-or-equal rather than equal, because anyone can send lamports to a derivable address; the surplus is unaccounted and deliberately never credited. If it were, a stranger could inflate the pool's apparent backing without a commitment to match it.
+The vault's invariant is `lamports >= rent_minimum + (total_deposited - total_settled)`. Greater-or-equal rather than equal, for two reasons: anyone can send lamports to a derivable address, and every deposit deliberately leaves behind the rent its note's eventual nullifier record will need. Neither counts as backing. If surplus did count, a stranger could inflate the pool's apparent backing without a commitment to match it.
 
 ## Instructions
 
@@ -77,13 +104,15 @@ It also gains something. Because the wallet is an account in the transaction, th
 
 ### The epoch
 
-An epoch is the batch. Spends accumulate a payout queue inside the rollup; a turn drains it on the base layer and folds in whatever deposits arrived meanwhile.
+An epoch is the batch. Spends accumulate a payout queue inside the rollup; a turn drains it on the base layer and publishes the root that deposits have been folding into meanwhile.
 
 `MIN_EPOCH_SECS` is a floor under how often that can happen, and it is a privacy control rather than a rate limit. If anyone could turn the epoch on demand, they would do it immediately after a spend, the payout would land alone in its batch, and the timing would tie it straight back to the spend that queued it. The floor forces payouts to leave in groups.
 
 It is only a minimum. The keeper is expected to wait a **randomized** interval above it — a fixed cadence is itself a fingerprint, and the program has no cheap randomness to impose one. Longer means bigger batches, better privacy and slower withdrawals; that trade belongs to whoever runs the pool, not to the program.
 
-Destinations are passed as trailing accounts and matched positionally against the front of the queue. Pass fewer than the queue holds and the rest stay for the next turn, which is how a queue bigger than one transaction's account limit drains.
+Trailing accounts come in `(destination, nullifier_record)` pairs, matched positionally against the front of the queue. Pass fewer pairs than the queue holds and the rest stay for the next turn, which is how a queue bigger than one transaction's account limit drains.
+
+A payout whose record already exists was spent in an earlier epoch, so its entry is dropped rather than honoured — and dropped rather than *failed*, because one stale entry erroring out would hold up every other withdrawal in the batch.
 
 ## System flow
 
@@ -93,19 +122,20 @@ Destinations are passed as trailing accounts and matched positionally against th
  3. PoolDeposit ─── base layer, public ───▶ vault += 1 denomination
                                             pending.push(commitment)
 
-        ... deposit sits in `pending` until the next epoch turn ...
+        ... the root has moved; the ledger has not seen it yet ...
 
- 4. AdvanceEpoch ──▶ ledger.commitments.push(commitment)     now spendable
+ 4. AdvanceEpoch ──▶ publishes the new root       the note is now spendable
  5. DelegatePoolLedger ──▶ ledger goes to the rollup
 
         ... time passes, other people deposit and spend ...
 
- 6. PoolSpend ─── inside the enclave ───▶ nullifier published
+ 6. PoolSpend ─── inside the enclave ───▶ Merkle path checked against a known root
                                           payout {nullifier, destination} queued
-        the secret is revealed here, and only here
+        the secret and the leaf index are revealed here, and only here
 
  7. CommitAndUndelegateStealth ──▶ ledger returns to the base layer
- 8. AdvanceEpoch ──▶ vault pays every queued destination, one denomination each
+ 8. AdvanceEpoch ──▶ one nullifier record created and one denomination paid,
+                     per queued payout
 ```
 
 What an observer with the full ledger has at the end: a set of deposits, a set of nullifiers, and a batch of identical transfers. Pairing any deposit with any withdrawal needs a secret they never saw.
@@ -114,7 +144,7 @@ What an observer with the full ledger has at the end: a set of deposits, a set o
 
 Being precise about the residue matters more than the diagram.
 
-**The rollup fee payer sees the link.** This is the big one and it follows directly from having no proof system. `PoolSpend` carries the note secret in its instruction data, so anyone who handles that transaction before it reaches the enclave can hash it twice and pair the commitment with the nullifier themselves. In practice that is Kora, which signs as fee payer.
+**The rollup fee payer sees the link.** This is the big one and it follows directly from having no proof system. `PoolSpend` carries the note secret *and its leaf index* in its instruction data, so anyone who handles that transaction before it reaches the enclave can pair the exact deposit with the withdrawal. In practice that is Kora, which signs as fee payer.
 
 The repo already keeps a separate instance for rollup traffic (`KORA_ROLLUP_RELAYER_URL`), and that separation stops being a convenience here and becomes a requirement: **the rollup relayer has to sit inside the same trust domain as the enclave**. Co-locate it, treat its logs the way `docs/concepts/rpc-opsec.md` treats the router's, and do not point it at a shared or third-party paymaster.
 
@@ -132,18 +162,18 @@ The fix, if this is not acceptable for a deployment, is a proof: replace the sec
 
 Both live in the program and share no state. Cycles already in flight finish on the old instructions; new deposits go to the pool. The stealth instructions can be removed once the last cycle drains — there is no migration and nothing to strand.
 
-## Capacities
+## Limits
 
-| | Value | What runs out |
+| | Value | What it bounds |
 |---|---|---|
-| `PENDING_COMMITMENT_CAP` | 64 | deposits between epoch turns |
-| `POOL_COMMITMENT_CAP` | 512 | deposits, **for the pool's lifetime** |
-| `POOL_NULLIFIER_CAP` | 512 | matches commitments |
+| `merkle::DEPTH` | 20 | 1,048,576 deposits per pool, ever |
+| `ROOT_HISTORY_CAP` | 32 | epochs a spend proof stays valid |
 | `PAYOUT_QUEUE_CAP` | 32 | spends between epoch turns |
+| withdrawals | — | **unbounded** |
 
-The ledger is ~34KB, about 0.24 SOL of rent. The commitment cap is a lifetime total, not a rolling window: a pool takes 512 deposits and then refuses.
+Only the first is a real ceiling, and reaching it means the pool took a million deposits. The other two are keeper-liveness bounds: a full payout queue makes further spends wait for a settle, and a proof older than 32 epochs needs regenerating against a newer root — which the client can always do, since it holds the leaves.
 
-The upgrade path is **pool rotation**, not a bigger account — key the PDAs by `(denomination, generation)` and have the client deposit into the newest. Growing the array instead costs rent linearly and makes the membership scan longer, and the scan is on every spend.
+Raising the depth is a redeploy with a new zero table and a larger spend instruction, and 20 already uses most of the transaction budget's headroom. If a pool ever fills, rotate it: key the PDAs by `(denomination, generation)` and have clients deposit into the newest.
 
 ## See also
 

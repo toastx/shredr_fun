@@ -48,11 +48,13 @@ pub fn nullifier(secret: &[u8; 32]) -> [u8; 32] {
 
 /// sha256 over the concatenation of `parts`, via the runtime syscall.
 ///
+/// Shared with [`crate::merkle`], which hashes node pairs with it.
+///
 /// The syscall takes a pointer to the slice-of-slices itself, so it hashes the
 /// concatenation without the program allocating a joined buffer — which matters
 /// in a `no_std` program with a bump allocator.
 #[cfg(target_os = "solana")]
-fn sha256(parts: &[&[u8]]) -> [u8; 32] {
+pub(crate) fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     let mut digest = [0u8; 32];
     // SAFETY: `parts` is a live slice of live slices, and `digest` is 32 bytes,
     // which is what the syscall writes.
@@ -70,7 +72,7 @@ fn sha256(parts: &[&[u8]]) -> [u8; 32] {
 /// the on-chain build does. `sha2` is a target-scoped dependency and is not
 /// linked into the SBF binary.
 #[cfg(not(target_os = "solana"))]
-fn sha256(parts: &[&[u8]]) -> [u8; 32] {
+pub(crate) fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
