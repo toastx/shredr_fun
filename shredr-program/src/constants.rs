@@ -25,6 +25,27 @@ pub mod seeds {
 // amount that left it, and an observer watching both legs links them by amount
 // alone unless the client normalizes sizes and spaces the legs in time.
 
+/// Ed25519 public key of the KYT attestation authority — the compliance relayer
+/// whose signature every base-layer deposit has to carry. See `crate::kyt`.
+///
+/// Set at build time so the key is part of the deployed binary and rotating it
+/// is a redeploy, not a runtime toggle:
+///
+/// ```sh
+/// SHREDR_KYT_AUTHORITY=<base58 pubkey> cargo build-sbf
+/// ```
+///
+/// The default is the all-zero address, which no one can sign for. That is the
+/// intended failure mode for an unconfigured build: `verify_deposit_attestation`
+/// returns `KytAuthorityUnset` and every deposit is refused. A build that
+/// silently accepted deposits without a gate would be worse than one that takes
+/// none at all.
+pub const KYT_ATTESTATION_AUTHORITY: Address =
+    Address::from_str_const(match option_env!("SHREDR_KYT_AUTHORITY") {
+        Some(key) => key,
+        None => "11111111111111111111111111111111",
+    });
+
 /// TEE validator identity for **mainnet** MagicBlock delegation.
 pub const TEE_VALIDATOR_MAINNET: &str = "MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo";
 
