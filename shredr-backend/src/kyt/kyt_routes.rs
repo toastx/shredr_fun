@@ -15,7 +15,7 @@ pub async fn screen_handler(
     State(state): State<Arc<KytState>>,
     Json(request): Json<ScreenRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    Ok(Json(state.screen(&request)?))
+    Ok(Json(state.screen(&request).await?))
 }
 
 pub fn router(state: Arc<KytState>) -> Router {

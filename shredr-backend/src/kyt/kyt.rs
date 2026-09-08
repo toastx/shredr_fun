@@ -7,9 +7,11 @@
 //! money" — which is why this is a separate key and a separate service from
 //! Kora, even though both are "the relayer" in casual conversation.
 //!
-//! The provider call is a stub. Everything around it — the message layout, the
-//! binding, the signing, the expiry — is real, because that is the part the
-//! on-chain program parses byte by byte.
+//! The verdict comes from the Solana Developer Platform's address-screening API
+//! — see `screening.rs`, which holds the provider call and the policy that
+//! reduces its per-provider rows to the one bit signed here. This file owns
+//! everything downstream of that bit: the message layout, the binding, the
+//! signing, the expiry — the part the on-chain program parses byte by byte.
 //!
 //! See `docs/concepts/kyt-gating.md`.
 
@@ -17,6 +19,7 @@ use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 
+use super::screening::ScreeningClient;
 use crate::error::AppError;
 
 // ── Attestation message layout, mirrored from `shredr-program/src/kyt.rs` ──
@@ -50,9 +53,13 @@ pub struct KytState {
     /// is unset.
     signing_key: Option<SigningKey>,
     ttl_secs: i64,
-    /// Base58 pubkeys the stub provider refuses, so the refusal path is
-    /// exercisable end to end without a provider account.
+    /// Base58 pubkeys refused ahead of the provider, so an operator can hard-block
+    /// an address without waiting on a vendor to agree.
     denylist: Vec<String>,
+    /// `None` when `SDP_API_KEY` is unset. Every request then reports unavailable
+    /// rather than allowing — an unscreened deposit must not be able to produce
+    /// an attestation that looks exactly like a screened one.
+    screening: Option<ScreeningClient>,
 }
 
 impl KytState {
@@ -78,8 +85,16 @@ impl KytState {
             None => tracing::warn!("KYT_AUTHORITY_KEY unset — screening will refuse every request"),
         }
 
+        let screening = ScreeningClient::from_env();
+        if screening.is_none() {
+            tracing::warn!(
+                "SDP_API_KEY unset — screening will report unavailable for every request"
+            );
+        }
+
         Self {
             signing_key,
+            screening,
             ttl_secs: std::env::var("KYT_ATTESTATION_TTL_SECS")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -99,54 +114,97 @@ impl KytState {
     /// you and said no" is a different fact from "the relayer is down", and the
     /// client needs to tell them apart — one is final, the other is worth
     /// retrying.
-    pub fn screen(&self, request: &ScreenRequest) -> Result<ScreenResponse, AppError> {
-        let key = self.signing_key.as_ref().ok_or_else(|| {
-            AppError::KytUnavailable("KYT authority key is not configured".to_string())
-        })?;
+    pub async fn screen(&self, request: &ScreenRequest) -> Result<ScreenResponse, AppError> {
+        // Validated before the provider is asked: a malformed request or an unset
+        // authority key should not cost a screening lookup, and should not need
+        // one in order to be rejected.
+        let validated = self.validate(request)?;
+        let (verdict, reason) = self.provider_verdict(&request.depositor).await?;
+        Ok(self.sign(&validated, verdict, reason))
+    }
 
-        let depositor = decode_pubkey(&request.depositor, "depositor")?;
-        let burner = decode_pubkey(&request.burner, "burner")?;
-        let max_amount: u64 = request
-            .max_amount
-            .parse()
-            .map_err(|_| AppError::Internal("maxAmount is not a u64".to_string()))?;
+    fn validate<'a>(&'a self, request: &ScreenRequest) -> Result<Validated<'a>, AppError> {
+        Ok(Validated {
+            key: self.signing_key.as_ref().ok_or_else(|| {
+                AppError::KytUnavailable("KYT authority key is not configured".to_string())
+            })?,
+            depositor: decode_pubkey(&request.depositor, "depositor")?,
+            burner: decode_pubkey(&request.burner, "burner")?,
+            max_amount: request
+                .max_amount
+                .parse()
+                .map_err(|_| AppError::Internal("maxAmount is not a u64".to_string()))?,
+        })
+    }
 
-        let (verdict, reason) = self.provider_verdict(&request.depositor);
+    /// Sign a verdict into the 90-byte message the program parses.
+    ///
+    /// Split out from [`KytState::screen`] so the layout stays pinnable without a
+    /// provider account: these are the bytes the on-chain code reads offset by
+    /// offset, and they are worth checking independently of how the verdict was
+    /// reached.
+    fn sign(
+        &self,
+        validated: &Validated<'_>,
+        verdict: u8,
+        reason: Option<String>,
+    ) -> ScreenResponse {
+        let key = validated.key;
         let expires_at = chrono::Utc::now().timestamp() + self.ttl_secs;
 
         // Bound before signed. An attestation that said only "this wallet is
         // clean" would be a bearer token good for every deposit that wallet
         // ever makes, so the burner and the ceiling go into the message.
-        let message = build_message(verdict, &depositor, &burner, max_amount, expires_at);
+        let message = build_message(
+            verdict,
+            &validated.depositor,
+            &validated.burner,
+            validated.max_amount,
+            expires_at,
+        );
         let signature = key.sign(&message).to_bytes();
 
-        Ok(ScreenResponse {
+        ScreenResponse {
             verdict,
             authority: bs58::encode(key.verifying_key().to_bytes()).into_string(),
             message: base64::engine::general_purpose::STANDARD.encode(message),
             signature: base64::engine::general_purpose::STANDARD.encode(signature),
             expires_at: expires_at as u64,
             reason,
-        })
+        }
     }
 
-    /// Stand-in for the compliance provider.
+    /// Ask the screening provider, with `KYT_DENYLIST` as a local override.
     ///
-    // TODO: replace with the real provider call once an endpoint exists. The
-    // shape it has to return is `(verdict, reason)` — everything else in this
-    // file is already the production path.
-    //
-    /// Clears everything except `KYT_DENYLIST`, which exists so the refusal path
-    /// can be exercised without a provider account.
-    fn provider_verdict(&self, depositor: &str) -> (u8, Option<String>) {
+    /// The denylist is checked first and short-circuits the network call: it is a
+    /// block an operator set by hand, so a provider outage must not quietly lift
+    /// it, and there is no point buying a lookup whose answer we would discard.
+    async fn provider_verdict(&self, depositor: &str) -> Result<(u8, Option<String>), AppError> {
         if self.denylist.iter().any(|entry| entry == depositor) {
-            return (
+            return Ok((
                 VERDICT_REFUSE,
                 Some("Depositor is on the screening denylist".to_string()),
-            );
+            ));
         }
-        (VERDICT_ALLOW, None)
+
+        self.screening
+            .as_ref()
+            .ok_or_else(|| {
+                AppError::KytUnavailable("Screening provider is not configured".to_string())
+            })?
+            .screen(depositor)
+            .await
     }
+}
+
+/// A request that has cleared local validation. Holding the key by reference
+/// keeps the signing path free of a second `Option` unwrap that could only ever
+/// succeed.
+struct Validated<'a> {
+    key: &'a SigningKey,
+    depositor: [u8; 32],
+    burner: [u8; 32],
+    max_amount: u64,
 }
 
 fn build_message(
@@ -221,6 +279,7 @@ mod tests {
             signing_key: Some(SigningKey::from_bytes(&[7u8; 32])),
             ttl_secs: 300,
             denylist: vec!["11111111111111111111111111111111".to_string()],
+            screening: None,
         }
     }
 
@@ -232,13 +291,19 @@ mod tests {
         }
     }
 
+    /// An address that is neither denylisted nor known to any provider.
+    fn unlisted() -> String {
+        bs58::encode([9u8; 32]).into_string()
+    }
+
     /// The program reads these offsets by hand and refuses anything that does
     /// not line up, so the layout is pinned here rather than assumed.
     #[test]
     fn message_is_bound_to_the_burner_and_the_ceiling() {
-        let response = state()
-            .screen(&request(&bs58::encode([9u8; 32]).into_string()))
-            .expect("screening");
+        let state = state();
+        let request = request(&unlisted());
+        let validated = state.validate(&request).expect("a well-formed request");
+        let response = state.sign(&validated, VERDICT_ALLOW, None);
 
         let message = base64::engine::general_purpose::STANDARD
             .decode(&response.message)
@@ -264,10 +329,15 @@ mod tests {
 
     /// A refusal is signed and returned, not raised as an error: the client has
     /// to be able to tell "screened and refused" from "relayer unreachable".
-    #[test]
-    fn a_refusal_is_signed_like_any_other_answer() {
+    ///
+    /// This runs with no provider configured, which also pins the other half of
+    /// the denylist's contract — it is answered locally, so an operator's hard
+    /// block does not depend on a vendor being reachable.
+    #[tokio::test]
+    async fn a_refusal_is_signed_like_any_other_answer() {
         let response = state()
             .screen(&request("11111111111111111111111111111111"))
+            .await
             .expect("a refusal is still a response");
 
         assert_eq!(response.verdict, VERDICT_REFUSE);
@@ -279,16 +349,29 @@ mod tests {
         assert_eq!(message[9], VERDICT_REFUSE);
     }
 
-    #[test]
-    fn refuses_to_sign_without_an_authority_key() {
+    /// The inverse, and the half that actually protects the pool: with no
+    /// provider configured, an address nobody has vouched for is reported
+    /// unavailable rather than waved through. A missing integration must fail
+    /// loudly, not silently open the gate.
+    #[tokio::test]
+    async fn an_unconfigured_provider_is_unavailable_not_an_allow() {
+        assert!(matches!(
+            state().screen(&request(&unlisted())).await,
+            Err(AppError::KytUnavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn refuses_to_sign_without_an_authority_key() {
         let unconfigured = KytState {
             signing_key: None,
             ttl_secs: 300,
             denylist: vec![],
+            screening: None,
         };
 
         assert!(matches!(
-            unconfigured.screen(&request(&bs58::encode([9u8; 32]).into_string())),
+            unconfigured.screen(&request(&unlisted())).await,
             Err(AppError::KytUnavailable(_))
         ));
     }
