@@ -26,6 +26,8 @@
 import {
   Ed25519Program,
   PublicKey,
+  type Connection,
+  type ParsedInstruction,
   type TransactionInstruction,
 } from "@solana/web3.js";
 
@@ -91,21 +93,30 @@ export class KytService {
   constructor(private readonly baseUrl: string = KYT_API_URL) {}
 
   /**
-   * Screen `depositor` for a deposit of up to `maxAmount` lamports into
-   * `burner`'s stealth PDA.
+   * Screen everything that funded `burner` for a deposit of up to `maxAmount`
+   * lamports into its stealth PDA.
    *
-   * `burner` and `maxAmount` are part of the signed message, not just the
-   * request: an attestation that said only "this wallet is clean" would be a
-   * bearer token good for every deposit that wallet ever makes.
+   * `funders` is ordered most-funding first, as {@link resolveBurnerFunders}
+   * returns it. Every entry is screened and any one of them being refused
+   * refuses the deposit; `funders[0]` is the address bound into the signed
+   * message, because the 90-byte layout has room for exactly one.
+   *
+   * `burner` and `maxAmount` are part of that message, not just the request: an
+   * attestation that said only "this wallet is clean" would be a bearer token
+   * good for every deposit that wallet ever makes.
    *
    * Returns the attestation whatever the verdict — including a refusal. Use
    * {@link attest} if you want a refusal to throw.
    */
   async screen(
-    depositor: PublicKey,
+    funders: PublicKey[],
     burner: PublicKey,
     maxAmount: bigint,
   ): Promise<KytAttestation> {
+    if (funders.length === 0) {
+      throw new KytUnavailableError("No funder to screen");
+    }
+
     if (!this.baseUrl) {
       throw new KytUnavailableError(
         "KYT screening endpoint is not configured (VITE_KYT_API_URL)",
@@ -118,7 +129,7 @@ export class KytService {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          depositor: depositor.toBase58(),
+          funders: funders.map((funder) => funder.toBase58()),
           burner: burner.toBase58(),
           maxAmount: maxAmount.toString(),
         }),
@@ -149,18 +160,115 @@ export class KytService {
    * program will reject anyway.
    */
   async attest(
-    depositor: PublicKey,
+    funders: PublicKey[],
     burner: PublicKey,
     maxAmount: bigint,
   ): Promise<TransactionInstruction> {
-    const attestation = await this.screen(depositor, burner, maxAmount);
+    const attestation = await this.screen(funders, burner, maxAmount);
 
     if (attestation.verdict !== KYT_VERDICT.allow) {
-      throw new KytRefusedError(attestation, depositor.toBase58());
+      throw new KytRefusedError(attestation, funders[0].toBase58());
     }
 
     return toInstruction(attestation);
   }
+}
+
+/**
+ * Resolve the addresses that funded `burner`, most-funding first.
+ *
+ * The address worth screening is the source of the funds, not whoever is driving
+ * the UI. A burner is a one-time address someone sends SOL to, and that sender
+ * is the only party whose provenance means anything — the connected wallet may
+ * not have paid for a single lamport of it.
+ *
+ * Reads System-program transfers into `burner`, including ones made by CPI, and
+ * sums per source so the caller can bind the largest. Anything it cannot
+ * attribute is left out rather than guessed at, and a burner with no attributable
+ * funder throws rather than falling back to a wallet that merely happens to be
+ * connected: screening the wrong address is worse than admitting we cannot.
+ *
+ * Throws {@link KytUnavailableError}, never a refusal — being unable to work out
+ * who paid is a transient state, and the funding transfer simply may not have
+ * confirmed yet.
+ */
+export async function resolveBurnerFunders(
+  connection: Connection,
+  burner: PublicKey,
+  limit = 20,
+): Promise<PublicKey[]> {
+  const address = burner.toBase58();
+
+  let signatures;
+  try {
+    signatures = await connection.getSignaturesForAddress(burner, { limit });
+  } catch (err) {
+    throw new KytUnavailableError("Could not read the burner's history", err);
+  }
+
+  if (signatures.length === 0) {
+    throw new KytUnavailableError(
+      "Burner has no on-chain history — its funding transfer may not have confirmed yet",
+    );
+  }
+
+  // Summed rather than collected, so a source that paid across several transfers
+  // is one funder with a total and not several small ones.
+  const contributed = new Map<string, bigint>();
+
+  for (const { signature } of signatures) {
+    let transaction;
+    try {
+      transaction = await connection.getParsedTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+      });
+    } catch (err) {
+      throw new KytUnavailableError(
+        "Could not read a transaction that funded the burner",
+        err,
+      );
+    }
+
+    // A failed transaction moved nothing, so it says nothing about provenance.
+    if (!transaction || transaction.meta?.err) continue;
+
+    const instructions = [
+      ...transaction.transaction.message.instructions,
+      ...(transaction.meta?.innerInstructions?.flatMap((entry) => entry.instructions) ?? []),
+    ];
+
+    for (const instruction of instructions) {
+      const parsed = (instruction as ParsedInstruction).parsed;
+      if (parsed?.type !== "transfer" && parsed?.type !== "transferWithSeed") {
+        continue;
+      }
+
+      const info = parsed.info as {
+        source?: string;
+        destination?: string;
+        lamports?: number;
+      };
+      // Self-transfers are not funding, and neither is anything aimed elsewhere.
+      if (info.destination !== address || !info.source || info.source === address) {
+        continue;
+      }
+
+      contributed.set(
+        info.source,
+        (contributed.get(info.source) ?? 0n) + BigInt(info.lamports ?? 0),
+      );
+    }
+  }
+
+  if (contributed.size === 0) {
+    throw new KytUnavailableError(
+      "Could not identify who funded the burner from its transaction history",
+    );
+  }
+
+  return [...contributed.entries()]
+    .sort(([, a], [, b]) => (a < b ? 1 : a > b ? -1 : 0))
+    .map(([source]) => new PublicKey(source));
 }
 
 /**

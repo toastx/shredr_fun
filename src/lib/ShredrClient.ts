@@ -35,7 +35,7 @@ import {
 import { resolveAnchor } from "./anchor";
 import { apiClient } from "./ApiClient";
 import { koraRelayer } from "./KoraRelayer";
-import { kytService } from "./KytService";
+import { kytService, resolveBurnerFunders } from "./KytService";
 import {
   Connection,
   Keypair,
@@ -543,7 +543,7 @@ export class ShredrClient {
    * @param burner        Burner keypair owning the stealth PDA (defaults to current)
    * @param depositAmount Lamports to sweep; defaults to the burner's full balance.
    *                      Pass `0n` to create an empty delegated PDA.
-   * @throws KytRefusedError if screening refuses the depositor — nothing is
+   * @throws KytRefusedError if screening refuses a funder — nothing is
    *         broadcast, so a refusal costs the caller nothing.
    * @returns Signature of the broadcast transaction
    */
@@ -608,27 +608,28 @@ export class ShredrClient {
   }
 
   /**
-   * Screen the connected wallet for a deposit into `burner`, and return the
-   * `Ed25519SigVerify` instruction to prepend.
+   * Screen whoever funded `burner`, and return the `Ed25519SigVerify`
+   * instruction to prepend.
    *
-   * The depositor is the wallet this client was initialised from. It never
-   * appears in the transaction — the deposit arrives from a one-time burner —
-   * so the only record connecting the two is the relayer's, which is the point:
-   * provable to an auditor holding those logs, invisible to a chain observer.
+   * The funders are read back off the chain rather than assumed to be the
+   * connected wallet. Those are not the same party: the burner is a one-time
+   * address that someone sends SOL to, and nothing requires that someone to be
+   * the wallet driving this session. Screening the connected wallet would attest
+   * to the provenance of whoever clicked the button, which is not the fact a
+   * compliance record needs to state.
+   *
+   * None of it appears in the transaction — the deposit arrives from the burner —
+   * so the only record connecting funder to burner is the relayer's, which is the
+   * point: provable to an auditor holding those logs, invisible to a chain
+   * observer.
    */
   private async attestDeposit(
     burner: PublicKey,
     depositAmount: bigint,
   ): Promise<TransactionInstruction> {
-    if (!this._walletPubkey) {
-      throw new Error("Client is not initialised — no depositor to screen");
-    }
+    const funders = await resolveBurnerFunders(this.getConnection(), burner);
 
-    return kytService.attest(
-      new PublicKey(this._walletPubkey),
-      burner,
-      depositAmount,
-    );
+    return kytService.attest(funders, burner, depositAmount);
   }
 
   /** Persist a note for a burner/PDA pair, tolerating an uninitialised tree. */
