@@ -35,7 +35,7 @@ import {
 import { resolveAnchor } from "./anchor";
 import { apiClient } from "./ApiClient";
 import { koraRelayer } from "./KoraRelayer";
-import { kytService, resolveBurnerFunders } from "./KytService";
+import { kytService } from "./KytService";
 import {
   Connection,
   Keypair,
@@ -611,12 +611,16 @@ export class ShredrClient {
    * Screen whoever funded `burner`, and return the `Ed25519SigVerify`
    * instruction to prepend.
    *
-   * The funders are read back off the chain rather than assumed to be the
-   * connected wallet. Those are not the same party: the burner is a one-time
-   * address that someone sends SOL to, and nothing requires that someone to be
-   * the wallet driving this session. Screening the connected wallet would attest
-   * to the provenance of whoever clicked the button, which is not the fact a
-   * compliance record needs to state.
+   * The funders are resolved by the relayer, off the chain, rather than sent
+   * from here. Two reasons, and the second is the one that matters. The connected
+   * wallet is not necessarily the wallet that paid — the burner is a one-time
+   * address someone sends SOL to, and screening the session owner would attest to
+   * the provenance of whoever clicked the button. And this client is the party
+   * asking to be screened, so anything it asserted about its own funding would
+   * carry no weight; the relayer has to find out for itself.
+   *
+   * The connection is passed only so the relayer's answer can be compared against
+   * a local read. That comparison is a desync signal, not a gate.
    *
    * None of it appears in the transaction — the deposit arrives from the burner —
    * so the only record connecting funder to burner is the relayer's, which is the
@@ -627,9 +631,7 @@ export class ShredrClient {
     burner: PublicKey,
     depositAmount: bigint,
   ): Promise<TransactionInstruction> {
-    const funders = await resolveBurnerFunders(this.getConnection(), burner);
-
-    return kytService.attest(funders, burner, depositAmount);
+    return kytService.attest(burner, depositAmount, this.getConnection());
   }
 
   /** Persist a note for a burner/PDA pair, tolerating an uninitialised tree. */

@@ -19,6 +19,7 @@ use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 
+use super::funders::FunderResolver;
 use super::screening::ScreeningClient;
 use crate::error::AppError;
 
@@ -60,6 +61,10 @@ pub struct KytState {
     /// rather than allowing — an unscreened deposit must not be able to produce
     /// an attestation that looks exactly like a screened one.
     screening: Option<ScreeningClient>,
+    /// `None` when `KYT_RPC_URL` is unset. Without it there is no way to learn
+    /// who funded a burner, and taking the client's word for it is exactly what
+    /// this exists to avoid — so every request reports unavailable.
+    funders: Option<FunderResolver>,
 }
 
 impl KytState {
@@ -92,9 +97,17 @@ impl KytState {
             );
         }
 
+        let funders = FunderResolver::from_env();
+        if funders.is_none() {
+            tracing::warn!(
+                "KYT_RPC_URL unset — funder resolution will report unavailable for every request"
+            );
+        }
+
         Self {
             signing_key,
             screening,
+            funders,
             ttl_secs: std::env::var("KYT_ATTESTATION_TTL_SECS")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -115,32 +128,39 @@ impl KytState {
     /// client needs to tell them apart — one is final, the other is worth
     /// retrying.
     pub async fn screen(&self, request: &ScreenRequest) -> Result<ScreenResponse, AppError> {
-        // Validated before the provider is asked: a malformed request or an unset
-        // authority key should not cost a screening lookup, and should not need
-        // one in order to be rejected.
+        // Validated before anything is bought: a malformed burner or an unset
+        // authority key should not cost an RPC round trip, let alone a screening
+        // lookup, and should not need either in order to be rejected.
         let validated = self.validate(request)?;
-        let (verdict, reason) = self.provider_verdict(&request.funders).await?;
-        Ok(self.sign(&validated, verdict, reason))
+
+        // Read off the chain, never off the request. The party asking to be
+        // screened is exactly the party with a reason to name a cleaner address
+        // than the one that actually paid, so the request carries only the
+        // burner — a public address whose funding history is chain record.
+        let funders = self
+            .funders
+            .as_ref()
+            .ok_or_else(|| {
+                AppError::KytUnavailable("Funder resolution is not configured".to_string())
+            })?
+            .resolve(&request.burner)
+            .await?;
+
+        let primary = funders.first().ok_or_else(|| {
+            AppError::KytUnavailable("Could not identify who funded the burner".to_string())
+        })?;
+        let depositor = decode_pubkey(primary, "funder")?;
+
+        let (verdict, reason) = self.provider_verdict(&funders).await?;
+
+        Ok(self.sign(&validated, depositor, funders, verdict, reason))
     }
 
     fn validate<'a>(&'a self, request: &ScreenRequest) -> Result<Validated<'a>, AppError> {
-        let primary = request
-            .funders
-            .first()
-            .ok_or_else(|| AppError::Internal("no funder to screen".to_string()))?;
-
-        // Every funder is decoded up front, not just the bound one. A malformed
-        // address further down the list would otherwise surface only as a
-        // provider error, after we had already paid for the lookups ahead of it.
-        for funder in &request.funders {
-            decode_pubkey(funder, "funder")?;
-        }
-
         Ok(Validated {
             key: self.signing_key.as_ref().ok_or_else(|| {
                 AppError::KytUnavailable("KYT authority key is not configured".to_string())
             })?,
-            depositor: decode_pubkey(primary, "funder")?,
             burner: decode_pubkey(&request.burner, "burner")?,
             max_amount: request
                 .max_amount
@@ -149,15 +169,11 @@ impl KytState {
         })
     }
 
-    /// Sign a verdict into the 90-byte message the program parses.
-    ///
-    /// Split out from [`KytState::screen`] so the layout stays pinnable without a
-    /// provider account: these are the bytes the on-chain code reads offset by
-    /// offset, and they are worth checking independently of how the verdict was
-    /// reached.
     fn sign(
         &self,
         validated: &Validated<'_>,
+        depositor: [u8; 32],
+        funders: Vec<String>,
         verdict: u8,
         reason: Option<String>,
     ) -> ScreenResponse {
@@ -169,7 +185,7 @@ impl KytState {
         // ever makes, so the burner and the ceiling go into the message.
         let message = build_message(
             verdict,
-            &validated.depositor,
+            &depositor,
             &validated.burner,
             validated.max_amount,
             expires_at,
@@ -182,6 +198,7 @@ impl KytState {
             message: base64::engine::general_purpose::STANDARD.encode(message),
             signature: base64::engine::general_purpose::STANDARD.encode(signature),
             expires_at: expires_at as u64,
+            funders,
             reason,
         }
     }
@@ -222,7 +239,6 @@ impl KytState {
 /// succeed.
 struct Validated<'a> {
     key: &'a SigningKey,
-    depositor: [u8; 32],
     burner: [u8; 32],
     max_amount: u64,
 }
@@ -272,13 +288,6 @@ fn decode_pubkey(encoded: &str, field: &str) -> Result<[u8; 32], AppError> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenRequest {
-    /// Everything that funded the burner, most-funding first.
-    ///
-    /// All of them are screened; `funders[0]` is the one bound into the signed
-    /// message, because the 90-byte layout has room for exactly one. Resolved
-    /// from chain by the client — the connected wallet is not necessarily the
-    /// wallet that paid.
-    pub funders: Vec<String>,
     pub burner: String,
     /// A string, because JSON numbers cannot carry a u64 without loss.
     pub max_amount: String,
@@ -292,6 +301,14 @@ pub struct ScreenResponse {
     pub message: String,
     pub signature: String,
     pub expires_at: u64,
+    /// The funders the relayer resolved from chain, most-funding first, with
+    /// `funders[0]` the address bound into `message`.
+    ///
+    /// Returned so the client can compare them against its own read. That
+    /// comparison is a desync signal, not a security control — a client an
+    /// attacker has modified can simply skip it. What actually holds is that
+    /// these are the addresses the relayer screened and signed over.
+    pub funders: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -300,28 +317,26 @@ pub struct ScreenResponse {
 mod tests {
     use super::*;
 
+    const DENYLISTED: &str = "11111111111111111111111111111111";
+
     fn state() -> KytState {
         KytState {
             signing_key: Some(SigningKey::from_bytes(&[7u8; 32])),
             ttl_secs: 300,
-            denylist: vec!["11111111111111111111111111111111".to_string()],
+            denylist: vec![DENYLISTED.to_string()],
             screening: None,
+            funders: None,
         }
     }
 
-    fn request(funder: &str) -> ScreenRequest {
-        funded_by(vec![funder.to_string()])
-    }
-
-    fn funded_by(funders: Vec<String>) -> ScreenRequest {
+    /// The request carries only the burner now — who paid is the relayer's to
+    /// find out, not the client's to assert.
+    fn request() -> ScreenRequest {
         ScreenRequest {
-            funders,
             burner: bs58::encode([3u8; 32]).into_string(),
             max_amount: "5000000000".to_string(),
         }
     }
-
-    const DENYLISTED: &str = "11111111111111111111111111111111";
 
     /// An address that is neither denylisted nor known to any provider.
     fn unlisted() -> String {
@@ -333,9 +348,15 @@ mod tests {
     #[test]
     fn message_is_bound_to_the_burner_and_the_ceiling() {
         let state = state();
-        let request = request(&unlisted());
+        let request = request();
         let validated = state.validate(&request).expect("a well-formed request");
-        let response = state.sign(&validated, VERDICT_ALLOW, None);
+        let response = state.sign(
+            &validated,
+            [9u8; 32],
+            vec![unlisted()],
+            VERDICT_ALLOW,
+            None,
+        );
 
         let message = base64::engine::general_purpose::STANDARD
             .decode(&response.message)
@@ -357,38 +378,70 @@ mod tests {
             .decode(&response.signature)
             .expect("base64");
         assert_eq!(signature.len(), 64);
+
+        // Returned so the client can compare against its own read of the chain.
+        assert_eq!(response.funders, vec![unlisted()]);
     }
 
     /// A refusal is signed and returned, not raised as an error: the client has
     /// to be able to tell "screened and refused" from "relayer unreachable".
-    ///
-    /// This runs with no provider configured, which also pins the other half of
-    /// the denylist's contract — it is answered locally, so an operator's hard
-    /// block does not depend on a vendor being reachable.
     #[tokio::test]
     async fn a_refusal_is_signed_like_any_other_answer() {
-        let response = state()
-            .screen(&request(DENYLISTED))
+        let state = state();
+        let (verdict, reason) = state
+            .provider_verdict(&[DENYLISTED.to_string()])
             .await
-            .expect("a refusal is still a response");
+            .expect("the denylist is answered locally");
 
-        assert_eq!(response.verdict, VERDICT_REFUSE);
-        assert!(response.reason.is_some());
+        assert_eq!(verdict, VERDICT_REFUSE);
+        assert!(reason.is_some());
+
+        let request = request();
+        let validated = state.validate(&request).expect("a well-formed request");
+        let response = state.sign(
+            &validated,
+            [9u8; 32],
+            vec![DENYLISTED.to_string()],
+            verdict,
+            reason,
+        );
 
         let message = base64::engine::general_purpose::STANDARD
             .decode(&response.message)
             .expect("base64");
         assert_eq!(message[9], VERDICT_REFUSE);
+        assert!(response.reason.is_some());
     }
 
-    /// The inverse, and the half that actually protects the pool: with no
-    /// provider configured, an address nobody has vouched for is reported
-    /// unavailable rather than waved through. A missing integration must fail
-    /// loudly, not silently open the gate.
+    /// The whole point of screening a list: one tainted source taints the
+    /// deposit, even when it is not the source bound into the attestation.
+    #[tokio::test]
+    async fn a_denylisted_funder_refuses_even_when_it_is_not_the_primary() {
+        let (verdict, _) = state()
+            .provider_verdict(&[unlisted(), DENYLISTED.to_string()])
+            .await
+            .expect("the denylist is answered locally");
+
+        assert_eq!(verdict, VERDICT_REFUSE);
+    }
+
+    /// With no provider configured, an address nobody has vouched for is not
+    /// waved through. A missing integration must fail loudly, not open the gate.
     #[tokio::test]
     async fn an_unconfigured_provider_is_unavailable_not_an_allow() {
         assert!(matches!(
-            state().screen(&request(&unlisted())).await,
+            state().provider_verdict(&[unlisted()]).await,
+            Err(AppError::KytUnavailable(_))
+        ));
+    }
+
+    /// The property that moving resolution server-side buys: with no way to find
+    /// out who funded the burner there is nothing to screen, and nothing the
+    /// client could have said would substitute for it.
+    #[tokio::test]
+    async fn an_unconfigured_resolver_is_unavailable_not_an_allow() {
+        assert!(matches!(
+            state().screen(&request()).await,
             Err(AppError::KytUnavailable(_))
         ));
     }
@@ -400,36 +453,13 @@ mod tests {
             ttl_secs: 300,
             denylist: vec![],
             screening: None,
+            funders: None,
         };
 
         assert!(matches!(
-            unconfigured.screen(&request(&unlisted())).await,
+            unconfigured.screen(&request()).await,
             Err(AppError::KytUnavailable(_))
         ));
-    }
-
-    /// The whole point of taking a list: one tainted source taints the deposit,
-    /// even when it is not the source bound into the attestation.
-    #[tokio::test]
-    async fn a_denylisted_funder_refuses_even_when_it_is_not_the_primary() {
-        let response = state()
-            .screen(&funded_by(vec![unlisted(), DENYLISTED.to_string()]))
-            .await
-            .expect("a refusal is still a response");
-
-        assert_eq!(response.verdict, VERDICT_REFUSE);
-
-        // Still bound to the primary funder — the refusal does not change which
-        // address the message commits to.
-        let message = base64::engine::general_purpose::STANDARD
-            .decode(&response.message)
-            .expect("base64");
-        assert_eq!(&message[10..42], &[9u8; 32]);
-    }
-
-    #[tokio::test]
-    async fn a_request_with_no_funder_is_rejected() {
-        assert!(state().screen(&funded_by(vec![])).await.is_err());
     }
 
     #[test]

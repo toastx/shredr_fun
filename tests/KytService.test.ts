@@ -21,6 +21,7 @@ import {
     KytRefusedError,
     KytService,
     KytUnavailableError,
+    fundersAgree,
     resolveBurnerFunders,
     toInstruction,
     type KytAttestation,
@@ -41,6 +42,7 @@ function attestation(overrides: Partial<KytAttestation> = {}): KytAttestation {
         message: Buffer.alloc(ATTESTATION_BYTES, 7).toString('base64'),
         signature: Buffer.alloc(64, 9).toString('base64'),
         expiresAt: 1_800_000_000,
+        funders: [FUNDER.toBase58()],
         ...overrides,
     };
 }
@@ -74,16 +76,21 @@ describe('KytService', () => {
         }) as typeof fetch;
 
         try {
-            await new KytService(BASE).screen([FUNDER], BURNER, 5_000_000_000n);
+            await new KytService(BASE).screen(BURNER, 5_000_000_000n);
         } finally {
             globalThis.fetch = original;
         }
 
         // An attestation that said only "this wallet is clean" would be a bearer
         // token good for every deposit that wallet ever makes.
-        expect(body.funders).to.deep.equal([FUNDER.toBase58()]);
         expect(body.burner).to.equal(BURNER.toBase58());
         expect(body.maxAmount).to.equal('5000000000');
+
+        // And the client does not get to nominate who is screened. Whatever it
+        // claimed would be an assertion by the party asking to be cleared, so
+        // the relayer resolves it instead and the request carries nothing.
+        expect(body).to.not.have.property('funders');
+        expect(body).to.not.have.property('depositor');
     });
 
     it('throws a distinct, final error when a funder is refused', async () => {
@@ -93,7 +100,7 @@ describe('KytService', () => {
         });
 
         try {
-            await new KytService(BASE).attest([FUNDER], BURNER, 1n);
+            await new KytService(BASE).attest(BURNER, 1n);
             expect.fail('a refusal must throw');
         } catch (err) {
             expect(err).to.be.instanceOf(KytRefusedError);
@@ -116,12 +123,16 @@ describe('KytService', () => {
                 }),
             },
             { ok: true, body: attestation({ signature: Buffer.alloc(63).toString('base64') }) },
+            // No resolution means nothing to compare against and no evidence the
+            // relayer screened anything.
+            { ok: true, body: attestation({ funders: undefined as unknown as string[] }) },
+            { ok: true, body: attestation({ funders: [7] as unknown as string[] }) },
         ];
 
         for (const response of cases) {
             const restore = stubFetch(response);
             try {
-                await new KytService(BASE).screen([FUNDER], BURNER, 1n);
+                await new KytService(BASE).screen(BURNER, 1n);
                 expect.fail(`expected a failure for ${JSON.stringify(response)}`);
             } catch (err) {
                 expect(err, JSON.stringify(response)).to.be.instanceOf(KytUnavailableError);
@@ -133,7 +144,7 @@ describe('KytService', () => {
 
     it('fails loudly when no screening endpoint is configured', async () => {
         try {
-            await new KytService('').screen([FUNDER], BURNER, 1n);
+            await new KytService('').screen(BURNER, 1n);
             expect.fail('an unconfigured endpoint must throw');
         } catch (err) {
             expect(err).to.be.instanceOf(KytUnavailableError);
@@ -277,5 +288,87 @@ describe('resolveBurnerFunders', () => {
                 expect(err).to.be.instanceOf(KytUnavailableError);
             }
         }
+    });
+});
+
+describe('fundersAgree', () => {
+    /** A connection whose only transaction funds BURNER from `sources`. */
+    function connectionFundedBy(sources: string[]): Connection {
+        return {
+            getSignaturesForAddress: async () => [{ signature: 'sig1' }],
+            getParsedTransaction: async () => ({
+                meta: { err: null, innerInstructions: [] },
+                transaction: {
+                    message: {
+                        instructions: sources.map((source) => ({
+                            program: 'system',
+                            parsed: {
+                                type: 'transfer',
+                                info: {
+                                    source,
+                                    destination: BURNER.toBase58(),
+                                    lamports: 1_000,
+                                },
+                            },
+                        })),
+                    },
+                },
+            }),
+        } as unknown as Connection;
+    }
+
+    /** Run `body` with console.warn captured. */
+    async function capturingWarnings(
+        body: () => Promise<boolean>,
+    ): Promise<{ result: boolean; warnings: number }> {
+        const original = console.warn;
+        let warnings = 0;
+        console.warn = () => {
+            warnings += 1;
+        };
+        try {
+            return { result: await body(), warnings };
+        } finally {
+            console.warn = original;
+        }
+    }
+
+    it('agrees when both sides read the same funder', async () => {
+        const { result, warnings } = await capturingWarnings(() =>
+            fundersAgree(connectionFundedBy([FUNDER.toBase58()]), BURNER, [
+                FUNDER.toBase58(),
+            ]),
+        );
+
+        expect(result).to.equal(true);
+        expect(warnings).to.equal(0);
+    });
+
+    it('reports a divergence rather than throwing on it', async () => {
+        const { result, warnings } = await capturingWarnings(() =>
+            fundersAgree(connectionFundedBy([OTHER_FUNDER.toBase58()]), BURNER, [
+                FUNDER.toBase58(),
+            ]),
+        );
+
+        // Surfaced, not fatal: the two sides read different RPC nodes at
+        // different moments, and the relayer's list is the one that was signed.
+        expect(result).to.equal(false);
+        expect(warnings).to.equal(1);
+    });
+
+    it('defers to the relayer when the local read fails', async () => {
+        const broken = {
+            getSignaturesForAddress: async () => {
+                throw new Error('rpc down');
+            },
+        } as unknown as Connection;
+
+        const { result, warnings } = await capturingWarnings(() =>
+            fundersAgree(broken, BURNER, [FUNDER.toBase58()]),
+        );
+
+        expect(result).to.equal(true);
+        expect(warnings).to.equal(0);
     });
 });

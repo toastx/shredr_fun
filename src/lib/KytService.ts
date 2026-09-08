@@ -63,6 +63,9 @@ export interface KytAttestation {
   signature: string;
   /** Unix seconds; the deposit must land before this. */
   expiresAt: number;
+  /** Funders the relayer resolved from chain, most-funding first.
+   *  `funders[0]` is the address bound into `message`. */
+  funders: string[];
   /** Human-readable, present on a refusal. Never shown to the depositor's
    *  counterparty — it is the relayer's reasoning, not theirs. */
   reason?: string;
@@ -93,29 +96,24 @@ export class KytService {
   constructor(private readonly baseUrl: string = KYT_API_URL) {}
 
   /**
-   * Screen everything that funded `burner` for a deposit of up to `maxAmount`
-   * lamports into its stealth PDA.
+   * Screen whoever funded `burner` for a deposit of up to `maxAmount` lamports
+   * into its stealth PDA.
    *
-   * `funders` is ordered most-funding first, as {@link resolveBurnerFunders}
-   * returns it. Every entry is screened and any one of them being refused
-   * refuses the deposit; `funders[0]` is the address bound into the signed
-   * message, because the 90-byte layout has room for exactly one.
+   * The request carries the burner and nothing else. Who funded it is the
+   * relayer's to work out, from the chain — this client is the party asking to
+   * be screened, so anything it asserted about its own funding would be worth
+   * exactly nothing. The resolved funders come back on
+   * {@link KytAttestation.funders}, most-funding first, and every one of them is
+   * screened: any single refusal refuses the deposit.
    *
-   * `burner` and `maxAmount` are part of that message, not just the request: an
-   * attestation that said only "this wallet is clean" would be a bearer token
-   * good for every deposit that wallet ever makes.
+   * `burner` and `maxAmount` are part of the signed message, not just the
+   * request: an attestation that said only "this wallet is clean" would be a
+   * bearer token good for every deposit that wallet ever makes.
    *
    * Returns the attestation whatever the verdict — including a refusal. Use
    * {@link attest} if you want a refusal to throw.
    */
-  async screen(
-    funders: PublicKey[],
-    burner: PublicKey,
-    maxAmount: bigint,
-  ): Promise<KytAttestation> {
-    if (funders.length === 0) {
-      throw new KytUnavailableError("No funder to screen");
-    }
+  async screen(burner: PublicKey, maxAmount: bigint): Promise<KytAttestation> {
 
     if (!this.baseUrl) {
       throw new KytUnavailableError(
@@ -129,7 +127,6 @@ export class KytService {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          funders: funders.map((funder) => funder.toBase58()),
           burner: burner.toBase58(),
           maxAmount: maxAmount.toString(),
         }),
@@ -160,18 +157,78 @@ export class KytService {
    * program will reject anyway.
    */
   async attest(
-    funders: PublicKey[],
     burner: PublicKey,
     maxAmount: bigint,
+    connection?: Connection,
   ): Promise<TransactionInstruction> {
-    const attestation = await this.screen(funders, burner, maxAmount);
+    const attestation = await this.screen(burner, maxAmount);
 
     if (attestation.verdict !== KYT_VERDICT.allow) {
-      throw new KytRefusedError(attestation, funders[0].toBase58());
+      throw new KytRefusedError(
+        attestation,
+        attestation.funders[0] ?? burner.toBase58(),
+      );
+    }
+
+    // Diagnostic only, and deliberately after the verdict: see
+    // {@link fundersAgree} for why this cannot be a gate.
+    if (connection) {
+      await fundersAgree(connection, burner, attestation.funders);
     }
 
     return toInstruction(attestation);
   }
+}
+
+/**
+ * Compare the relayer's funder list against a local read of the same chain.
+ *
+ * ## What this is not
+ *
+ * It is not a tamper check. An attacker who can modify this client can also
+ * delete this call, so a disagreement it reports is only ever a disagreement an
+ * honest client volunteered. Nothing here defends the deposit.
+ *
+ * What defends the deposit is that the relayer resolved these funders itself and
+ * signed over the result: `funders[0]` is inside the attested message, so a
+ * modified client cannot change which address was screened — only whether it
+ * hears about the mismatch.
+ *
+ * ## What it is for
+ *
+ * Desync. The two sides read different RPC nodes at different moments, so a
+ * disagreement usually means one of them has not seen the funding transfer yet —
+ * worth surfacing, not worth failing on. Hard-failing would trade a real class of
+ * flaky deposits for no security at all, so this warns and returns.
+ */
+export async function fundersAgree(
+  connection: Connection,
+  burner: PublicKey,
+  relayerFunders: string[],
+): Promise<boolean> {
+  let local: PublicKey[];
+  try {
+    local = await resolveBurnerFunders(connection, burner);
+  } catch {
+    // Our own read failing says nothing about the relayer's, which stands on its
+    // own signature either way.
+    return true;
+  }
+
+  const ours = new Set(local.map((funder) => funder.toBase58()));
+  const theirs = new Set(relayerFunders);
+  const agree =
+    ours.size === theirs.size && [...ours].every((funder) => theirs.has(funder));
+
+  if (!agree) {
+    console.warn(
+      "[KytService] relayer and client disagree about who funded this burner. " +
+        "The relayer's list is the one that was screened and signed. " +
+        `relayer=[${[...theirs].join(", ")}] client=[${[...ours].join(", ")}]`,
+    );
+  }
+
+  return agree;
 }
 
 /**
@@ -304,7 +361,9 @@ function assertAttestation(body: unknown): KytAttestation {
     typeof value.authority !== "string" ||
     typeof value.message !== "string" ||
     typeof value.signature !== "string" ||
-    typeof value.expiresAt !== "number"
+    typeof value.expiresAt !== "number" ||
+    !Array.isArray(value.funders) ||
+    !value.funders.every((funder) => typeof funder === "string")
   ) {
     throw new KytUnavailableError(
       "KYT screening returned an unrecognised attestation",
