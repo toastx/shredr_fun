@@ -14,13 +14,14 @@
 
 import './setup';
 import { expect } from 'chai';
-import { Ed25519Program, Keypair } from '@solana/web3.js';
+import { Ed25519Program, Keypair, type Connection } from '@solana/web3.js';
 
 import {
     ATTESTATION_BYTES,
     KytRefusedError,
     KytService,
     KytUnavailableError,
+    resolveBurnerFunders,
     toInstruction,
     type KytAttestation,
 } from '../src/lib/KytService';
@@ -28,7 +29,8 @@ import {
 const BASE = 'http://relayer.test';
 
 const AUTHORITY = Keypair.generate().publicKey;
-const DEPOSITOR = Keypair.generate().publicKey;
+const FUNDER = Keypair.generate().publicKey;
+const OTHER_FUNDER = Keypair.generate().publicKey;
 const BURNER = Keypair.generate().publicKey;
 
 /** A well-formed response body. `verdict` and overrides are per-test. */
@@ -61,7 +63,7 @@ function stubFetch(response: { ok: boolean; body?: unknown }): () => void {
 describe('KytService', () => {
     it('binds the burner and the amount into the request', async () => {
         const original = globalThis.fetch;
-        let body: Record<string, string> = {};
+        let body: Record<string, unknown> = {};
 
         globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
             body = JSON.parse(String(init?.body));
@@ -72,26 +74,26 @@ describe('KytService', () => {
         }) as typeof fetch;
 
         try {
-            await new KytService(BASE).screen(DEPOSITOR, BURNER, 5_000_000_000n);
+            await new KytService(BASE).screen([FUNDER], BURNER, 5_000_000_000n);
         } finally {
             globalThis.fetch = original;
         }
 
         // An attestation that said only "this wallet is clean" would be a bearer
         // token good for every deposit that wallet ever makes.
-        expect(body.depositor).to.equal(DEPOSITOR.toBase58());
+        expect(body.funders).to.deep.equal([FUNDER.toBase58()]);
         expect(body.burner).to.equal(BURNER.toBase58());
         expect(body.maxAmount).to.equal('5000000000');
     });
 
-    it('throws a distinct, final error when the depositor is refused', async () => {
+    it('throws a distinct, final error when a funder is refused', async () => {
         const restore = stubFetch({
             ok: true,
             body: attestation({ verdict: 0, reason: 'sanctioned counterparty' }),
         });
 
         try {
-            await new KytService(BASE).attest(DEPOSITOR, BURNER, 1n);
+            await new KytService(BASE).attest([FUNDER], BURNER, 1n);
             expect.fail('a refusal must throw');
         } catch (err) {
             expect(err).to.be.instanceOf(KytRefusedError);
@@ -119,7 +121,7 @@ describe('KytService', () => {
         for (const response of cases) {
             const restore = stubFetch(response);
             try {
-                await new KytService(BASE).screen(DEPOSITOR, BURNER, 1n);
+                await new KytService(BASE).screen([FUNDER], BURNER, 1n);
                 expect.fail(`expected a failure for ${JSON.stringify(response)}`);
             } catch (err) {
                 expect(err, JSON.stringify(response)).to.be.instanceOf(KytUnavailableError);
@@ -131,7 +133,7 @@ describe('KytService', () => {
 
     it('fails loudly when no screening endpoint is configured', async () => {
         try {
-            await new KytService('').screen(DEPOSITOR, BURNER, 1n);
+            await new KytService('').screen([FUNDER], BURNER, 1n);
             expect.fail('an unconfigured endpoint must throw');
         } catch (err) {
             expect(err).to.be.instanceOf(KytUnavailableError);
@@ -173,5 +175,107 @@ describe('KYT attestation instruction', () => {
         expect(data.subarray(16, 48).equals(Buffer.from(AUTHORITY.toBytes()))).to.equal(true);
         expect(data.subarray(48, 112).equals(signature)).to.equal(true);
         expect(data.subarray(112).equals(message)).to.equal(true);
+    });
+});
+
+describe('resolveBurnerFunders', () => {
+    /** A parsed transaction carrying `transfers` as top-level system transfers. */
+    function transferTx(
+        transfers: Array<{ source: string; destination: string; lamports: number }>,
+        err: unknown = null,
+    ) {
+        return {
+            meta: { err, innerInstructions: [] },
+            transaction: {
+                message: {
+                    instructions: transfers.map((info) => ({
+                        program: 'system',
+                        parsed: { type: 'transfer', info },
+                    })),
+                },
+            },
+        };
+    }
+
+    function stubConnection(transactions: Record<string, unknown>): Connection {
+        return {
+            getSignaturesForAddress: async () =>
+                Object.keys(transactions).map((signature) => ({ signature })),
+            getParsedTransaction: async (signature: string) =>
+                transactions[signature] ?? null,
+        } as unknown as Connection;
+    }
+
+    const burner = BURNER.toBase58();
+
+    it('reads the funder off the chain rather than trusting the caller', async () => {
+        const funders = await resolveBurnerFunders(
+            stubConnection({
+                sig1: transferTx([
+                    { source: FUNDER.toBase58(), destination: burner, lamports: 5_000_000 },
+                ]),
+            }),
+            BURNER,
+        );
+
+        expect(funders.map((f) => f.toBase58())).to.deep.equal([FUNDER.toBase58()]);
+    });
+
+    /** `funders[0]` is the address bound into the attestation, so the ordering
+     *  is part of the contract and not a convenience. */
+    it('orders funders by total contributed, largest first', async () => {
+        const funders = await resolveBurnerFunders(
+            stubConnection({
+                sig1: transferTx([
+                    { source: FUNDER.toBase58(), destination: burner, lamports: 1_000 },
+                ]),
+                sig2: transferTx([
+                    { source: OTHER_FUNDER.toBase58(), destination: burner, lamports: 9_000 },
+                ]),
+                // Same source paying twice is one funder with a total, which is
+                // what puts FUNDER back in front.
+                sig3: transferTx([
+                    { source: FUNDER.toBase58(), destination: burner, lamports: 50_000 },
+                ]),
+            }),
+            BURNER,
+        );
+
+        expect(funders.map((f) => f.toBase58())).to.deep.equal([
+            FUNDER.toBase58(),
+            OTHER_FUNDER.toBase58(),
+        ]);
+    });
+
+    it('ignores failed transactions and transfers aimed elsewhere', async () => {
+        const funders = await resolveBurnerFunders(
+            stubConnection({
+                sig1: transferTx(
+                    [{ source: OTHER_FUNDER.toBase58(), destination: burner, lamports: 9_000 }],
+                    { InstructionError: [0, 'Custom'] },
+                ),
+                sig2: transferTx([
+                    { source: OTHER_FUNDER.toBase58(), destination: AUTHORITY.toBase58(), lamports: 9_000 },
+                    { source: FUNDER.toBase58(), destination: burner, lamports: 1_000 },
+                ]),
+            }),
+            BURNER,
+        );
+
+        expect(funders.map((f) => f.toBase58())).to.deep.equal([FUNDER.toBase58()]);
+    });
+
+    /** Unavailable, never a refusal: an unconfirmed funding transfer is a state
+     *  that resolves itself, and falling back to the connected wallet would
+     *  attest to the provenance of the wrong party. */
+    it('reports unavailable rather than guessing when nothing is attributable', async () => {
+        for (const transactions of [{}, { sig1: transferTx([]) }]) {
+            try {
+                await resolveBurnerFunders(stubConnection(transactions), BURNER);
+                expect.fail('an unattributable burner must throw');
+            } catch (err) {
+                expect(err).to.be.instanceOf(KytUnavailableError);
+            }
+        }
     });
 });
