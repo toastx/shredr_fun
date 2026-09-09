@@ -21,10 +21,17 @@ use crate::ProgramError;
 use crate::ProgramResult;
 
 use crate::Address;
-use ephemeral_rollups_pinocchio::instruction::{
-    commit_accounts, commit_and_undelegate_accounts, undelegate,
-};
+use ephemeral_rollups_pinocchio::instruction::undelegate;
+use ephemeral_rollups_pinocchio::intent_bundle::MagicIntentBundleBuilder;
 use ephemeral_rollups_pinocchio::pda::undelegate_buffer_pda_from_delegated_account;
+
+/// Scratch space for the serialized `ScheduleIntentBundle` args.
+///
+/// Every bundle here is a single intent over a single account with no actions,
+/// which serializes to well under this. Oversized on purpose: the builder
+/// returns `InvalidInstructionData` rather than truncating if the buffer is too
+/// small, and a stack array this size is free next to Solana's 4 KB frame.
+const INTENT_BUNDLE_BUF: usize = 256;
 
 // ── Commit: flush state, stay delegated ──
 
@@ -48,14 +55,22 @@ impl<'a> CommitStealth<'a> {
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        commit_accounts(
-            relayer,
-            core::slice::from_ref(stealth_account),
-            magic_context,
-            magic_program,
-            None, // magic_fee_vault — pass Some(fee_vault_account) if your setup charges fees
-            None,
-        )?;
+        // One intent, one account, no post-commit actions. The bundle builder
+        // emits `ScheduleIntentBundle` where the old free function emitted
+        // `ScheduleCommit` — a different instruction to the magic program, not a
+        // different request of it.
+        //
+        // No `magic_fee_vault`: it is only required when the payer is itself
+        // delegated, and the relayer is a plain base-layer signer. Add
+        // `.magic_fee_vault(..)` before `.commit(..)` if that ever changes.
+        let mut data_buf = [0u8; INTENT_BUNDLE_BUF];
+        MagicIntentBundleBuilder::new(
+            relayer.clone(),
+            magic_context.clone(),
+            magic_program.clone(),
+        )
+        .commit(core::slice::from_ref(stealth_account))
+        .build_and_invoke(&mut data_buf)?;
 
         Ok(())
     }
@@ -104,14 +119,16 @@ impl<'a> CommitAndUndelegateStealth<'a> {
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        commit_and_undelegate_accounts(
-            relayer,
-            core::slice::from_ref(stealth_account),
-            magic_context,
-            magic_program,
-            None,
-            None,
-        )?;
+        // As above, but the commit-and-undelegate intent: flush the rollup's
+        // copy and hand ownership back to this program in one scheduled unit.
+        let mut data_buf = [0u8; INTENT_BUNDLE_BUF];
+        MagicIntentBundleBuilder::new(
+            relayer.clone(),
+            magic_context.clone(),
+            magic_program.clone(),
+        )
+        .commit_and_undelegate(core::slice::from_ref(stealth_account))
+        .build_and_invoke(&mut data_buf)?;
 
         Ok(())
     }
