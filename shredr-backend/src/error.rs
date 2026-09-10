@@ -10,16 +10,16 @@ use thiserror::Error;
 pub enum AppError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
-    
+
     #[error("Invalid UUID: {0}")]
     InvalidUuid(#[from] uuid::Error),
-    
+
     #[error("Blob not found")]
     NotFound,
-    
+
     #[error("Blob too large: {size} bytes (max {max} bytes)")]
     BlobTooLarge { size: usize, max: usize },
-    
+
     #[error("Internal server error: {0}")]
     Internal(String),
 

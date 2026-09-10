@@ -1,68 +1,37 @@
 //! GoPlus address screening.
 //!
-//! The provider half of KYT: ask GoPlus whether a depositing wallet is known-bad,
-//! and reduce its answer to the one bit `kyt.rs` signs.
+//! `GET /api/v1/address_security/{address}?chain_id=501`
 //!
-//! ```text
-//! GET https://api.gopluslabs.io/api/v1/address_security/{address}?chain_id=501
-//! ```
+//! `chain_id` MUST be `501`; the string `solana` returns code 5000. Credentials
+//! are optional and raise rate limits only. An app key sent as a bearer token
+//! is rejected with 4012 — it is not an access token.
 //!
-//! `501` is Solana's SLIP-44 coin type, and is what the API wants — `chain_id=solana`
-//! returns `{"code":5000,"message":"system error"}`. The endpoint is public: it
-//! takes no credentials and works without an `Authorization` header. Sending an
-//! app key as a bearer token actively breaks it with `4012 signature
-//! verification failure`, because app keys are not access tokens.
-//!
-//! ## Why not the other endpoint
-//!
-//! `/api/v1/address/scan/{chain_id}` looks like the richer sibling and is not
-//! usable here: with a correctly minted token it answers `2018 ChainID not
-//! supported` for 501. That is a capability limit, not a credential problem.
-//!
-//! ## Why not SDP
-//!
-//! The Solana Developer Platform screening API was the previous provider. It
-//! screens only against providers configured on the org, there is no API to
-//! configure them, and its `riskScore` has no documented scale — the threshold
-//! was a guess anchored to one example in the spec. It never returned a verdict
-//! in this repo. GoPlus answers today, for free, with named boolean flags whose
-//! meaning is legible, so the policy below is a list of flag names rather than a
-//! number nobody can calibrate.
-//!
-//! ## What leaves the process
-//!
-//! The depositor address, and nothing else. Never the burner — the pair is the
-//! correlation the whole design exists to prevent. Errors are logged with GoPlus
-//! response codes only, never with the address that was screened.
+//! The burner MUST NOT be sent, and errors MUST NOT log the address.
 
 use serde::Deserialize;
+use sha1::{Digest, Sha1};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 
 use super::kyt::{VERDICT_ALLOW, VERDICT_REFUSE};
 use crate::error::AppError;
 
 const DEFAULT_BASE_URL: &str = "https://api.gopluslabs.io";
-
-/// Solana's SLIP-44 coin type. Not the string `solana`, which the API rejects.
 const DEFAULT_CHAIN_ID: &str = "501";
-
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
-/// `code` on a successful response. Everything else is an error, including
-/// `4029` (rate limited) and `2018` (chain unsupported).
 const CODE_OK: i64 = 1;
 
-/// Flags that refuse a deposit.
-///
-/// Every one of these is a statement about where the money has been, which is
-/// the only question a deposit gate is asking. The fields left out —
-/// `fake_token`, `fake_standard_interface`, `gas_abuse`, `reinit`,
-/// `contract_address` — describe the shape of a *contract*, not the conduct of a
-/// depositor, and on Solana `contract_address` comes back `-1` (unknown) anyway.
-///
-/// `number_of_malicious_contracts_created` is a count rather than a boolean; the
-/// `> 0` test below covers both without special-casing.
+/// Refresh this far ahead of expiry so a screening in flight cannot race it.
+const REFRESH_MARGIN: Duration = Duration::from_secs(300);
+
+/// Used when a token response omits `expires_in`.
+const FALLBACK_TOKEN_TTL: Duration = Duration::from_secs(3600);
+
+/// Flags that refuse a deposit. Excludes contract-shape fields
+/// (`fake_token`, `gas_abuse`, `reinit`, `fake_standard_interface`,
+/// `contract_address`), which describe a contract rather than a depositor.
 const DEFAULT_DENY_FLAGS: &[&str] = &[
     "sanctioned",
     "money_laundering",
@@ -80,9 +49,8 @@ const DEFAULT_DENY_FLAGS: &[&str] = &[
     "number_of_malicious_contracts_created",
 ];
 
-/// Every field GoPlus returns is a stringified number, so the whole result is
-/// read as a string map rather than a struct. New flags then arrive without a
-/// deploy, and `deny_flags` decides which of them matter.
+/// Read as a string map: every GoPlus field is a stringified number, and new
+/// ones then arrive without a deploy.
 #[derive(Deserialize)]
 struct GoPlusEnvelope {
     code: i64,
@@ -92,19 +60,46 @@ struct GoPlusEnvelope {
     result: Option<HashMap<String, String>>,
 }
 
+#[derive(Deserialize)]
+struct TokenEnvelope {
+    code: i64,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    result: Option<TokenResult>,
+}
+
+#[derive(Deserialize)]
+struct TokenResult {
+    /// Already prefixed with `Bearer `.
+    access_token: String,
+    #[serde(default)]
+    expires_in: Option<u64>,
+}
+
+struct Credentials {
+    app_key: String,
+    app_secret: String,
+}
+
+struct CachedToken {
+    header: String,
+    expires_at: Instant,
+}
+
 #[derive(Clone)]
 pub struct GoPlusClient {
     http: reqwest::Client,
     base_url: String,
     chain_id: String,
     deny_flags: Vec<String>,
+    credentials: Option<std::sync::Arc<Credentials>>,
+    token: std::sync::Arc<RwLock<Option<CachedToken>>>,
 }
 
 impl GoPlusClient {
-    /// `None` only when the HTTP client cannot be built.
-    ///
-    /// There is no API key to be missing: the endpoint is public, so screening is
-    /// always on rather than something an unset variable can silently disable.
+    /// `None` only when the HTTP client cannot be built. No key can be left unset
+    /// to silently disable screening.
     pub fn from_env() -> Option<Self> {
         let timeout_secs = env_parse("GOPLUS_TIMEOUT_SECS").unwrap_or(DEFAULT_TIMEOUT_SECS);
 
@@ -124,9 +119,32 @@ impl GoPlusClient {
             })
             .unwrap_or_else(|| DEFAULT_DENY_FLAGS.iter().map(|f| f.to_string()).collect());
 
+        let credentials = match (
+            env_string("GOPLUS_APP_KEY"),
+            env_string("GOPLUS_APP_SECRET"),
+        ) {
+            (Some(app_key), Some(app_secret)) => Some(std::sync::Arc::new(Credentials {
+                app_key,
+                app_secret,
+            })),
+            (Some(_), None) | (None, Some(_)) => {
+                tracing::warn!(
+                    "GOPLUS_APP_KEY and GOPLUS_APP_SECRET must be set together — \
+                     screening will run unauthenticated"
+                );
+                None
+            }
+            (None, None) => None,
+        };
+
         tracing::info!(
-            "GoPlus screening enabled: {} flags refuse a deposit",
-            deny_flags.len()
+            "GoPlus screening enabled: {} deny flags, {}",
+            deny_flags.len(),
+            if credentials.is_some() {
+                "authenticated"
+            } else {
+                "unauthenticated (lower rate limits)"
+            }
         );
 
         Some(Self {
@@ -137,23 +155,27 @@ impl GoPlusClient {
                 .to_string(),
             chain_id: env_string("GOPLUS_CHAIN_ID").unwrap_or_else(|| DEFAULT_CHAIN_ID.to_string()),
             deny_flags,
+            credentials,
+            token: std::sync::Arc::new(RwLock::new(None)),
         })
     }
 
     /// Screen `address` and reduce the flags to `(verdict, reason)`.
     ///
-    /// Every failure path returns [`AppError::KytUnavailable`], never an allow: a
-    /// screening we could not complete is not a screening that passed. That
-    /// includes rate limiting, which is the one a busy relayer will actually hit.
+    /// Every failure MUST return [`AppError::KytUnavailable`], never an allow.
     pub async fn screen(&self, address: &str) -> Result<(u8, Option<String>), AppError> {
         let url = format!(
             "{}/api/v1/address_security/{}?chain_id={}",
             self.base_url, address, self.chain_id
         );
 
-        let response = self.http.get(&url).send().await.map_err(|err| {
-            // `err` can carry the URL, which carries the address, so only the
-            // status is logged.
+        let mut request = self.http.get(&url);
+        if let Some(header) = self.access_token().await {
+            request = request.header("Authorization", header);
+        }
+
+        let response = request.send().await.map_err(|err| {
+            // The URL carries the address, so only the status is logged.
             tracing::error!(
                 "GoPlus screening request failed: {}",
                 err.status()
@@ -163,7 +185,7 @@ impl GoPlusClient {
             AppError::KytUnavailable("Screening provider is unreachable".to_string())
         })?;
 
-        // GoPlus answers 200 for business errors too, so the envelope decides.
+        // Business errors arrive with HTTP 200, so the envelope decides.
         let envelope: GoPlusEnvelope = response.json().await.map_err(|err| {
             tracing::error!("could not parse the GoPlus response: {err}");
             AppError::KytUnavailable(
@@ -182,17 +204,84 @@ impl GoPlusClient {
 
         Ok(evaluate(&flags, &self.deny_flags))
     }
+
+    /// Cached `Authorization` value, minted on demand.
+    ///
+    /// `None` means screen unauthenticated: a token outage MUST NOT become a
+    /// deposit outage. `sign` is `sha1(app_key + unix_seconds + app_secret)`;
+    /// the returned `access_token` already carries its `Bearer ` prefix.
+    async fn access_token(&self) -> Option<String> {
+        let credentials = self.credentials.as_ref()?;
+
+        if let Some(cached) = self.token.read().await.as_ref() {
+            if cached.expires_at > Instant::now() {
+                return Some(cached.header.clone());
+            }
+        }
+
+        let mut slot = self.token.write().await;
+        // Another task may have minted one while this waited on the lock.
+        if let Some(cached) = slot.as_ref() {
+            if cached.expires_at > Instant::now() {
+                return Some(cached.header.clone());
+            }
+        }
+
+        let time = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        let sign = hex(&Sha1::digest(
+            format!("{}{}{}", credentials.app_key, time, credentials.app_secret).as_bytes(),
+        ));
+
+        let response = self
+            .http
+            .post(format!("{}/api/v1/token", self.base_url))
+            .json(&serde_json::json!({
+                "app_key": credentials.app_key,
+                "time": time,
+                "sign": sign,
+            }))
+            .send()
+            .await
+            .map_err(|err| tracing::warn!("GoPlus token request failed: {err}"))
+            .ok()?;
+
+        let envelope: TokenEnvelope = response
+            .json()
+            .await
+            .map_err(|err| tracing::warn!("could not parse the GoPlus token response: {err}"))
+            .ok()?;
+
+        if envelope.code != CODE_OK {
+            tracing::warn!(
+                "GoPlus token request returned code {}: {}",
+                envelope.code,
+                envelope.message.as_deref().unwrap_or("no message")
+            );
+            return None;
+        }
+
+        let result = envelope.result?;
+        let ttl = result
+            .expires_in
+            .map(Duration::from_secs)
+            .unwrap_or(FALLBACK_TOKEN_TTL);
+
+        *slot = Some(CachedToken {
+            header: result.access_token.clone(),
+            expires_at: Instant::now() + ttl.saturating_sub(REFRESH_MARGIN),
+        });
+
+        Some(result.access_token)
+    }
 }
 
 /// Reduce GoPlus's flag map to a verdict.
 ///
-/// A flag counts when it parses to a number greater than zero. Absent flags and
-/// unparseable ones do not count: GoPlus adds fields over time, and a value this
-/// code cannot read is not evidence of anything.
+/// A flag counts when it parses above zero, covering counts and booleans alike.
+/// Absent and unparseable values MUST NOT count.
 ///
-/// An all-clear map is an allow even when `data_source` is empty. Empty is the
-/// normal case for an address no provider has ever recorded — which is most of
-/// them — so treating it as "unknown, refuse" would refuse nearly everyone.
+/// An empty `data_source` still allows: it is the normal case for an address no
+/// provider has recorded.
 pub fn evaluate(flags: &HashMap<String, String>, deny_flags: &[String]) -> (u8, Option<String>) {
     let mut tripped: Vec<&str> = deny_flags
         .iter()
@@ -209,7 +298,7 @@ pub fn evaluate(flags: &HashMap<String, String>, deny_flags: &[String]) -> (u8, 
         return (VERDICT_ALLOW, None);
     }
 
-    // Sorted so the same address always produces the same reason string.
+    // Stable order, so one address yields one reason string.
     tripped.sort_unstable();
 
     (
@@ -221,10 +310,8 @@ pub fn evaluate(flags: &HashMap<String, String>, deny_flags: &[String]) -> (u8, 
     )
 }
 
-/// Documented GoPlus codes, kept apart because they mean different things to
-/// whoever is on call. All of them still surface to the depositor as
-/// "unavailable, try again" — an operator problem is not a reason to tell
-/// somebody they failed screening.
+/// Separated for operators. All surface as "unavailable": an operator problem
+/// MUST NOT be reported to the depositor as a screening failure.
 fn classify_error(code: i64, message: Option<&str>) -> AppError {
     tracing::error!(
         "GoPlus screening returned code {code}: {}",
@@ -236,11 +323,15 @@ fn classify_error(code: i64, message: Option<&str>) -> AppError {
         4010 | 4012 => {
             AppError::KytUnavailable("Screening provider rejected our credentials".to_string())
         }
-        2018 => AppError::KytUnavailable(
-            "Screening provider does not support this chain".to_string(),
-        ),
+        2018 => {
+            AppError::KytUnavailable("Screening provider does not support this chain".to_string())
+        }
         _ => AppError::KytUnavailable("Screening provider returned an error".to_string()),
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn env_string(key: &str) -> Option<String> {
@@ -262,9 +353,7 @@ mod tests {
         DEFAULT_DENY_FLAGS.iter().map(|f| f.to_string()).collect()
     }
 
-    /// A real response, captured from the live endpoint for a clean Solana
-    /// address. Pinned verbatim so a change in the wire format shows up here
-    /// rather than as a deposit that mysteriously stops screening.
+    /// Captured live, so a wire-format change fails here.
     const CLEAN_RESPONSE: &str = r#"{
       "code": 1,
       "message": "ok",
@@ -290,14 +379,14 @@ mod tests {
         assert!(reason.is_none());
     }
 
-    /// `contract_address: "-1"` is Solana's "unknown", and it is not in the deny
-    /// list — but the `> 0` test has to reject it regardless, because a negative
-    /// number must never read as a set flag.
+    /// Solana reports `-1` for unknown; it MUST NOT read as a set flag.
     #[test]
     fn a_negative_value_is_not_a_flag() {
         let flags = HashMap::from([("contract_address".to_string(), "-1".to_string())]);
-        let (verdict, _) = evaluate(&flags, &["contract_address".to_string()]);
-        assert_eq!(verdict, VERDICT_ALLOW);
+        assert_eq!(
+            evaluate(&flags, &["contract_address".to_string()]).0,
+            VERDICT_ALLOW
+        );
     }
 
     #[test]
@@ -315,24 +404,20 @@ mod tests {
         assert!(!reason.contains("mixer"), "{reason}");
     }
 
-    /// A count rather than a boolean, so the same `> 0` rule has to cover it.
+    /// A count, not a boolean.
     #[test]
     fn a_count_flag_trips_above_zero() {
-        let zero = HashMap::from([(
-            "number_of_malicious_contracts_created".to_string(),
-            "0".to_string(),
-        )]);
-        assert_eq!(evaluate(&zero, &deny()).0, VERDICT_ALLOW);
-
-        let some = HashMap::from([(
-            "number_of_malicious_contracts_created".to_string(),
-            "3".to_string(),
-        )]);
-        assert_eq!(evaluate(&some, &deny()).0, VERDICT_REFUSE);
+        let key = "number_of_malicious_contracts_created".to_string();
+        assert_eq!(
+            evaluate(&HashMap::from([(key.clone(), "0".to_string())]), &deny()).0,
+            VERDICT_ALLOW
+        );
+        assert_eq!(
+            evaluate(&HashMap::from([(key, "3".to_string())]), &deny()).0,
+            VERDICT_REFUSE
+        );
     }
 
-    /// Several flags are reported together and in a stable order, so the same
-    /// address does not produce a different reason on each retry.
     #[test]
     fn multiple_flags_are_reported_in_a_stable_order() {
         let flags = HashMap::from([
@@ -342,26 +427,21 @@ mod tests {
         ]);
 
         let first = evaluate(&flags, &deny()).1.expect("reason");
-        let second = evaluate(&flags, &deny()).1.expect("reason");
-        assert_eq!(first, second);
+        assert_eq!(first, evaluate(&flags, &deny()).1.expect("reason"));
         assert!(first.contains("cybercrime, mixer, sanctioned"), "{first}");
     }
 
-    /// Fields this code does not know about are not evidence. GoPlus adds them
-    /// over time, and an unreadable value must not become a silent refusal.
     #[test]
     fn unknown_and_unparseable_values_are_ignored() {
         let flags = HashMap::from([
             ("some_future_flag".to_string(), "1".to_string()),
-            ("sanctioned".to_string(), "".to_string()),
+            ("sanctioned".to_string(), String::new()),
             ("mixer".to_string(), "not a number".to_string()),
         ]);
 
         assert_eq!(evaluate(&flags, &deny()).0, VERDICT_ALLOW);
     }
 
-    /// Empty `data_source` is the normal case for an unremarkable address, so it
-    /// must not be read as "no data, refuse".
     #[test]
     fn an_empty_data_source_still_allows() {
         let flags = HashMap::from([
@@ -372,19 +452,40 @@ mod tests {
         assert_eq!(evaluate(&flags, &deny()).0, VERDICT_ALLOW);
     }
 
-    /// Business errors arrive with HTTP 200, so the envelope code is the only
-    /// thing that separates them from a verdict. Each is retryable.
     #[test]
     fn documented_error_codes_are_unavailable_not_refusals() {
         for code in [4029, 4012, 4010, 2018, 5000] {
-            let envelope: GoPlusEnvelope =
-                serde_json::from_str(&format!(r#"{{"code":{code},"message":"x","result":null}}"#))
-                    .expect("error shape");
-            assert_ne!(envelope.code, CODE_OK);
             assert!(matches!(
-                classify_error(envelope.code, envelope.message.as_deref()),
+                classify_error(code, Some("x")),
                 AppError::KytUnavailable(_)
             ));
         }
+    }
+
+    /// A wrong digest or field order fails as an opaque 4010.
+    #[test]
+    fn sign_is_sha1_of_key_time_secret() {
+        assert_eq!(
+            hex(&Sha1::digest(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        assert_eq!(
+            hex(&Sha1::digest(
+                format!("{}{}{}", "key", 1_700_000_000u64, "secret").as_bytes()
+            )),
+            hex(&Sha1::digest(b"key1700000000secret"))
+        );
+    }
+
+    #[test]
+    fn parses_the_token_response_shape() {
+        let envelope: TokenEnvelope = serde_json::from_str(
+            r#"{"code":1,"message":"ok","result":{"access_token":"Bearer eyJ.a.b","expires_in":7200}}"#,
+        )
+        .expect("token shape");
+
+        let result = envelope.result.expect("result");
+        assert!(result.access_token.starts_with("Bearer "));
+        assert_eq!(result.expires_in, Some(7200));
     }
 }

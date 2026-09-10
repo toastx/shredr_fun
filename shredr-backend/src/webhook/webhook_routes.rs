@@ -2,8 +2,7 @@ use axum::{routing::post, Router};
 use std::sync::Arc;
 
 use super::webhook::{
-    add_address_handler, create_webhook_handler, remove_address_handler,
-    WebhookState,
+    add_address_handler, create_webhook_handler, remove_address_handler, WebhookState,
 };
 
 /// Build webhook router

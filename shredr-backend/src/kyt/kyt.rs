@@ -74,15 +74,15 @@ impl KytState {
     /// degrades to a 503 per request, which is visible in a way a failed boot
     /// three services deep is not.
     pub fn from_env() -> Self {
-        let signing_key = std::env::var("KYT_AUTHORITY_KEY")
-            .ok()
-            .and_then(|encoded| match parse_signing_key(&encoded) {
+        let signing_key = std::env::var("KYT_AUTHORITY_KEY").ok().and_then(|encoded| {
+            match parse_signing_key(&encoded) {
                 Ok(key) => Some(key),
                 Err(err) => {
                     tracing::error!("KYT_AUTHORITY_KEY is unusable: {err}");
                     None
                 }
-            });
+            }
+        });
 
         match &signing_key {
             Some(key) => tracing::info!(
@@ -130,15 +130,11 @@ impl KytState {
     /// client needs to tell them apart — one is final, the other is worth
     /// retrying.
     pub async fn screen(&self, request: &ScreenRequest) -> Result<ScreenResponse, AppError> {
-        // Validated before anything is bought: a malformed burner or an unset
-        // authority key should not cost an RPC round trip, let alone a screening
-        // lookup, and should not need either in order to be rejected.
+        // Validated first: a malformed burner MUST NOT cost an RPC round trip.
         let validated = self.validate(request)?;
 
-        // Read off the chain, never off the request. The party asking to be
-        // screened is exactly the party with a reason to name a cleaner address
-        // than the one that actually paid, so the request carries only the
-        // burner — a public address whose funding history is chain record.
+        // Read off the chain, never off the request: the caller is the party
+        // with a reason to name a cleaner address than the one that paid.
         let funders = self
             .funders
             .as_ref()
@@ -182,9 +178,8 @@ impl KytState {
         let key = validated.key;
         let expires_at = chrono::Utc::now().timestamp() + self.ttl_secs;
 
-        // Bound before signed. An attestation that said only "this wallet is
-        // clean" would be a bearer token good for every deposit that wallet
-        // ever makes, so the burner and the ceiling go into the message.
+        // Bound before signed: an unbound attestation would be a bearer token
+        // good for every deposit that wallet ever makes.
         let message = build_message(
             verdict,
             &depositor,
@@ -207,9 +202,8 @@ impl KytState {
 
     /// Ask the screening provider, with `KYT_DENYLIST` as a local override.
     ///
-    /// The denylist is checked first and short-circuits the network call: it is a
-    /// block an operator set by hand, so a provider outage must not quietly lift
-    /// it, and there is no point buying a lookup whose answer we would discard.
+    /// The denylist short-circuits the network call: a provider outage MUST NOT
+    /// lift an operator's block.
     async fn provider_verdict(&self, funders: &[String]) -> Result<(u8, Option<String>), AppError> {
         if funders.iter().any(|funder| self.denylist.contains(funder)) {
             return Ok((
@@ -222,9 +216,7 @@ impl KytState {
             AppError::KytUnavailable("Screening provider is not configured".to_string())
         })?;
 
-        // Any one tainted source taints the deposit, so this short-circuits on
-        // the first refusal — there is nothing left to learn from the rest, and
-        // no reason to buy the lookups.
+        // One tainted source taints the deposit, so stop at the first refusal.
         for funder in funders {
             let (verdict, reason) = screening.screen(funder).await?;
             if verdict == VERDICT_REFUSE {
@@ -236,9 +228,7 @@ impl KytState {
     }
 }
 
-/// A request that has cleared local validation. Holding the key by reference
-/// keeps the signing path free of a second `Option` unwrap that could only ever
-/// succeed.
+/// A request that has cleared local validation.
 struct Validated<'a> {
     key: &'a SigningKey,
     burner: [u8; 32],
@@ -352,13 +342,7 @@ mod tests {
         let state = state();
         let request = request();
         let validated = state.validate(&request).expect("a well-formed request");
-        let response = state.sign(
-            &validated,
-            [9u8; 32],
-            vec![unlisted()],
-            VERDICT_ALLOW,
-            None,
-        );
+        let response = state.sign(&validated, [9u8; 32], vec![unlisted()], VERDICT_ALLOW, None);
 
         let message = base64::engine::general_purpose::STANDARD
             .decode(&response.message)
