@@ -1,15 +1,15 @@
-mod error;
 mod db;
+mod error;
 mod kyt;
 mod webhook;
 // mod websocket;
 
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
 use axum::{http::Request, routing::get, Router};
 use helius::{types::Cluster, Helius};
 use sqlx::postgres::PgPoolOptions;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 // use tokio::sync::{watch, Mutex};
 use tower_governor::{
     governor::GovernorConfigBuilder,
@@ -43,7 +43,8 @@ impl KeyExtractor for ForwardedIpKeyExtractor {
 
     fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, GovernorError> {
         // Try X-Forwarded-For / X-Real-IP first
-        let forwarded_ip = req.headers()
+        let forwarded_ip = req
+            .headers()
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.split(',').last())
@@ -72,7 +73,7 @@ fn build_database_url() -> String {
     let user = std::env::var("PGUSER").expect("DATABASE_USER is required");
     let password = std::env::var("PGPASSWORD").expect("DATABASE_PASSWORD is required");
     let database = std::env::var("PGDATABASE").expect("DATABASE_NAME is required");
-    
+
     // Default to SSL mode for production (Koyeb, etc.)
     format!(
         "postgres://{}:{}@{}/{}?sslmode=require",
@@ -84,7 +85,7 @@ fn build_database_url() -> String {
 async fn main() {
     // Initialize tracing
     tracing_subscriber::fmt::init();
-    
+
     tracing::info!("Starting Shredr Backend...");
 
     // Load environment variables from .env file
@@ -122,7 +123,8 @@ async fn main() {
     // });
     let app_state = Arc::new(AppState { db: db_handler });
     // let ws_state = Arc::new(WebSocketState { clients_count: Arc::new(Mutex::new(0)), rx });
-    let helius = Arc::new(Helius::new(&helius_api_key, Cluster::MainnetBeta).expect("Helius init failed"));
+    let helius =
+        Arc::new(Helius::new(&helius_api_key, Cluster::MainnetBeta).expect("Helius init failed"));
     let webhook_state = Arc::new(WebhookState { helius });
     // Reads KYT_AUTHORITY_KEY; without it the endpoint 503s per request instead
     // of failing the boot, so a missing compliance key is visible in a way a
@@ -207,7 +209,5 @@ async fn main() {
         .await
         .expect("Failed to bind to address");
 
-    axum::serve(listener, router)
-        .await
-        .expect("Server error");
+    axum::serve(listener, router).await.expect("Server error");
 }

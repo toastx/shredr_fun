@@ -1,37 +1,26 @@
 /**
  * Shielded-pool test client.
  *
- * Drives the pool instructions straight from a terminal so a deposit/spend cycle
- * can be exercised without the frontend. Self-contained on purpose: it derives
- * every PDA and rebuilds the Merkle tree itself rather than importing
- * `src/lib/*`, because those read `import.meta.env` and do not load under node.
- *
- * Usage:
  *   npx tsx scripts/pool-cli.ts <command> [args]
  *
- *   authority                      Print the KYT authority pubkey to build against
- *   state    <denom>               Decode the vault and ledger
+ *   authority                      print/generate the KYT authority key
+ *   state    <denom>               decode the vault and ledger
  *   init     <denom>               InitializePool
- *   deposit  <denom>               Mint a note, screen it, PoolDeposit
+ *   deposit  <denom>               mint a note, screen it, PoolDeposit
  *   delegate <denom>               DelegatePoolLedger
  *   spend    <denom> <note> [dest] PoolSpend, against the ER
- *   undelegate <denom>             Commit and undelegate the ledger
- *   epoch    <denom>               AdvanceEpoch, settling queued payouts
- *   notes                          List local notes
+ *   undelegate <denom>             commit and undelegate the ledger
+ *   epoch    <denom>               AdvanceEpoch
+ *   notes                          list local notes
  *
- * `<denom>` is in SOL: 1, 10, 100 or 1000.
+ * `<denom>` is 1, 10, 100 or 1000 (SOL).
  *
- * Environment:
- *   RPC_URL             base layer            (default http://127.0.0.1:8899)
- *   ER_RPC_URL          ephemeral rollup      (default http://127.0.0.1:6699)
- *   PROGRAM_ID          shredr program        (default: the declare_id! value)
- *   KEYPAIR             payer keypair json    (default ~/.config/solana/id.json)
- *   KYT_AUTHORITY_KEY   base58 32/64-byte key the attestation is signed with
+ * Env: RPC_URL, ER_RPC_URL, PROGRAM_ID, KEYPAIR, KYT_AUTHORITY_KEY.
  *
- * The note secrets live in `.pool-cli-state.json`, unencrypted. Anyone holding
- * that file can spend every note in it, and can pair every deposit with its
- * withdrawal — which is the exact linkage the pool exists to hide. Test keys
- * only.
+ * Constants here mirror the program; each names the symbol it tracks. Nothing is
+ * imported from `src/lib`, which reads `import.meta.env` and will not load here.
+ *
+ * `.pool-cli-state.json` holds note secrets in the clear. Test keys only.
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -56,8 +45,12 @@ import nacl from "tweetnacl";
 const PROGRAM_ID = new PublicKey(
   process.env.PROGRAM_ID ?? "H9pUQeNA2RwBHRwx52V8nqWpCAKReSA3gGUuRFHbEjG6",
 );
-const MAGIC_BLOCK_PROGRAM_ID = new PublicKey("DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh");
-const PERMISSION_PROGRAM_ID = new PublicKey("ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1");
+const MAGIC_BLOCK_PROGRAM_ID = new PublicKey(
+  "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh",
+);
+const PERMISSION_PROGRAM_ID = new PublicKey(
+  "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1",
+);
 const MAGIC_PROGRAM_ID = new PublicKey("Magic11111111111111111111111111111111111111");
 const MAGIC_CONTEXT = new PublicKey("MagicContext1111111111111111111111111111111");
 
@@ -102,9 +95,8 @@ const STATE_FILE = resolve(process.cwd(), ".pool-cli-state.json");
 
 // ============ BASE58 ============
 //
-// Implemented here rather than taken from the `bs58` package, which is only a
-// transitive dependency and ships no types. `PublicKey` would cover 32-byte
-// values but not the 64-byte `seed || pubkey` form `solana-keygen` writes.
+// `bs58` is a transitive dependency and ships no types. `PublicKey` covers
+// 32-byte values but not the 64-byte `seed || pubkey` form.
 
 const B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
@@ -153,13 +145,7 @@ const sha256 = (...parts: Buffer[]): Buffer =>
 const commitmentOf = (secret: Buffer) => sha256(COMMITMENT_TAG, secret);
 const nullifierOf = (secret: Buffer) => sha256(NULLIFIER_TAG, secret);
 
-/**
- * `merkle::ZEROS`, recomputed rather than copied.
- *
- * The program ships the table as literals; deriving it here from the same
- * recurrence means a mismatch shows up as a failed spend rather than as a table
- * that silently drifted out of sync.
- */
+/** `merkle::ZEROS`, recomputed from the same recurrence rather than copied. */
 const ZEROS: Buffer[] = (() => {
   const zeros = [sha256(EMPTY_LEAF_TAG)];
   for (let level = 1; level < DEPTH; level += 1) {
@@ -169,13 +155,15 @@ const ZEROS: Buffer[] = (() => {
 })();
 
 /**
- * Root and authentication path for `index`, from the full leaf list.
+ * Root and authentication path for `index`.
  *
- * Mirrors `merkle::insert`: everything right of the frontier is empty and hashes
- * to `ZEROS[level]`, so a partly filled level pairs its last node with a zero
- * rather than with itself.
+ * Mirrors `merkle::insert`: a partly filled level pairs its last node with
+ * `ZEROS[level]`, not with itself.
  */
-function rootAndPath(leaves: Buffer[], index: number): { root: Buffer; path: Buffer[] } {
+function rootAndPath(
+  leaves: Buffer[],
+  index: number,
+): { root: Buffer; path: Buffer[] } {
   let level = leaves.slice();
   let cursor = index;
   const path: Buffer[] = [];
@@ -225,7 +213,10 @@ const delegationPdas = (account: PublicKey) => ({
     PERMISSION_PROGRAM_ID,
   )[0],
   // Owned by the delegated account's owner, which is this program.
-  buffer: PublicKey.findProgramAddressSync([SEED_BUFFER, account.toBuffer()], PROGRAM_ID)[0],
+  buffer: PublicKey.findProgramAddressSync(
+    [SEED_BUFFER, account.toBuffer()],
+    PROGRAM_ID,
+  )[0],
   record: PublicKey.findProgramAddressSync(
     [SEED_DELEGATION, account.toBuffer()],
     MAGIC_BLOCK_PROGRAM_ID,
@@ -289,12 +280,10 @@ function decodeLedger(data: Buffer) {
 // ============ KYT ATTESTATION ============
 
 /**
- * Sign the 90-byte attestation the program parses byte by byte.
+ * Sign the 90-byte attestation.
  *
- * `subject` is what the attestation is bound to — the note commitment on this
- * path, a burner on the stealth path. `depositor` is checked on-chain against
- * the wallet signing the transfer, so naming a different one only produces an
- * attestation nobody can use.
+ * `subject` is the note commitment on this path, a burner on the stealth path.
+ * `depositor` is checked on-chain against the signing wallet.
  */
 function attestation(subject: Buffer, depositor: PublicKey, maxAmount: bigint) {
   const authorityKey = process.env.KYT_AUTHORITY_KEY;
@@ -323,9 +312,8 @@ function attestation(subject: Buffer, depositor: PublicKey, maxAmount: bigint) {
 
   const signature = nacl.sign.detached(message, keypair.secretKey);
 
-  // All three instruction indices default to u16::MAX — "read from my own data"
-  // — which is what `kyt::attested_message` requires. An instruction built any
-  // other way verifies a signature over bytes the program cannot see.
+  // Indices default to u16::MAX ("this instruction"), which
+  // `kyt::attested_message` requires.
   return Ed25519Program.createInstructionWithPublicKey({
     publicKey: keypair.publicKey,
     message,
@@ -344,7 +332,7 @@ interface StoredNote {
 }
 
 interface CliState {
-  /** Every commitment seen, in insertion order. The tree is rebuilt from this. */
+  /** Every commitment seen, in insertion order; the tree is rebuilt from it. */
   leaves: string[];
   notes: StoredNote[];
 }
@@ -403,7 +391,6 @@ async function send(
 
   try {
     const signature = await connection.sendTransaction(transaction, signers, {
-      // Program logs are the point of this tool; a preflight failure hides them.
       skipPreflight: false,
     });
     await connection.confirmTransaction(signature, "confirmed");
@@ -420,7 +407,10 @@ async function send(
 async function readPool(connection: Connection, denomination: bigint) {
   const [vault] = poolVaultPda(denomination);
   const [ledger] = poolLedgerPda(denomination);
-  const [vaultInfo, ledgerInfo] = await connection.getMultipleAccountsInfo([vault, ledger]);
+  const [vaultInfo, ledgerInfo] = await connection.getMultipleAccountsInfo([
+    vault,
+    ledger,
+  ]);
   return { vault, ledger, vaultInfo, ledgerInfo };
 }
 
@@ -448,7 +438,10 @@ function cmdAuthority() {
 
 async function cmdState(denomination: bigint) {
   const connection = baseConnection();
-  const { vault, ledger, vaultInfo, ledgerInfo } = await readPool(connection, denomination);
+  const { vault, ledger, vaultInfo, ledgerInfo } = await readPool(
+    connection,
+    denomination,
+  );
 
   log(`\n  pool ${sol(denomination)}`);
   log(`    vault   ${vault.toBase58()}`);
@@ -474,7 +467,9 @@ async function cmdState(denomination: bigint) {
 
   log(`\n  ledger`);
   log(`    delegated       ${l.delegated}`);
-  log(`    epoch           ${l.epoch}${l.epoch === v.epoch ? "" : "   ⚠ stale vs vault"}`);
+  log(
+    `    epoch           ${l.epoch}${l.epoch === v.epoch ? "" : "   ⚠ stale vs vault"}`,
+  );
   log(`    known roots     ${l.rootCount}`);
   log(`    payout queue    ${l.payoutCount}`);
   for (const payout of l.payouts) {
@@ -533,15 +528,14 @@ async function cmdDeposit(denomination: bigint) {
   const leafIndex = Number(before.nextLeafIndex);
 
   log(`\n  depositing ${sol(denomination)}`);
-  log(`    secret      ${secret.toString("hex")}   ← the whole note; losing it loses the funds`);
+  log(
+    `    secret      ${secret.toString("hex")}   ← the whole note; losing it loses the funds`,
+  );
   log(`    commitment  ${commitment.toString("hex")}`);
   log(`    leaf index  ${leafIndex}`);
 
   const data = Buffer.concat([Buffer.from([IX.poolDeposit]), commitment]);
 
-  // The attestation instruction goes first. Position is not what the program
-  // checks — it scans the sysvar by program id — but precompiles run before
-  // programs either way, and this keeps the transaction readable.
   await send(
     connection,
     [
@@ -609,7 +603,11 @@ async function cmdDelegate(denomination: bigint) {
   log("");
 }
 
-async function cmdSpend(denomination: bigint, noteArg: string, destinationArg?: string) {
+async function cmdSpend(
+  denomination: bigint,
+  noteArg: string,
+  destinationArg?: string,
+) {
   const state = loadState();
   const index = Number(noteArg);
   const note = state.notes[index];
@@ -685,12 +683,13 @@ async function cmdEpoch(denomination: bigint) {
 
   const decoded = decodeLedger(Buffer.from(ledgerInfo.data));
   if (decoded.delegated) {
-    fail("ledger is still delegated — commit and undelegate it before turning the epoch");
+    fail(
+      "ledger is still delegated — commit and undelegate it before turning the epoch",
+    );
   }
 
-  // Trailing accounts are (destination, nullifier_record) pairs, matched
-  // positionally against the front of the queue. Passing fewer than the queue
-  // holds leaves the rest for the next turn.
+  // (destination, nullifier_record) pairs, matched positionally to the queue
+  // front. Fewer pairs than the queue holds leaves the rest for the next turn.
   const settlements = decoded.payouts.flatMap((payout) => [
     { pubkey: payout.destination, isSigner: false, isWritable: true },
     { pubkey: nullifierPda(payout.nullifier)[0], isSigner: false, isWritable: true },
@@ -721,11 +720,9 @@ async function cmdEpoch(denomination: bigint) {
 }
 
 /**
- * Flush the ledger's rollup state and hand it back to the base layer.
+ * Flush the ledger and return it to the base layer.
  *
- * Issued against the ER, not the base layer: undelegation starts from the
- * rollup that currently owns the account. `AdvanceEpoch` refuses a delegated
- * ledger, so nothing settles until this lands.
+ * Issued against the ER. `AdvanceEpoch` refuses a delegated ledger.
  */
 async function cmdUndelegate(denomination: bigint) {
   const wallet = payer();
@@ -761,7 +758,9 @@ function cmdNotes() {
     return;
   }
 
-  log(`\n  ${state.notes.length} note(s), ${state.leaves.length} leaf/leaves tracked\n`);
+  log(
+    `\n  ${state.notes.length} note(s), ${state.leaves.length} leaf/leaves tracked\n`,
+  );
   state.notes.forEach((note, index) => {
     const status = note.spent ? "spent  " : "unspent";
     log(

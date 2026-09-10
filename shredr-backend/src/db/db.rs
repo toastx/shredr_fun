@@ -1,6 +1,6 @@
+use crate::error::AppError;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
-use crate::error::AppError;
 
 /// Maximum blob size in bytes (2KB - actual blobs are ~200 bytes)
 /// encoded bytes limit
@@ -137,7 +137,11 @@ impl DbHandler {
     }
 
     /// List all blobs using keyset pagination
-    pub async fn list_blobs(&self, limit: i64, cursor: Option<i64>) -> Result<Vec<NonceBlob>, AppError> {
+    pub async fn list_blobs(
+        &self,
+        limit: i64,
+        cursor: Option<i64>,
+    ) -> Result<Vec<NonceBlob>, AppError> {
         let query_str = match cursor {
             Some(_) => {
                 r#"
@@ -218,12 +222,12 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://fake:fake@localhost:5432/fake")
             .expect("Failed to create pool");
-        
+
         let db = DbHandler::new(pool);
-        
+
         let huge_blob = "a".repeat(MAX_BLOB_SIZE + 1);
         let result = db.create_blob(&huge_blob).await;
-        
+
         assert!(result.is_err());
         if let Err(AppError::BlobTooLarge { .. }) = result {
             // expected
@@ -234,23 +238,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_blob_valid_size() {
-         // Use a lazy connection so we don't need a real DB for validation logic
-         // This test will fail at the DB step, but it confirms validation passed
+        // Use a lazy connection so we don't need a real DB for validation logic
+        // This test will fail at the DB step, but it confirms validation passed
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://fake:fake@localhost:5432/fake")
             .expect("Failed to create pool");
-        
+
         let db = DbHandler::new(pool);
-        
+
         let valid_blob = "a".repeat(MAX_BLOB_SIZE);
         let result = db.create_blob(&valid_blob).await;
-        
+
         // Should be Err because DB connection fails, not "Blob too large"
         assert!(result.is_err());
         match result {
             Err(AppError::Database(_)) => {
                 // Expected, since DB is fake
-            },
+            }
             Err(e) => panic!("Expected Database error, got: {:?}", e),
             Ok(_) => panic!("Expected error"),
         }

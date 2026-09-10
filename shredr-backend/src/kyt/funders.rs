@@ -1,25 +1,12 @@
 //! Who funded a burner, read from the chain.
 //!
-//! The address worth screening is the source of the funds, not whoever is
-//! driving the UI, and not whoever the client claims. A burner is a one-time
-//! address someone sends SOL to; that sender is the only party whose provenance
-//! means anything, and nothing requires it to be the wallet holding the browser
-//! session.
+//! Resolved here rather than taken from the request: the client asking to be
+//! screened is the party with a reason to name a cleaner address than the one
+//! that actually paid. The request carries only the burner, whose funding
+//! history is chain record.
 //!
-//! ## Why this is server-side
-//!
-//! Because the client asking to be screened is exactly the party with a reason
-//! to lie about it. If the funder arrived in the request body, a modified client
-//! would name a clean address, get an attestation for it, and deposit from
-//! anywhere. Resolving here means the request carries only the burner — a public
-//! address whose funding history is a matter of chain record — and the answer is
-//! whatever the chain says, then signed over.
-//!
-//! ## What this can see
-//!
-//! One hop. If funds move exchange → personal wallet → burner, the personal
-//! wallet is what surfaces here. The screening providers do their own upstream
-//! tracing on whatever address they are given, which is what covers the rest.
+//! Sees one hop — funds moving exchange to personal wallet to burner surface the
+//! personal wallet, and the screening provider traces upstream from there.
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -59,11 +46,9 @@ struct RpcError {
 impl FunderResolver {
     /// `None` when `KYT_RPC_URL` is unset, which the caller turns into a 503.
     ///
-    /// This is deliberately its own URL rather than the Helius client built in
-    /// `main.rs`: that one is pinned to mainnet-beta, and resolving a devnet
-    /// deposit against mainnet finds nothing at all — which would read as "no
-    /// funder" and refuse every deposit on the wrong cluster. It has to point at
-    /// the cluster the deposits actually land on.
+    /// Its own URL rather than the Helius client in `main.rs`, which is pinned to
+    /// mainnet-beta: resolving a devnet deposit against mainnet finds no funding
+    /// transfer and would refuse every deposit on the wrong cluster.
     pub fn from_env() -> Option<Self> {
         let rpc_url = std::env::var("KYT_RPC_URL")
             .ok()
@@ -107,9 +92,8 @@ impl FunderResolver {
             ));
         }
 
-        // Summed per source, so a funder that paid across several transfers is
-        // one funder with a total rather than several small ones — which matters,
-        // because the largest is the one bound into the attestation.
+        // Summed per source: the largest funder is the one bound into the
+        // attestation, so several small transfers must not outrank one big one.
         let mut contributed: HashMap<String, u128> = HashMap::new();
         for signature in signatures {
             let Some(transaction) = self.transaction(&signature).await? else {
@@ -125,8 +109,7 @@ impl FunderResolver {
         }
 
         let mut funders: Vec<(String, u128)> = contributed.into_iter().collect();
-        // Ties broken by address so the bound funder is deterministic: the same
-        // burner must not screen one address on retry and a different one now.
+        // Ties broken by address, so a retry binds the same funder.
         funders.sort_by(|(a_addr, a_sum), (b_addr, b_sum)| {
             b_sum.cmp(a_sum).then_with(|| a_addr.cmp(b_addr))
         });
