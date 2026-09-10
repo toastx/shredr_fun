@@ -7,9 +7,9 @@
 //! money" — which is why this is a separate key and a separate service from
 //! Kora, even though both are "the relayer" in casual conversation.
 //!
-//! The verdict comes from the Solana Developer Platform's address-screening API
-//! — see `screening.rs`, which holds the provider call and the policy that
-//! reduces its per-provider rows to the one bit signed here. This file owns
+//! The verdict comes from GoPlus's address-screening API — see `goplus.rs`,
+//! which holds the provider call and the policy that reduces its flags to the
+//! one bit signed here. This file owns
 //! everything downstream of that bit: the message layout, the binding, the
 //! signing, the expiry — the part the on-chain program parses byte by byte.
 //!
@@ -20,7 +20,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 
 use super::funders::FunderResolver;
-use super::screening::ScreeningClient;
+use super::goplus::GoPlusClient;
 use crate::error::AppError;
 
 // ── Attestation message layout, mirrored from `shredr-program/src/kyt.rs` ──
@@ -57,10 +57,12 @@ pub struct KytState {
     /// Base58 pubkeys refused ahead of the provider, so an operator can hard-block
     /// an address without waiting on a vendor to agree.
     denylist: Vec<String>,
-    /// `None` when `SDP_API_KEY` is unset. Every request then reports unavailable
-    /// rather than allowing — an unscreened deposit must not be able to produce
+    /// `None` only when the HTTP client could not be built. GoPlus needs no
+    /// credentials, so screening cannot be switched off by leaving a variable
+    /// unset — and a request that cannot be screened reports unavailable rather
+    /// than allowing, because an unscreened deposit must not be able to produce
     /// an attestation that looks exactly like a screened one.
-    screening: Option<ScreeningClient>,
+    screening: Option<GoPlusClient>,
     /// `None` when `KYT_RPC_URL` is unset. Without it there is no way to learn
     /// who funded a burner, and taking the client's word for it is exactly what
     /// this exists to avoid — so every request reports unavailable.
@@ -90,10 +92,10 @@ impl KytState {
             None => tracing::warn!("KYT_AUTHORITY_KEY unset — screening will refuse every request"),
         }
 
-        let screening = ScreeningClient::from_env();
+        let screening = GoPlusClient::from_env();
         if screening.is_none() {
             tracing::warn!(
-                "SDP_API_KEY unset — screening will report unavailable for every request"
+                "the GoPlus client could not be built — screening will report unavailable for every request"
             );
         }
 
