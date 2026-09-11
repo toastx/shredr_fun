@@ -83,6 +83,11 @@ pub const NULLIFIER_RECORD_DISCRIMINATOR: [u8; 8] = *b"SHREDRNL";
 /// Bytes a nullifier record occupies. Just the discriminator.
 pub const NULLIFIER_RECORD_LEN: usize = 8;
 
+/// Written to a burner's marker PDA. Its existence is the whole record.
+pub const BURNER_MARKER_DISCRIMINATOR: [u8; 8] = *b"SHREDRBM";
+
+pub const BURNER_MARKER_LEN: usize = 8;
+
 /// Roots a spender may prove against.
 ///
 /// A path is computed against the tree as it stood when the client built it, and

@@ -18,9 +18,13 @@
 
 use crate::constants::{seeds, tee_validator, PROGRAM_ADDRESS};
 use crate::errors::ShredrError;
-use crate::helpers::{get_stealth_mut, verify_stealth_pda, write_stealth_discriminator};
+use crate::helpers::{
+    get_stealth_mut, verify_burner_marker, verify_stealth_pda, write_discriminator,
+    write_stealth_discriminator,
+};
+use crate::instructions::pool::create_pda;
 use crate::kyt::verify_deposit_attestation;
-use crate::state::{role, STEALTH_ACCOUNT_SIZE};
+use crate::state::{role, BURNER_MARKER_DISCRIMINATOR, BURNER_MARKER_LEN, STEALTH_ACCOUNT_SIZE};
 
 use crate::Address;
 use crate::{ProgramError, ProgramResult};
@@ -51,6 +55,8 @@ pub struct InitializeAndDelegate<'a> {
     pub system_program: &'a AccountView,
     /// Instructions sysvar, read to find the relayer's KYT attestation.
     pub instructions_sysvar: &'a AccountView,
+    /// Single-use marker for this burner. Outlives the stealth PDA.
+    pub burner_marker: &'a AccountView,
     pub deposit_amount: u64,
     pub role: u8,
     /// Opaque bytes stored verbatim. `None` from a client that predates the
@@ -71,6 +77,7 @@ impl<'a> InitializeAndDelegate<'a> {
             delegation_metadata,
             system_program,
             instructions_sysvar,
+            burner_marker,
             deposit_amount,
             role,
             receipt_commitment,
@@ -122,6 +129,30 @@ impl<'a> InitializeAndDelegate<'a> {
             }
         }
 
+        // Burners are single use. The marker outlives `CloseStealthAccount`, so a
+        // finished cycle cannot be re-derived. A live PDA means this is a top-up
+        // of the same cycle, which is not reuse.
+        let marker_bump = verify_burner_marker(burner_marker, &burner_key)?;
+        if burner_marker.data_len() > 0 {
+            if is_new {
+                return Err(ShredrError::BurnerAlreadyUsed.into());
+            }
+        } else {
+            let marker_bump_slice = [marker_bump];
+            let marker_seeds = [
+                Seed::from(seeds::BURNER_MARKER),
+                Seed::from(burner_key.as_ref()),
+                Seed::from(&marker_bump_slice),
+            ];
+            create_pda(
+                relayer,
+                burner_marker,
+                &marker_seeds,
+                BURNER_MARKER_LEN as u64,
+            )?;
+            write_discriminator(burner_marker, &BURNER_MARKER_DISCRIMINATOR, 0)?;
+        }
+
         // ── Step 1: Create the PDA account (relayer pays rent) ──
         let account_space = (8 + STEALTH_ACCOUNT_SIZE) as u64;
 
@@ -142,8 +173,8 @@ impl<'a> InitializeAndDelegate<'a> {
         let mut prefunded_credit: u64 = 0;
 
         if is_new {
-            let rent = Rent::get()
-                .map_err(|_| -> ProgramError { ShredrError::RentUnavailable.into() })?;
+            let rent =
+                Rent::get().map_err(|_| -> ProgramError { ShredrError::RentUnavailable.into() })?;
             let rent_lamports = rent.try_minimum_balance(account_space as usize)?;
             let existing_lamports = stealth_account.lamports();
             prefunded_credit = existing_lamports.saturating_sub(rent_lamports);
@@ -304,6 +335,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
         let delegation_metadata = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let system_program = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let instructions_sysvar = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let burner_marker = iter.next().ok_or(ProgramError::NotEnoughAccountKeys)?;
 
         if !relayer.is_signer() {
             return Err(ShredrError::MissingSigner.into());
@@ -369,6 +401,7 @@ impl<'a> TryFrom<(&'a [AccountView], &'a [u8])> for InitializeAndDelegate<'a> {
             delegation_metadata,
             system_program,
             instructions_sysvar,
+            burner_marker,
             deposit_amount,
             role,
             receipt_commitment,

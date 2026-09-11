@@ -7,8 +7,7 @@ use crate::constants::PROGRAM_ADDRESS;
 use crate::errors::ShredrError;
 use crate::state::{
     PoolLedger, PoolVault, StealthAccount, POOL_LEDGER_DISCRIMINATOR, POOL_LEDGER_SIZE,
-    POOL_VAULT_DISCRIMINATOR, POOL_VAULT_SIZE, STEALTH_ACCOUNT_DISCRIMINATOR,
-    STEALTH_ACCOUNT_SIZE,
+    POOL_VAULT_DISCRIMINATOR, POOL_VAULT_SIZE, STEALTH_ACCOUNT_DISCRIMINATOR, STEALTH_ACCOUNT_SIZE,
 };
 use pinocchio::error::ProgramError;
 use pinocchio::AccountView;
@@ -106,6 +105,21 @@ pub fn verify_stealth_pda(
 ///
 /// Keyed by the amount alone, so there is exactly one canonical pool per
 /// denomination and a client can find it without a registry.
+/// Derive a burner's single-use marker PDA.
+pub fn derive_burner_marker(burner: &Address) -> Result<(Address, u8), ProgramError> {
+    Address::derive_program_address(&[seeds::BURNER_MARKER, burner.as_ref()], &PROGRAM_ADDRESS)
+        .ok_or(ProgramError::InvalidAccountData)
+}
+
+/// Check `account` is the marker PDA for `burner`, returning its bump.
+pub fn verify_burner_marker(account: &AccountView, burner: &Address) -> Result<u8, ProgramError> {
+    let (expected, bump) = derive_burner_marker(burner)?;
+    if account.address() != &expected {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    Ok(bump)
+}
+
 pub fn derive_pool_vault(denomination: u64) -> Result<(Address, u8), ProgramError> {
     Address::derive_program_address(
         &[seeds::POOL_VAULT, &denomination.to_le_bytes()],

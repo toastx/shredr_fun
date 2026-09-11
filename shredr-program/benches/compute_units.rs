@@ -127,7 +127,13 @@ fn system_account(lamports: u64) -> Account {
 
 /// Serialize the `[discriminator][StealthAccount]` image, mirroring the offsets
 /// asserted by `stealth_account_layout_is_stable` in `tests/test.rs`.
-fn stealth_bytes(owner: &Pubkey, receipt_commitment: [u8; 32], bump: u8, deposited: u64, role: u8) -> Vec<u8> {
+fn stealth_bytes(
+    owner: &Pubkey,
+    receipt_commitment: [u8; 32],
+    bump: u8,
+    deposited: u64,
+    role: u8,
+) -> Vec<u8> {
     let mut data = vec![0u8; ACCOUNT_LEN];
     data[0..8].copy_from_slice(&STEALTH_ACCOUNT_DISCRIMINATOR);
     data[8..40].copy_from_slice(owner.as_ref());

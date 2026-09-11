@@ -197,7 +197,8 @@ impl StealthState {
         let mut data = vec![0u8; ACCOUNT_LEN];
         data[0..8].copy_from_slice(&STEALTH_ACCOUNT_DISCRIMINATOR);
         data[OFF_OWNER..OFF_OWNER + 32].copy_from_slice(self.owner.as_ref());
-        data[OFF_RECEIPT_COMMITMENT..OFF_RECEIPT_COMMITMENT + 32].copy_from_slice(&self.receipt_commitment);
+        data[OFF_RECEIPT_COMMITMENT..OFF_RECEIPT_COMMITMENT + 32]
+            .copy_from_slice(&self.receipt_commitment);
         data[OFF_DEPOSITED_AMOUNT..OFF_DEPOSITED_AMOUNT + 8]
             .copy_from_slice(&self.deposited_amount.to_le_bytes());
         data[OFF_DEPOSIT_TIMESTAMP..OFF_DEPOSIT_TIMESTAMP + 8]
@@ -238,7 +239,12 @@ struct Stealth {
 
 /// Build a funded, undelegated stealth account holding `deposited` lamports of
 /// user funds on top of the rent-exempt minimum.
-fn funded_stealth(mollusk: &Mollusk, burner: &Pubkey, receipt_commitment: [u8; 32], deposited: u64) -> Stealth {
+fn funded_stealth(
+    mollusk: &Mollusk,
+    burner: &Pubkey,
+    receipt_commitment: [u8; 32],
+    deposited: u64,
+) -> Stealth {
     let (key, bump) = derive_stealth_pda(burner);
     let state = StealthState::new(*burner, receipt_commitment, bump).deposited(deposited);
     let account = state.to_account(stealth_rent(mollusk) + deposited);
@@ -330,7 +336,10 @@ fn stealth_account_layout_is_stable() {
     let offset_of = |field: usize| field - base + 8; // +8 for the discriminator
 
     assert_eq!(offset_of(&state.owner as *const _ as usize), OFF_OWNER);
-    assert_eq!(offset_of(&state.receipt_commitment as *const _ as usize), OFF_RECEIPT_COMMITMENT);
+    assert_eq!(
+        offset_of(&state.receipt_commitment as *const _ as usize),
+        OFF_RECEIPT_COMMITMENT
+    );
     assert_eq!(
         offset_of(&state.deposited_amount as *const _ as usize),
         OFF_DEPOSITED_AMOUNT
@@ -1350,9 +1359,7 @@ fn ed25519_ix_data(authority: &[u8; 32], message: &[u8], layout: Ed25519Layout) 
         pubkey_offset,
         layout.pubkey_ix_index,
         message_offset,
-        layout
-            .declared_message_size
-            .unwrap_or(message.len() as u16),
+        layout.declared_message_size.unwrap_or(message.len() as u16),
         layout.message_ix_index,
     ] {
         data.extend_from_slice(&field.to_le_bytes());
@@ -1404,6 +1411,10 @@ fn init_setup(stealth_override: Option<Pubkey>, stealth_lamports: u64) -> InitAc
 
 /// `init_setup`, but the caller decides what the instructions sysvar holds —
 /// that is the only lever the KYT gate reads.
+fn derive_burner_marker(burner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[seeds::BURNER_MARKER, burner.as_ref()], &program_id()).0
+}
+
 fn init_setup_with_attestation(
     stealth_override: Option<Pubkey>,
     stealth_lamports: u64,
@@ -1423,6 +1434,7 @@ fn init_setup_with_attestation(
         mollusk_svm::program::keyed_account_for_system_program();
     let (instructions_sysvar_key, instructions_sysvar_acct) =
         instructions_sysvar_account(&attestation(&burner));
+    let burner_marker = derive_burner_marker(&burner);
 
     let metas = vec![
         AccountMeta::new(relayer, true),
@@ -1435,6 +1447,7 @@ fn init_setup_with_attestation(
         AccountMeta::new(delegation_metadata, false),
         AccountMeta::new_readonly(system_program_key, false),
         AccountMeta::new_readonly(instructions_sysvar_key, false),
+        AccountMeta::new(burner_marker, false),
     ];
 
     let accounts = vec![
@@ -1457,6 +1470,7 @@ fn init_setup_with_attestation(
         (delegation_metadata, system_account(0)),
         (system_program_key, system_program_account),
         (instructions_sysvar_key, instructions_sysvar_acct),
+        (burner_marker, system_account(0)),
     ];
 
     InitAccounts {
@@ -1628,8 +1642,7 @@ fn initialize_ignores_a_non_ed25519_instruction_in_the_sysvar() {
     // Same bytes, wrong program: the precompile never ran, so nothing verified
     // this signature and the scan must skip it rather than read it.
     let setup = init_setup_with_attestation(None, 0, |burner| {
-        let message =
-            attestation_message(1, &Pubkey::new_unique(), burner, u64::MAX, far_future());
+        let message = attestation_message(1, &Pubkey::new_unique(), burner, u64::MAX, far_future());
         vec![Instruction::new_with_bytes(
             Pubkey::new_unique(),
             &ed25519_ix_data(&kyt_authority(), &message, Ed25519Layout::default()),
@@ -1766,9 +1779,8 @@ fn fixture_elf(file_name: &str) -> Vec<u8> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures")
         .join(file_name);
-    std::fs::read(&path).unwrap_or_else(|_| {
-        panic!("{path:?} missing. Run `scripts/dump-magicblock-programs.sh`.")
-    })
+    std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("{path:?} missing. Run `scripts/dump-magicblock-programs.sh`."))
 }
 
 /// `init_setup` with the real delegation PDAs and both CPI callees appended, so
@@ -1885,6 +1897,57 @@ fn init_setup_reused(
         .delegated(delegated);
     setup.accounts[3].1 = state.to_account(stealth_rent(mollusk) + deposited);
     setup
+}
+
+/// A burner whose marker already exists, written as `CloseStealthAccount` would
+/// leave it: the PDA is gone, the marker is not.
+fn mark_burner_used(setup: &mut InitAccounts) {
+    let marker = setup
+        .accounts
+        .last_mut()
+        .expect("marker is the last account");
+    marker.1 = Account {
+        lamports: LAMPORTS_PER_SOL / 100,
+        data: b"SHREDRBM".to_vec(),
+        owner: program_id(),
+        executable: false,
+        rent_epoch: 0,
+    };
+}
+
+/// The marker outlives the stealth PDA, so closing a cycle and deriving the same
+/// burner again is refused rather than silently starting a second cycle.
+#[test]
+fn initialize_refuses_a_burner_whose_marker_survives_its_closed_pda() {
+    let mollusk = mollusk();
+    let mut setup = init_setup(None, 0);
+    mark_burner_used(&mut setup);
+
+    mollusk.process_and_validate_instruction(
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
+        &setup.accounts,
+        &[Check::err(shredr_err(ShredrError::BurnerAlreadyUsed))],
+    );
+}
+
+/// A marker beside a *live* PDA is the same cycle continuing, not reuse, so a
+/// top-up still goes through. Reaching the unresolvable ACL CPI proves it did.
+#[test]
+fn initialize_allows_a_top_up_while_the_pda_is_still_live() {
+    let mollusk = mollusk();
+    let mut setup = init_setup_reused(&mollusk, None, 0, false);
+    mark_burner_used(&mut setup);
+
+    let result = mollusk.process_instruction(
+        &Instruction::new_with_bytes(program_id(), &init_ix_data(0), setup.metas.clone()),
+        &setup.accounts,
+    );
+
+    assert!(
+        !matches!(result.raw_result, Err(InstructionError::Custom(6038))),
+        "a live PDA means a top-up, not reuse, got {:?}",
+        result.raw_result,
+    );
 }
 
 /// A stealth PDA outlives its first cycle, so a second `InitializeAndDelegate`
@@ -2215,7 +2278,13 @@ fn shredr_code(error: ShredrError) -> ProgramError {
 /// A well-formed blob and the message inside it, for the authority given.
 fn attestation_fixture(burner: &Pubkey) -> ([u8; 32], Vec<u8>, Vec<u8>) {
     let authority = Pubkey::new_unique().to_bytes();
-    let message = attestation_message(1, &Pubkey::new_unique(), burner, LAMPORTS_PER_SOL, far_future());
+    let message = attestation_message(
+        1,
+        &Pubkey::new_unique(),
+        burner,
+        LAMPORTS_PER_SOL,
+        far_future(),
+    );
     let blob = ed25519_ix_data(&authority, &message, Ed25519Layout::default());
     (authority, message, blob)
 }
@@ -2247,8 +2316,13 @@ fn attested_message_rejects_offsets_into_another_instruction() {
     // forgery with extra steps.
     let burner = Pubkey::new_unique();
     let authority = Pubkey::new_unique().to_bytes();
-    let message =
-        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+    let message = attestation_message(
+        1,
+        &Pubkey::new_unique(),
+        &burner,
+        LAMPORTS_PER_SOL,
+        far_future(),
+    );
 
     for layout in [
         Ed25519Layout {
@@ -2278,8 +2352,13 @@ fn attested_message_rejects_extra_signatures() {
     // signatures nobody looked at.
     let burner = Pubkey::new_unique();
     let authority = Pubkey::new_unique().to_bytes();
-    let message =
-        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+    let message = attestation_message(
+        1,
+        &Pubkey::new_unique(),
+        &burner,
+        LAMPORTS_PER_SOL,
+        far_future(),
+    );
     let blob = ed25519_ix_data(
         &authority,
         &message,
@@ -2299,8 +2378,13 @@ fn attested_message_rejects_extra_signatures() {
 fn attested_message_rejects_offsets_past_the_end() {
     let burner = Pubkey::new_unique();
     let authority = Pubkey::new_unique().to_bytes();
-    let message =
-        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+    let message = attestation_message(
+        1,
+        &Pubkey::new_unique(),
+        &burner,
+        LAMPORTS_PER_SOL,
+        far_future(),
+    );
 
     // Declares a 90-byte message but carries none of it.
     let mut truncated = ed25519_ix_data(&authority, &message, Ed25519Layout::default());
@@ -2333,8 +2417,13 @@ fn attested_message_rejects_offsets_past_the_end() {
 #[test]
 fn check_attestation_clears_a_matching_deposit() {
     let burner = Pubkey::new_unique();
-    let message =
-        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+    let message = attestation_message(
+        1,
+        &Pubkey::new_unique(),
+        &burner,
+        LAMPORTS_PER_SOL,
+        far_future(),
+    );
 
     assert_eq!(
         check_attestation(&message, &burner.to_bytes(), None, LAMPORTS_PER_SOL, 0),
@@ -2346,8 +2435,7 @@ fn check_attestation_clears_a_matching_deposit() {
 fn check_attestation_enforces_the_binding_and_the_ceiling() {
     let burner = Pubkey::new_unique();
     let expiry = 1_800_000_000;
-    let message =
-        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, expiry);
+    let message = attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, expiry);
 
     assert_eq!(
         check_attestation(&message, &Pubkey::new_unique().to_bytes(), None, 1, 0),
@@ -2362,14 +2450,22 @@ fn check_attestation_enforces_the_binding_and_the_ceiling() {
         Err(shredr_code(ShredrError::KytAttestationExpired))
     );
     // Inclusive: an attestation is good through its expiry second.
-    assert_eq!(check_attestation(&message, &burner.to_bytes(), None, 1, expiry), Ok(()));
+    assert_eq!(
+        check_attestation(&message, &burner.to_bytes(), None, 1, expiry),
+        Ok(())
+    );
 }
 
 #[test]
 fn check_attestation_refuses_a_screened_out_depositor() {
     let burner = Pubkey::new_unique();
-    let message =
-        attestation_message(0, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+    let message = attestation_message(
+        0,
+        &Pubkey::new_unique(),
+        &burner,
+        LAMPORTS_PER_SOL,
+        far_future(),
+    );
 
     assert_eq!(
         check_attestation(&message, &burner.to_bytes(), None, 1, 0),
@@ -2380,8 +2476,13 @@ fn check_attestation_refuses_a_screened_out_depositor() {
 #[test]
 fn check_attestation_rejects_a_foreign_envelope() {
     let burner = Pubkey::new_unique();
-    let good =
-        attestation_message(1, &Pubkey::new_unique(), &burner, LAMPORTS_PER_SOL, far_future());
+    let good = attestation_message(
+        1,
+        &Pubkey::new_unique(),
+        &burner,
+        LAMPORTS_PER_SOL,
+        far_future(),
+    );
 
     // Magic: the authority signs other things, and none of them are deposits.
     let mut wrong_magic = good.clone();
@@ -2459,25 +2560,55 @@ fn pool_layout_is_stable() {
     let base = vault.as_ref() as *const _ as usize;
     let at = |field: *const u8| field as usize - base + 8;
 
-    assert_eq!(at(&vault.denomination as *const _ as *const u8), V_DENOMINATION);
-    assert_eq!(at(&vault.total_deposited as *const _ as *const u8), V_TOTAL_DEPOSITED);
-    assert_eq!(at(&vault.total_settled as *const _ as *const u8), V_TOTAL_SETTLED);
+    assert_eq!(
+        at(&vault.denomination as *const _ as *const u8),
+        V_DENOMINATION
+    );
+    assert_eq!(
+        at(&vault.total_deposited as *const _ as *const u8),
+        V_TOTAL_DEPOSITED
+    );
+    assert_eq!(
+        at(&vault.total_settled as *const _ as *const u8),
+        V_TOTAL_SETTLED
+    );
     assert_eq!(at(&vault.epoch as *const _ as *const u8), V_EPOCH);
-    assert_eq!(at(&vault.last_epoch_at as *const _ as *const u8), V_LAST_EPOCH_AT);
-    assert_eq!(at(&vault.next_leaf_index as *const _ as *const u8), V_NEXT_LEAF_INDEX);
+    assert_eq!(
+        at(&vault.last_epoch_at as *const _ as *const u8),
+        V_LAST_EPOCH_AT
+    );
+    assert_eq!(
+        at(&vault.next_leaf_index as *const _ as *const u8),
+        V_NEXT_LEAF_INDEX
+    );
     assert_eq!(at(&vault.bump as *const _ as *const u8), V_BUMP);
     assert_eq!(at(&vault.root as *const _ as *const u8), V_ROOT);
-    assert_eq!(at(&vault.filled_subtrees as *const _ as *const u8), V_FILLED_SUBTREES);
+    assert_eq!(
+        at(&vault.filled_subtrees as *const _ as *const u8),
+        V_FILLED_SUBTREES
+    );
 
     let ledger: Box<PoolLedger> = Box::new(unsafe { core::mem::zeroed() });
     let base = ledger.as_ref() as *const _ as usize;
     let at = |field: *const u8| field as usize - base + 8;
 
-    assert_eq!(at(&ledger.denomination as *const _ as *const u8), L_DENOMINATION);
+    assert_eq!(
+        at(&ledger.denomination as *const _ as *const u8),
+        L_DENOMINATION
+    );
     assert_eq!(at(&ledger.epoch as *const _ as *const u8), L_EPOCH);
-    assert_eq!(at(&ledger.root_count as *const _ as *const u8), L_ROOT_COUNT);
-    assert_eq!(at(&ledger.root_cursor as *const _ as *const u8), L_ROOT_CURSOR);
-    assert_eq!(at(&ledger.payout_count as *const _ as *const u8), L_PAYOUT_COUNT);
+    assert_eq!(
+        at(&ledger.root_count as *const _ as *const u8),
+        L_ROOT_COUNT
+    );
+    assert_eq!(
+        at(&ledger.root_cursor as *const _ as *const u8),
+        L_ROOT_CURSOR
+    );
+    assert_eq!(
+        at(&ledger.payout_count as *const _ as *const u8),
+        L_PAYOUT_COUNT
+    );
     assert_eq!(at(&ledger.bump as *const _ as *const u8), L_BUMP);
     assert_eq!(at(&ledger.delegated as *const _ as *const u8), L_DELEGATED);
     assert_eq!(at(&ledger.roots as *const _ as *const u8), L_ROOTS);
@@ -2876,7 +3007,14 @@ fn pool_spend_queues_a_payout_for_a_proven_note() {
     let (setup, tree) = spendable_pool(&[secret, [2u8; 32], [3u8; 32]]);
 
     let result = mollusk.process_and_validate_instruction(
-        &spend_instruction(&setup, &secret, &destination, &tree.root(), 0, &tree.path(0)),
+        &spend_instruction(
+            &setup,
+            &secret,
+            &destination,
+            &tree.root(),
+            0,
+            &tree.path(0),
+        ),
         &[(setup.ledger, setup.ledger_account.clone())],
         &[Check::success()],
     );
@@ -2953,8 +3091,7 @@ fn pool_spend_refuses_a_second_spend_in_the_same_epoch() {
 
     // Already queued this epoch. Across epochs the record PDA catches it
     // instead; within one, the queue is the spent set.
-    setup.ledger_account.data[L_PAYOUTS..L_PAYOUTS + 32]
-        .copy_from_slice(&note::nullifier(&secret));
+    setup.ledger_account.data[L_PAYOUTS..L_PAYOUTS + 32].copy_from_slice(&note::nullifier(&secret));
     set_u32(&mut setup.ledger_account.data, L_PAYOUT_COUNT, 1);
 
     mollusk.process_and_validate_instruction(
@@ -3092,7 +3229,10 @@ fn advance_epoch_pays_the_queue_and_publishes_the_root() {
     let (record, _) = nullifier_record_pda(&note::nullifier(&secret));
 
     assert_eq!(
-        result.get_account(&destination).expect("destination").lamports,
+        result
+            .get_account(&destination)
+            .expect("destination")
+            .lamports,
         DENOM,
         "the destination is paid exactly one denomination"
     );
@@ -3143,7 +3283,10 @@ fn advance_epoch_drops_a_note_already_spent_in_an_earlier_epoch() {
         mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
 
     assert_eq!(
-        result.get_account(&destination).expect("destination").lamports,
+        result
+            .get_account(&destination)
+            .expect("destination")
+            .lamports,
         0,
         "a note is paid once"
     );
@@ -3188,7 +3331,10 @@ fn advance_epoch_pays_a_note_whose_record_address_was_griefed() {
         mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
 
     assert_eq!(
-        result.get_account(&destination).expect("destination").lamports,
+        result
+            .get_account(&destination)
+            .expect("destination")
+            .lamports,
         DENOM,
         "a donated lamport must not cancel a withdrawal"
     );
@@ -3225,7 +3371,10 @@ fn advance_epoch_settles_several_payouts_in_one_turn() {
 
     for (destination, secret) in &notes {
         assert_eq!(
-            result.get_account(destination).expect("destination").lamports,
+            result
+                .get_account(destination)
+                .expect("destination")
+                .lamports,
             DENOM,
             "every queued payout in the batch is paid"
         );
@@ -3290,7 +3439,10 @@ fn advance_epoch_survives_a_payout_aimed_at_the_vault() {
         mollusk.process_and_validate_instruction(&instruction, &accounts, &[Check::success()]);
 
     assert_eq!(
-        result.get_account(&good_destination).expect("destination").lamports,
+        result
+            .get_account(&good_destination)
+            .expect("destination")
+            .lamports,
         DENOM,
         "an honest payout behind a poisoned one must still be paid"
     );
@@ -3597,7 +3749,8 @@ fn a_deposited_note_is_spendable_against_the_published_root() {
         &commitment,
         Some(pool_attestation(&depositor, &commitment)),
     );
-    let deposited = mollusk.process_and_validate_instruction(&deposit, &accounts, &[Check::success()]);
+    let deposited =
+        mollusk.process_and_validate_instruction(&deposit, &accounts, &[Check::success()]);
 
     // The root the vault ended up with, published as an epoch turn would.
     let vault = deposited.get_account(&setup.vault).expect("vault");

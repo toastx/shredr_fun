@@ -267,17 +267,15 @@ pub fn verify_deposit_attestation(
             continue;
         }
 
-        match attested_message(instruction.get_instruction_data(), &authority).and_then(
-            |message| {
-                check_attestation(
-                    message,
-                    subject,
-                    expected_depositor,
-                    deposit_amount,
-                    now_unix,
-                )
-            },
-        ) {
+        match attested_message(instruction.get_instruction_data(), &authority).and_then(|message| {
+            check_attestation(
+                message,
+                subject,
+                expected_depositor,
+                deposit_amount,
+                now_unix,
+            )
+        }) {
             Ok(()) => return Ok(()),
             Err(err) => reason = Some(err),
         }
