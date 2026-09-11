@@ -26,6 +26,10 @@ pub mod seeds {
     /// itself, so creating the account *is* the double-spend check and there is
     /// no set to search or to outgrow.
     pub const NULLIFIER: &[u8] = b"shredr_nullifier";
+
+    /// Marks a burner as used. Outlives the stealth PDA it belongs to, which is
+    /// what makes single use enforceable after `CloseStealthAccount`.
+    pub const BURNER_MARKER: &[u8] = b"shredr_burner";
 }
 
 /// Lamport denominations a pool may be created for.
@@ -34,7 +38,9 @@ pub mod seeds {
 /// amount would be a pool of one, and every odd denomination someone creates
 /// splits the anonymity set of the ones that matter. Mirrors
 /// `NORMALIZED_DENOMINATIONS_SOL` in `src/lib/constants.ts`.
-pub const DENOMINATIONS: [u64; 4] = [
+pub const DENOMINATIONS: [u64; 6] = [
+    100_000_000,
+    500_000_000,
     1_000_000_000,
     10_000_000_000,
     100_000_000_000,

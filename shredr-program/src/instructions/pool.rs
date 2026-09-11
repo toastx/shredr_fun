@@ -546,7 +546,9 @@ impl AdvanceEpoch<'_> {
         // into. This is what makes those deposits spendable.
         push_root(ledger_state, &root);
 
-        vault_state.epoch = epoch.checked_add(1).ok_or(ProgramError::ArithmeticOverflow)?;
+        vault_state.epoch = epoch
+            .checked_add(1)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
         vault_state.last_epoch_at = clock.unix_timestamp;
         ledger_state.epoch = vault_state.epoch;
 
@@ -963,7 +965,7 @@ fn push_root(ledger: &mut PoolLedger, root: &[u8; 32]) {
 /// deliberately *not* credited: `total_deposited` backs the notes, and crediting
 /// a stranger's lamports would let them inflate the pool's apparent backing
 /// without a commitment to match.
-fn create_pda(
+pub(crate) fn create_pda(
     payer: &AccountView,
     account: &AccountView,
     seeds: &[Seed],

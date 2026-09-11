@@ -93,6 +93,8 @@ pub enum ShredrError {
     PoolInsufficientBacking = 6033,
     /// The ledger's epoch does not match the vault's.
     PoolEpochMismatch = 6034,
+    /// This burner has already run a cycle. Burners are single use.
+    BurnerAlreadyUsed = 6038,
 }
 
 impl From<ShredrError> for ProgramError {

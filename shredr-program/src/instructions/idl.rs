@@ -54,12 +54,34 @@ pub enum StealthInstruction {
         name = "instructions_sysvar",
         desc = "Instructions sysvar, read to find the relayer's KYT attestation"
     )]
+    #[account(
+        10,
+        writable,
+        name = "burner_marker",
+        desc = "Single-use marker PDA for this burner; outlives the stealth PDA"
+    )]
     InitializeAndDelegate { deposit_amount: u64, role: u8 },
 
     /// Create the vault and ledger for one shielded-pool denomination
-    #[account(0, signer, writable, name = "payer", desc = "Pays rent for both accounts")]
-    #[account(1, writable, name = "vault", desc = "Pool vault PDA, holds the lamports")]
-    #[account(2, writable, name = "ledger", desc = "Pool ledger PDA, holds the note set")]
+    #[account(
+        0,
+        signer,
+        writable,
+        name = "payer",
+        desc = "Pays rent for both accounts"
+    )]
+    #[account(
+        1,
+        writable,
+        name = "vault",
+        desc = "Pool vault PDA, holds the lamports"
+    )]
+    #[account(
+        2,
+        writable,
+        name = "ledger",
+        desc = "Pool ledger PDA, holds the note set"
+    )]
     #[account(3, name = "system_program", desc = "System Program")]
     InitializePool { denomination: u64 },
 
@@ -123,9 +145,24 @@ pub enum StealthInstruction {
         desc = "ACL permission PDA for the ledger; created private, which is what keeps the rollup private"
     )]
     #[account(3, name = "owner_program", desc = "This program's address")]
-    #[account(4, writable, name = "delegation_buffer", desc = "MagicBlock delegation buffer")]
-    #[account(5, writable, name = "delegation_record", desc = "MagicBlock delegation record")]
-    #[account(6, writable, name = "delegation_metadata", desc = "MagicBlock delegation metadata")]
+    #[account(
+        4,
+        writable,
+        name = "delegation_buffer",
+        desc = "MagicBlock delegation buffer"
+    )]
+    #[account(
+        5,
+        writable,
+        name = "delegation_record",
+        desc = "MagicBlock delegation record"
+    )]
+    #[account(
+        6,
+        writable,
+        name = "delegation_metadata",
+        desc = "MagicBlock delegation metadata"
+    )]
     #[account(7, name = "system_program", desc = "System Program")]
     DelegatePoolLedger,
 

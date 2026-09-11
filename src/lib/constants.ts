@@ -284,7 +284,7 @@ export const PERMISSION_PROGRAM_ID = "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQn
 // ============ SHREDR DENOMINATIONS ============
 
 /** Allowed normalized denominations (SOL) for amount-correlation resistance. */
-export const NORMALIZED_DENOMINATIONS_SOL = [1, 10, 100, 1000] as const;
+export const NORMALIZED_DENOMINATIONS_SOL = [0.1, 0.5, 1, 10, 100, 1000] as const;
 export type NormalizedDenomination = (typeof NORMALIZED_DENOMINATIONS_SOL)[number];
 
 /** Default user-preferred denomination (SOL). */
